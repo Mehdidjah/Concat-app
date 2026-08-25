@@ -1097,6 +1097,10 @@ function drawClip(
     }
   }
 
+  if (clip.fadeIn > 0 || clip.fadeOut > 0) {
+    drawFades(context, clip, x, bodyY, drawWidth, bodyHeight, secondsPerPixel);
+  }
+
   context.fillStyle = palette.header;
   context.fillRect(x, y, drawWidth, CLIP_HEADER);
 
@@ -1115,6 +1119,64 @@ function drawClip(
   context.strokeStyle = selected ? COLORS.clipSelected : palette.edge;
   context.lineWidth = selected ? 2 : 1;
   context.stroke();
+}
+
+/**
+ * Draws the fade ramps as wedges over the clip body.
+ *
+ * The shaded area is the part being attenuated and the bright line is the
+ * envelope itself - the same shape every editor draws, because it reads as
+ * "this much is being taken away" at a glance.
+ *
+ * On a video clip the wedge is confined to a band at the bottom. The fade is
+ * an *audio* property, and shading the picture would say it fades to black.
+ */
+function drawFades(
+  context: CanvasRenderingContext2D,
+  clip: Clip,
+  x: number,
+  bodyY: number,
+  width: number,
+  bodyHeight: number,
+  secondsPerPixel: number,
+) {
+  const band = clip.kind === "audio" ? bodyHeight : Math.min(10, bodyHeight);
+  const top = bodyY + bodyHeight - band;
+  const bottom = bodyY + bodyHeight;
+  if (band <= 1) return;
+
+  context.save();
+  context.beginPath();
+  context.rect(x, top, width, band);
+  context.clip();
+
+  const ramp = (seconds: number, fromLeft: boolean) => {
+    const span = Math.min(seconds / secondsPerPixel, width);
+    if (span < 1) return;
+
+    const originX = fromLeft ? x : x + width;
+    const endX = fromLeft ? x + span : x + width - span;
+
+    context.fillStyle = "rgba(0,0,0,0.42)";
+    context.beginPath();
+    context.moveTo(originX, top);
+    context.lineTo(endX, top);
+    context.lineTo(originX, bottom);
+    context.closePath();
+    context.fill();
+
+    context.strokeStyle = "rgba(255,255,255,0.75)";
+    context.lineWidth = 1.5;
+    context.beginPath();
+    context.moveTo(originX, bottom);
+    context.lineTo(endX, top);
+    context.stroke();
+  };
+
+  if (clip.fadeIn > 0) ramp(clip.fadeIn, true);
+  if (clip.fadeOut > 0) ramp(clip.fadeOut, false);
+
+  context.restore();
 }
 
 /**
@@ -1175,6 +1237,10 @@ function drawWaveform(
 ) {
   const centre = y + height / 2;
   const half = height / 2 - 1;
+  // The drawn amplitude follows the clip's gain, so turning a clip up makes
+  // its waveform visibly taller. Clamped, because a boosted waveform that
+  // overflowed its clip would bleed into the lane above.
+  const gain = Math.max(0, clip.volume);
   const perPixel = Math.max(1, Math.round(secondsPerPixel * peaks.bucketsPerSecond));
   const stride = Math.max(1, Math.floor(perPixel / 8));
 
@@ -1193,8 +1259,9 @@ function drawWaveform(
       if (peaks.max[bucket] > high) high = peaks.max[bucket];
     }
 
-    const top = centre - high * half;
-    context.rect(x + column, top, 1, Math.max(1, centre - low * half - top));
+    const top = centre - Math.min(1, high * gain) * half;
+    const bottom = centre - Math.max(-1, low * gain) * half;
+    context.rect(x + column, top, 1, Math.max(1, bottom - top));
   }
 
   context.fill();

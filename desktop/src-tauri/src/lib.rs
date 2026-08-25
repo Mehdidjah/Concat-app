@@ -169,7 +169,7 @@ fn filmstrip(path: &str, count: u32, height: u32) -> Result<Vec<u8>, String> {
         .filter(|seconds| *seconds > 0.0)
         .ok_or_else(|| format!("{path} reports no duration"))?;
 
-    let output = std::process::Command::new("ffmpeg")
+    let output = std::process::Command::new(relay_media::ffmpeg())
         .args(["-hide_banner", "-nostdin", "-loglevel", "error"])
         .args(["-i", path])
         .args([
@@ -285,9 +285,33 @@ fn describe(error: relay_media::Error) -> String {
     message
 }
 
+/// Points the engine at the bundled FFmpeg, if there is one.
+///
+/// Tauri drops sidecar binaries next to the app executable with the target
+/// triple stripped, so this looks for them there and silently leaves the
+/// engine on its `PATH` default otherwise. That fallback is what keeps
+/// `cargo run` working without copying binaries into the build directory.
+///
+/// Both must be present to switch: a bundled decoder paired with whatever
+/// `ffprobe` happens to be on PATH is a version mismatch waiting to happen.
+fn use_bundled_ffmpeg() {
+    let Ok(executable) = std::env::current_exe() else { return };
+    let Some(directory) = executable.parent() else { return };
+
+    let suffix = if cfg!(windows) { ".exe" } else { "" };
+    let ffmpeg = directory.join(format!("ffmpeg{suffix}"));
+    let ffprobe = directory.join(format!("ffprobe{suffix}"));
+
+    if ffmpeg.is_file() && ffprobe.is_file() {
+        relay_media::set_binaries(ffmpeg, ffprobe);
+    }
+}
+
 /// Builds and runs the editor window.
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    use_bundled_ffmpeg();
+
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())

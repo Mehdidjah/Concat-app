@@ -1,27 +1,27 @@
 /**
  * Audio preview.
  *
- * This is what makes an mp3 on the timeline actually audible. It is a
- * *preview* path, not the engine's mixer: one `HTMLAudioElement` per audio
- * clip, kept roughly in step with the transport clock.
+ * Each audible clip gets a media element for decoding, routed through a Web
+ * Audio `GainNode` for level. The gain node is the whole reason this is not
+ * just `element.volume`: that property is hard-capped at 1.0 by every browser,
+ * so a boost could not be previewed at all - it could only be promised and
+ * applied later at export, which is a useless thing to tell someone mixing.
+ * A `GainNode` has no ceiling, so what you hear is what gets rendered.
  *
- * Why the webview and not Rust: real-time audio needs a callback-driven output
- * device (cpal), a resampler, and a mixer that can survive the UI thread
- * stalling. That is a genuine piece of engineering and it belongs in the
- * engine. Until it exists, the webview already has a decoder and an output
- * device, and using them is the difference between hearing your edit and not.
+ * Audio is loaded as a blob rather than through the asset protocol, and that
+ * is deliberate too. `createMediaElementSource` on a cross-origin element
+ * yields *silence* with no error - the element plays, the graph outputs
+ * nothing. A blob URL is same-origin, so the graph is guaranteed to work. The
+ * cost is holding the file in memory, which we already do for the waveform.
  *
- * The known limits, so nobody mistakes this for the finished thing:
- *   - Sync is corrective, not sample-accurate. Drift beyond a tolerance is
- *     fixed by reseeking, which is audible if it happens often.
- *   - No mixing. Overlapping clips play simultaneously and clip if loud.
- *   - No effects, no fades, no per-clip gain automation.
- *   - Scrubbing does not scrub audio, it repositions it.
+ * The known limits, so nobody mistakes this for a finished mixer:
+ *   - Sync is corrective, not sample-accurate. Drift past a tolerance is
+ *     fixed by reseeking, which is audible when it happens.
+ *   - No effects and no automation beyond the clip's constant gain and fades.
+ *   - Scrubbing repositions audio, it does not scrub it.
  *
  * See docs/decisions/0004-audio-preview-in-the-webview.md.
  */
-
-import { convertFileSrc } from "@tauri-apps/api/core";
 
 import { readMediaBytes } from "./engine";
 
@@ -31,6 +31,7 @@ export interface Voice {
   path: string;
   /** Where in the source file the playhead currently sits, in seconds. */
   time: number;
+  /** Linear gain, fades already applied. May exceed 1. */
   volume: number;
 }
 
@@ -39,18 +40,55 @@ export interface Voice {
  *
  * Generous while playing: a reseek is an audible click, and browsers do not
  * keep a media element perfectly locked to an external clock anyway. Tight
- * while paused, where "seek" is the entire operation and there is no click to
- * worry about.
+ * while paused, where "seek" is the entire operation.
  */
 const TOLERANCE_PLAYING = 0.3;
 const TOLERANCE_PAUSED = 0.02;
 
+let sharedContext: AudioContext | null = null;
+
+/** The one AudioContext. Browsers cap how many a page may create. */
+export function audioContext(): AudioContext {
+  sharedContext ??= new AudioContext();
+  return sharedContext;
+}
+
+/**
+ * A context created before any user interaction starts suspended. Resuming is
+ * safe to call repeatedly and only does anything the first time.
+ */
+function wake(): void {
+  const context = audioContext();
+  if (context.state === "suspended") void context.resume().catch(() => undefined);
+}
+
+// One source node per element, forever: calling createMediaElementSource twice
+// on the same element throws, and there is no way to undo the first call.
+const routed = new WeakMap<HTMLMediaElement, GainNode>();
+
+/**
+ * Routes a media element through a gain node and returns it.
+ *
+ * Shared with the video preview, so picture and sound obey the same clip gain
+ * through the same graph.
+ */
+export function connectElement(element: HTMLMediaElement): GainNode {
+  const existing = routed.get(element);
+  if (existing) return existing;
+
+  const context = audioContext();
+  const gain = context.createGain();
+  context.createMediaElementSource(element).connect(gain);
+  gain.connect(context.destination);
+  routed.set(element, gain);
+  return gain;
+}
+
 interface Loaded {
   element: HTMLAudioElement;
-  /** Set when we fell back to a blob, so it can be revoked on dispose. */
+  gain: GainNode;
   objectUrl?: string;
-  /** Guards against retrying the blob fallback in a loop. */
-  triedFallback: boolean;
+  loading: boolean;
 }
 
 export class AudioPreview {
@@ -59,18 +97,15 @@ export class AudioPreview {
   /**
    * Brings the audio output in line with the transport.
    *
-   * Call this whenever the playhead, the play state, or the set of audible
-   * clips changes. It is idempotent - calling it every animation frame is fine
-   * and is in fact how drift gets corrected.
+   * Idempotent - calling it every animation frame is fine, and is in fact how
+   * drift gets corrected.
    */
   sync(active: Voice[], playing: boolean): void {
-    const wanted = new Set(active.map((voice) => voice.clipId));
+    if (playing) wake();
 
-    // Silence anything that has fallen out from under the playhead.
+    const wanted = new Set(active.map((voice) => voice.clipId));
     for (const [clipId, loaded] of this.voices) {
-      if (!wanted.has(clipId) && !loaded.element.paused) {
-        loaded.element.pause();
-      }
+      if (!wanted.has(clipId) && !loaded.element.paused) loaded.element.pause();
     }
 
     const tolerance = playing ? TOLERANCE_PLAYING : TOLERANCE_PAUSED;
@@ -78,32 +113,28 @@ export class AudioPreview {
     for (const voice of active) {
       const loaded = this.load(voice.clipId, voice.path);
       const element = loaded.element;
-      element.volume = Math.max(0, Math.min(1, voice.volume));
 
-      // readyState 0 means metadata has not arrived; setting currentTime now
-      // throws in some engines and is silently discarded in others.
+      // No clamp. A boost is meant to be audible.
+      loaded.gain.gain.value = Math.max(0, voice.volume);
+
+      // readyState 0 means metadata has not arrived; setting currentTime then
+      // throws in some engines and is discarded in others.
       if (element.readyState > 0 && Math.abs(element.currentTime - voice.time) > tolerance) {
         try {
           element.currentTime = Math.max(0, voice.time);
         } catch {
-          // Seeking an element that is still opening is not an error worth
-          // surfacing; the next sync will land it.
+          // Still opening; the next sync lands it.
         }
       }
 
       if (playing) {
-        if (element.paused) {
-          // Rejects when the element is not ready or autoplay is refused.
-          // Either way the next sync retries, so there is nothing to handle.
-          void element.play().catch(() => undefined);
-        }
+        if (element.paused) void element.play().catch(() => undefined);
       } else if (!element.paused) {
         element.pause();
       }
     }
   }
 
-  /** Stops everything, e.g. when the transport stops. */
   stopAll(): void {
     for (const loaded of this.voices.values()) loaded.element.pause();
   }
@@ -112,9 +143,11 @@ export class AudioPreview {
   release(clipId: string): void {
     const loaded = this.voices.get(clipId);
     if (!loaded) return;
+
     loaded.element.pause();
     loaded.element.removeAttribute("src");
     loaded.element.load();
+    loaded.gain.disconnect();
     if (loaded.objectUrl) URL.revokeObjectURL(loaded.objectUrl);
     this.voices.delete(clipId);
   }
@@ -129,35 +162,24 @@ export class AudioPreview {
 
     const element = new Audio();
     element.preload = "auto";
-    // Nothing here is a user-facing media player; the element exists only as a
-    // decoder and an output. Keep it out of the document.
-    element.src = convertFileSrc(path);
 
-    const loaded: Loaded = { element, triedFallback: false };
+    const loaded: Loaded = { element, gain: connectElement(element), loading: true };
     this.voices.set(clipId, loaded);
 
-    // The asset protocol is the good path: it streams and it seeks. If it is
-    // unavailable - scope misconfigured, protocol disabled - fall back to
-    // pulling the bytes through the engine and playing a blob. Slower and
-    // memory-hungry, but it means audio works rather than silently not.
-    element.addEventListener("error", () => {
-      if (loaded.triedFallback) return;
-      loaded.triedFallback = true;
-      void this.loadViaBlob(loaded, path);
-    });
+    // Source arrives asynchronously; until then the element is silent and the
+    // sync pass above simply has nothing to play, which is correct.
+    void readMediaBytes(path)
+      .then((bytes) => {
+        const url = URL.createObjectURL(new Blob([bytes]));
+        loaded.objectUrl = url;
+        loaded.element.src = url;
+        loaded.element.load();
+      })
+      .catch((cause) => console.error(`Relay: could not load audio for ${path}`, cause))
+      .finally(() => {
+        loaded.loading = false;
+      });
 
     return loaded;
-  }
-
-  private async loadViaBlob(loaded: Loaded, path: string): Promise<void> {
-    try {
-      const bytes = await readMediaBytes(path);
-      const url = URL.createObjectURL(new Blob([bytes]));
-      loaded.objectUrl = url;
-      loaded.element.src = url;
-      loaded.element.load();
-    } catch (cause) {
-      console.error(`Relay: could not load audio for ${path}`, cause);
-    }
   }
 }

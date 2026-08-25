@@ -10,6 +10,8 @@ use relay_core::time::{FrameRate, Rational};
 use crate::error::{Error, Result};
 use crate::probe;
 
+/// Name used in error messages. The binary actually run comes from
+/// [`crate::binaries::ffmpeg`], which may be a bundled copy.
 const FFMPEG: &str = "ffmpeg";
 
 /// Anything that yields frames in order.
@@ -116,7 +118,7 @@ impl FfmpegDecoder {
             }
         };
 
-        let mut command = Command::new(FFMPEG);
+        let mut command = Command::new(crate::binaries::ffmpeg());
         command.args(["-hide_banner", "-nostdin", "-loglevel", "error"]);
 
         // Both of these are *input* options and have to precede -i.

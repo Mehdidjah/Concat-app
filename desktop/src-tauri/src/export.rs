@@ -282,7 +282,7 @@ fn quantise(seconds: f64, rate: FrameRate) -> Rational {
 
 /// Trims, delays and mixes every audible clip into one track.
 fn mix_audio(clips: &[&ExportClip], duration: f64, destination: &Path) -> Result<(), String> {
-    let mut command = std::process::Command::new("ffmpeg");
+    let mut command = std::process::Command::new(relay_media::ffmpeg());
     command.args(["-hide_banner", "-nostdin", "-loglevel", "error", "-y"]);
 
     for clip in clips {
@@ -339,7 +339,7 @@ fn mix_audio(clips: &[&ExportClip], duration: f64, destination: &Path) -> Result
 }
 
 fn mux(video: &Path, audio: &Path, output: &Path) -> Result<(), String> {
-    let mut command = std::process::Command::new("ffmpeg");
+    let mut command = std::process::Command::new(relay_media::ffmpeg());
     command
         .args(["-hide_banner", "-nostdin", "-loglevel", "error", "-y"])
         .arg("-i")

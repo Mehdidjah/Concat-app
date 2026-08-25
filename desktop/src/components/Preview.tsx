@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 
+import { connectElement } from "../lib/audio";
 import { timecode } from "../lib/time";
 import { Icon, IconButton } from "./Icon";
 import { PANEL_SHELL } from "./Panel";
@@ -12,6 +13,8 @@ export interface PreviewSource {
   /** Where in the source file the playhead sits, in seconds. */
   time: number;
   muted: boolean;
+  /** Linear gain with fades applied. May exceed 1; see lib/audio.ts. */
+  volume: number;
   /** A still is shown as an image; there is nothing to seek or play. */
   isStill: boolean;
 }
@@ -81,6 +84,15 @@ export function Preview({
     if (!element || !source || source.isStill) return;
 
     element.muted = source.muted;
+
+    // Through a gain node, not element.volume, which browsers cap at 1.0.
+    // A video clip's audio obeys the same clip gain as an audio clip's.
+    try {
+      connectElement(element).gain.value = Math.max(0, source.volume);
+    } catch {
+      // Routing can only fail if the element was already claimed by another
+      // graph, which cannot happen here - but silence is not worth a crash.
+    }
 
     const tolerance = playing ? 0.3 : 0.03;
     if (element.readyState > 0 && Math.abs(element.currentTime - source.time) > tolerance) {

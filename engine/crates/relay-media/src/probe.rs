@@ -8,6 +8,7 @@ use serde_json::Value;
 
 use crate::error::{Error, Result};
 
+/// Name used in error messages; see [`crate::binaries::ffprobe`].
 const FFPROBE: &str = "ffprobe";
 
 /// What a video stream looks like.
@@ -65,7 +66,7 @@ impl MediaInfo {
 /// Runs `ffprobe` and summarises what it found.
 pub fn probe(path: impl AsRef<Path>) -> Result<MediaInfo> {
     let path = path.as_ref();
-    let output = Command::new(FFPROBE)
+    let output = Command::new(crate::binaries::ffprobe())
         .args(["-v", "error", "-show_streams", "-show_format", "-of", "json"])
         .arg(path)
         .output()

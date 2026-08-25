@@ -58,3 +58,7 @@ desktop.ini
 # Local environment
 .env
 .env.local
+
+# FFmpeg development build for the FFI decoder (headers + import libs).
+# Large, machine-specific, and not needed for a normal build - see BUILD.md.
+/vendor/

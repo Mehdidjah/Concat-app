@@ -9,6 +9,8 @@ use relay_core::time::FrameRate;
 
 use crate::error::{Error, Result};
 
+/// Name used in error messages. The binary actually run comes from
+/// [`crate::binaries::ffmpeg`], which may be a bundled copy.
 const FFMPEG: &str = "ffmpeg";
 
 /// Anything that accepts finished frames.
@@ -72,7 +74,7 @@ impl FfmpegEncoder {
         let path = path.as_ref();
         let fps = frame_rate.fps();
 
-        let mut command = Command::new(FFMPEG);
+        let mut command = Command::new(crate::binaries::ffmpeg());
         command
             .args(["-hide_banner", "-nostdin", "-loglevel", "error", "-y"])
             // Input: what is coming down the pipe.

@@ -219,9 +219,9 @@ function Editor({
             clipId: clip.id,
             path: media.path,
             time: clip.sourceStart + (playhead - clip.start),
-            // Media elements cannot play above unity, so a boost is audible
-            // only in the export. The Adjust panel says so where it matters.
-            volume: Math.min(1, clipGainAt(clip, playhead)),
+            // Uncapped: the preview routes through a gain node, so what you
+            // hear matches what the exporter will render.
+            volume: clipGainAt(clip, playhead),
           },
         ];
       });
@@ -248,6 +248,7 @@ function Editor({
       path: media.path,
       time: top.sourceStart + (playhead - top.start),
       muted: false,
+      volume: clipGainAt(top, playhead),
       isStill: top.kind === "image",
     };
   }, [project, playhead]);

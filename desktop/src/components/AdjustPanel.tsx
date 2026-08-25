@@ -3,24 +3,47 @@ import { Group, Slider } from "./controls";
 import { Icon } from "./Icon";
 import { Empty } from "./Panel";
 
-/** Above unity the preview cannot follow; see the note in the panel. */
-const MAX_GAIN = 2;
-/** A fade longer than the clip is meaningless, and this keeps it obvious. */
-const MAX_FADE = 5;
+/**
+ * Level range, in decibels.
+ *
+ * The bottom is silence, not -60: a fader that cannot reach zero is a fader
+ * you cannot use to mute. +24 at the top because quiet material genuinely
+ * needs it - a distant lavalier or a phone recording is routinely 15-20 dB
+ * under, and a limit that cannot fix those is a limit in the wrong place.
+ */
+const MIN_DB = -60;
+const MAX_DB = 24;
+/** A fade longer than half the clip would overlap the other one. */
+const MAX_FADE = 10;
 
-/** Linear gain as decibels, which is the unit anyone mixing audio thinks in. */
-function decibels(gain: number): string {
-  if (gain <= 0.0001) return "-inf dB";
-  const value = 20 * Math.log10(gain);
-  return `${value > 0 ? "+" : ""}${value.toFixed(1)} dB`;
+/** Linear gain to decibels. Zero maps to the bottom of the fader, not -inf. */
+function toDecibels(gain: number): number {
+  if (gain <= 0) return MIN_DB;
+  return Math.max(MIN_DB, Math.min(MAX_DB, 20 * Math.log10(gain)));
+}
+
+function fromDecibels(decibels: number): number {
+  // At the very bottom the fader means silence, so snap to exactly zero
+  // rather than leaving an inaudible-but-nonzero gain in the project.
+  return decibels <= MIN_DB ? 0 : 10 ** (decibels / 20);
+}
+
+function formatDecibels(decibels: number): string {
+  if (decibels <= MIN_DB) return "silent";
+  if (Math.abs(decibels) < 0.05) return "0.0 dB";
+  return `${decibels > 0 ? "+" : ""}${decibels.toFixed(1)} dB`;
 }
 
 /**
  * The Adjust tab: properties of the selected clip that change how it plays.
  *
- * Everything here is applied in two places - the preview, so you can hear it
- * now, and the exporter, so the file matches. Both read the same numbers off
- * the clip, which is the only way those two can be guaranteed to agree.
+ * Everything here applies in two places - the preview, so you hear it now, and
+ * the exporter, so the file matches. Both read the same numbers off the clip,
+ * which is the only way those two can be guaranteed to agree.
+ *
+ * The fader works in decibels rather than linear gain. Linear puts every
+ * useful setting in the bottom sixth of the travel; decibels is both how the
+ * ear works and how anyone mixing thinks.
  */
 export function AdjustPanel({
   clip,
@@ -37,62 +60,58 @@ export function AdjustPanel({
     );
   }
 
-  const hasSound = clip.kind !== "image";
-  // A fade cannot be longer than half the clip without the two overlapping.
-  const fadeLimit = Math.min(MAX_FADE, clip.duration / 2);
+  if (clip.kind === "image") {
+    return (
+      <Empty icon={<Icon name="image" size={26} strokeWidth={1.5} />}>
+        A still has nothing to adjust yet. Opacity and transform land with the
+        compositor.
+      </Empty>
+    );
+  }
+
+  const fadeLimit = Math.max(0.1, Math.min(MAX_FADE, clip.duration / 2));
 
   return (
     <div className="px-3 py-3">
-      {hasSound ? (
-        <>
-          <Group title="Volume">
-            <Slider
-              label="Level"
-              value={clip.volume}
-              min={0}
-              max={MAX_GAIN}
-              step={0.01}
-              format={decibels}
-              onReset={() => onChange({ volume: 1 })}
-              onChange={(volume) => onChange({ volume })}
-            />
-            {clip.volume > 1 && (
-              <p className="-mt-1 mb-1 text-[11px] leading-snug text-tertiary">
-                Boost above 0 dB applies on export. The preview cannot play louder than
-                unity, so it will sound quieter than the exported file.
-              </p>
-            )}
-          </Group>
+      <Group title="Volume">
+        <Slider
+          label="Level"
+          value={toDecibels(clip.volume)}
+          min={MIN_DB}
+          max={MAX_DB}
+          step={0.5}
+          format={formatDecibels}
+          onReset={() => onChange({ volume: 1 })}
+          onChange={(decibels) => onChange({ volume: fromDecibels(decibels) })}
+        />
+      </Group>
 
-          <Group title="Fades">
-            <Slider
-              label="Fade in"
-              value={Math.min(clip.fadeIn, fadeLimit)}
-              min={0}
-              max={fadeLimit}
-              step={0.05}
-              format={(value) => (value === 0 ? "none" : `${value.toFixed(2)}s`)}
-              onReset={() => onChange({ fadeIn: 0 })}
-              onChange={(fadeIn) => onChange({ fadeIn })}
-            />
-            <Slider
-              label="Fade out"
-              value={Math.min(clip.fadeOut, fadeLimit)}
-              min={0}
-              max={fadeLimit}
-              step={0.05}
-              format={(value) => (value === 0 ? "none" : `${value.toFixed(2)}s`)}
-              onReset={() => onChange({ fadeOut: 0 })}
-              onChange={(fadeOut) => onChange({ fadeOut })}
-            />
-          </Group>
-        </>
-      ) : (
-        <Empty icon={<Icon name="image" size={26} strokeWidth={1.5} />}>
-          A still has nothing to adjust yet. Opacity and transform land with the
-          compositor.
-        </Empty>
-      )}
+      <Group title="Fades">
+        <Slider
+          label="Fade in"
+          value={Math.min(clip.fadeIn, fadeLimit)}
+          min={0}
+          max={fadeLimit}
+          step={0.05}
+          format={(value) => (value === 0 ? "none" : `${value.toFixed(2)}s`)}
+          onReset={() => onChange({ fadeIn: 0 })}
+          onChange={(fadeIn) => onChange({ fadeIn })}
+        />
+        <Slider
+          label="Fade out"
+          value={Math.min(clip.fadeOut, fadeLimit)}
+          min={0}
+          max={fadeLimit}
+          step={0.05}
+          format={(value) => (value === 0 ? "none" : `${value.toFixed(2)}s`)}
+          onReset={() => onChange({ fadeOut: 0 })}
+          onChange={(fadeOut) => onChange({ fadeOut })}
+        />
+      </Group>
+
+      <p className="text-[11px] leading-relaxed text-tertiary">
+        Double-click a label to reset it.
+      </p>
     </div>
   );
 }
