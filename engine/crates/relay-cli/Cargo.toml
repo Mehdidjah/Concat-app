@@ -1,0 +1,19 @@
+[package]
+name = "relay-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Command line driver for the Relay engine."
+
+[[bin]]
+name = "relay"
+path = "src/main.rs"
+
+[dependencies]
+relay-core.workspace = true
+relay-media.workspace = true
+relay-render.workspace = true
+clap.workspace = true
+
+[lints]
+workspace = true

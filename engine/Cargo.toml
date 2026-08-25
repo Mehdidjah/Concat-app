@@ -1,0 +1,35 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.93"
+# license = "TODO"  # see docs/decisions/0005-license-is-undecided.md
+
+[workspace.dependencies]
+relay-core = { path = "crates/relay-core" }
+relay-media = { path = "crates/relay-media" }
+relay-render = { path = "crates/relay-render" }
+
+serde_json = "1"
+thiserror = "2"
+clap = { version = "4", features = ["derive"] }
+
+[workspace.lints.rust]
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+# Cleverness is the enemy of a codebase you maintain alone.
+too_many_arguments = "allow"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+
+# Decoding and compositing are unusably slow in an unoptimised build, even when
+# the rest of the engine is being debugged.
+[profile.dev.package."*"]
+opt-level = 2

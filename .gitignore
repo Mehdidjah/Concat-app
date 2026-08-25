@@ -1,0 +1,60 @@
+## Do not remove these
+test/assets/
+test/assets/*
+
+# Rust
+target/
+**/target/
+*.pdb
+
+# Node
+node_modules/
+dist/
+dist-ssr/
+.vite/
+*.local
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Tauri build output
+desktop/src-tauri/gen/
+desktop/src-tauri/target/
+
+# Python (tooling and one-off scripts live at the repo root for now)
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# Editors and OS
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Scratch media at the repo root.
+#
+# Test clips are large and change constantly, so they do not belong in git
+# history. Fixtures that tests genuinely depend on should live in a `fixtures/`
+# directory next to those tests and be committed deliberately - this pattern
+# only covers loose files dropped at the top level.
+/*.mp4
+/*.mov
+/*.mkv
+/*.webm
+/*.mp3
+/*.wav
+/*.flac
+/*.aac
+/scratch_*
+
+# Local environment
+.env
+.env.local

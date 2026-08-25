@@ -1,0 +1,4 @@
+# Pinned so a checkout in two years builds the same way it does today.
+[toolchain]
+channel = "1.93"
+components = ["rustfmt", "clippy"]

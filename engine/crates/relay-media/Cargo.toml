@@ -1,0 +1,14 @@
+[package]
+name = "relay-media"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Getting pixels in and out of media files. The only crate that knows FFmpeg exists."
+
+[dependencies]
+relay-core.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

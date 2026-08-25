@@ -1,0 +1,354 @@
+//! The edit itself: a project, its tracks, and the clips on them.
+//!
+//! Tracks and clips live in arenas and are addressed by [`TrackId`] and
+//! [`ClipId`]. Nothing here owns another editable object directly, which is
+//! what makes undo, cross-references and multi-threaded rendering tractable.
+//!
+//! Track order is explicit and bottom-first: `track_ids()[0]` is composited
+//! first and everything after it draws on top.
+
+use std::path::{Path, PathBuf};
+
+use crate::arena::{Arena, Id};
+use crate::time::{FrameRate, Rational, TimeRange};
+
+/// Handle to a [`Track`].
+pub type TrackId = Id<Track>;
+/// Handle to a [`Clip`].
+pub type ClipId = Id<Clip>;
+
+/// What kind of material a track carries.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum TrackKind {
+    /// Picture.
+    Video,
+    /// Sound.
+    Audio,
+}
+
+/// Where a clip's pixels come from.
+///
+/// A path today. When a media library lands this becomes a handle into it, and
+/// this is the one type that has to change.
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+pub struct MediaRef {
+    /// Path to the media file on disk.
+    pub path: PathBuf,
+}
+
+impl MediaRef {
+    /// References a file on disk.
+    pub fn new(path: impl Into<PathBuf>) -> Self {
+        Self { path: path.into() }
+    }
+
+    /// The referenced path.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+/// A span of one piece of media, placed on a track.
+#[derive(Clone, Debug)]
+pub struct Clip {
+    /// Where the pixels come from.
+    pub media: MediaRef,
+    /// The in-point: how far into the media the clip starts.
+    pub source_start: Rational,
+    /// Where the clip sits on the timeline.
+    pub start: Rational,
+    /// How long the clip runs on the timeline.
+    pub duration: Rational,
+    /// Blend factor in `0.0..=1.0`, applied over whatever is beneath.
+    pub opacity: f32,
+}
+
+impl Clip {
+    /// A clip that starts at the beginning of its media and is fully opaque.
+    pub fn new(media: MediaRef, start: Rational, duration: Rational) -> Self {
+        Self { media, source_start: Rational::ZERO, start, duration, opacity: 1.0 }
+    }
+
+    /// The span of timeline this clip occupies.
+    pub fn range(&self) -> TimeRange {
+        TimeRange::new(self.start, self.duration)
+    }
+
+    /// True if the clip is on screen at `time`.
+    pub fn contains(&self, time: Rational) -> bool {
+        self.range().contains(time)
+    }
+
+    /// Converts a timeline timestamp into a timestamp within the source media,
+    /// or `None` if the clip is not on screen then.
+    ///
+    /// This is the one piece of arithmetic that every trim, ripple and slip
+    /// operation ultimately has to agree with, so it lives in exactly one place.
+    pub fn source_time_at(&self, time: Rational) -> Option<Rational> {
+        self.contains(time).then(|| self.source_start + (time - self.start))
+    }
+}
+
+/// A horizontal lane of clips.
+#[derive(Clone, Debug)]
+pub struct Track {
+    /// Display name.
+    pub name: String,
+    /// Picture or sound.
+    pub kind: TrackKind,
+    /// When false the track is skipped entirely while rendering.
+    pub enabled: bool,
+    clips: Vec<ClipId>,
+}
+
+impl Track {
+    /// An empty, enabled track.
+    pub fn new(name: impl Into<String>, kind: TrackKind) -> Self {
+        Self { name: name.into(), kind, enabled: true, clips: Vec::new() }
+    }
+
+    /// The clips on this track, in insertion order.
+    pub fn clips(&self) -> &[ClipId] {
+        &self.clips
+    }
+}
+
+/// The edit: output format, tracks, and the clips on them.
+#[derive(Debug)]
+pub struct Timeline {
+    /// Output frame rate.
+    pub frame_rate: FrameRate,
+    /// Output width in pixels.
+    pub width: u32,
+    /// Output height in pixels.
+    pub height: u32,
+    tracks: Arena<Track>,
+    clips: Arena<Clip>,
+    order: Vec<TrackId>,
+}
+
+impl Timeline {
+    /// An empty timeline with the given output format.
+    pub fn new(width: u32, height: u32, frame_rate: FrameRate) -> Self {
+        Self {
+            frame_rate,
+            width,
+            height,
+            tracks: Arena::new(),
+            clips: Arena::new(),
+            order: Vec::new(),
+        }
+    }
+
+    /// A 1920x1080, 30 fps timeline - the default for a new project.
+    pub fn hd() -> Self {
+        Self::new(1920, 1080, FrameRate::THIRTY)
+    }
+
+    /// Adds a track on top of the existing ones.
+    pub fn add_track(&mut self, track: Track) -> TrackId {
+        let id = self.tracks.insert(track);
+        self.order.push(id);
+        id
+    }
+
+    /// Track handles, bottom-most first. Composite in this order.
+    pub fn track_ids(&self) -> &[TrackId] {
+        &self.order
+    }
+
+    /// Borrows a track.
+    pub fn track(&self, id: TrackId) -> Option<&Track> {
+        self.tracks.get(id)
+    }
+
+    /// Mutably borrows a track.
+    pub fn track_mut(&mut self, id: TrackId) -> Option<&mut Track> {
+        self.tracks.get_mut(id)
+    }
+
+    /// Iterates over tracks bottom-most first.
+    pub fn tracks(&self) -> impl Iterator<Item = (TrackId, &Track)> {
+        self.order.iter().filter_map(|&id| self.tracks.get(id).map(|track| (id, track)))
+    }
+
+    /// Removes a track and every clip on it.
+    pub fn remove_track(&mut self, id: TrackId) -> Option<Track> {
+        let track = self.tracks.remove(id)?;
+        for &clip in &track.clips {
+            self.clips.remove(clip);
+        }
+        self.order.retain(|&other| other != id);
+        Some(track)
+    }
+
+    /// Places a clip on a track. Returns `None` if the track handle is stale.
+    pub fn add_clip(&mut self, track: TrackId, clip: Clip) -> Option<ClipId> {
+        // Insert into the clip arena only once we know the track is real,
+        // otherwise a stale handle leaks an orphaned clip.
+        self.tracks.get(track)?;
+        let id = self.clips.insert(clip);
+        self.tracks.get_mut(track).expect("checked above").clips.push(id);
+        Some(id)
+    }
+
+    /// Borrows a clip.
+    pub fn clip(&self, id: ClipId) -> Option<&Clip> {
+        self.clips.get(id)
+    }
+
+    /// Mutably borrows a clip.
+    pub fn clip_mut(&mut self, id: ClipId) -> Option<&mut Clip> {
+        self.clips.get_mut(id)
+    }
+
+    /// Removes a clip from wherever it sits.
+    pub fn remove_clip(&mut self, id: ClipId) -> Option<Clip> {
+        let clip = self.clips.remove(id)?;
+        for (_, track) in self.tracks.iter_mut() {
+            track.clips.retain(|&other| other != id);
+        }
+        Some(clip)
+    }
+
+    /// How many clips the timeline holds, across all tracks.
+    pub const fn clip_count(&self) -> usize {
+        self.clips.len()
+    }
+
+    /// The clip visible on `track` at `time`, if any.
+    ///
+    /// Clips on one track are not supposed to overlap; if they do, the
+    /// last-added one wins, which matches what you see after a paste.
+    pub fn clip_on_track_at(&self, track: TrackId, time: Rational) -> Option<ClipId> {
+        let track = self.tracks.get(track)?;
+        track
+            .clips
+            .iter()
+            .rev()
+            .copied()
+            .find(|&id| self.clips.get(id).is_some_and(|clip| clip.contains(time)))
+    }
+
+    /// Where the last clip ends. Zero for an empty timeline.
+    pub fn duration(&self) -> Rational {
+        self.clips.iter().map(|(_, clip)| clip.range().end()).max().unwrap_or(Rational::ZERO)
+    }
+
+    /// How many whole output frames the timeline runs for.
+    pub fn frame_count(&self) -> i64 {
+        self.frame_rate.frames_in(self.duration())
+    }
+}
+
+/// A timeline plus the things that surround it on disk.
+#[derive(Debug)]
+pub struct Project {
+    /// Display name.
+    pub name: String,
+    /// The edit.
+    pub timeline: Timeline,
+}
+
+impl Project {
+    /// A new, empty project at the given output format.
+    pub fn new(name: impl Into<String>, timeline: Timeline) -> Self {
+        Self { name: name.into(), timeline }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn seconds(value: i64) -> Rational {
+        Rational::from_int(value)
+    }
+
+    fn fixture() -> (Timeline, TrackId, ClipId) {
+        let mut timeline = Timeline::hd();
+        let track = timeline.add_track(Track::new("V1", TrackKind::Video));
+        let clip = timeline
+            .add_clip(track, Clip::new(MediaRef::new("a.mp4"), seconds(2), seconds(3)))
+            .expect("track exists");
+        (timeline, track, clip)
+    }
+
+    #[test]
+    fn a_clip_maps_timeline_time_to_source_time() {
+        let (timeline, _, clip) = fixture();
+        let clip = timeline.clip(clip).expect("clip exists");
+
+        assert_eq!(clip.source_time_at(seconds(2)), Some(Rational::ZERO));
+        assert_eq!(clip.source_time_at(seconds(4)), Some(seconds(2)));
+        assert_eq!(clip.source_time_at(seconds(1)), None, "before the clip");
+        assert_eq!(clip.source_time_at(seconds(5)), None, "the end is exclusive");
+    }
+
+    #[test]
+    fn an_in_point_offsets_the_source_time() {
+        let (mut timeline, _, id) = fixture();
+        timeline.clip_mut(id).expect("clip exists").source_start = seconds(10);
+        let clip = timeline.clip(id).expect("clip exists");
+        assert_eq!(clip.source_time_at(seconds(2)), Some(seconds(10)));
+        assert_eq!(clip.source_time_at(seconds(3)), Some(seconds(11)));
+    }
+
+    #[test]
+    fn finds_the_clip_under_the_playhead() {
+        let (timeline, track, clip) = fixture();
+        assert_eq!(timeline.clip_on_track_at(track, seconds(3)), Some(clip));
+        assert_eq!(timeline.clip_on_track_at(track, seconds(9)), None);
+    }
+
+    #[test]
+    fn duration_is_the_end_of_the_last_clip() {
+        let (mut timeline, track, _) = fixture();
+        assert_eq!(timeline.duration(), seconds(5));
+
+        timeline
+            .add_clip(track, Clip::new(MediaRef::new("b.mp4"), seconds(5), seconds(4)))
+            .expect("track exists");
+        assert_eq!(timeline.duration(), seconds(9));
+        assert_eq!(timeline.frame_count(), 270); // 9s at 30fps
+    }
+
+    #[test]
+    fn tracks_come_back_bottom_most_first() {
+        let mut timeline = Timeline::hd();
+        let lower = timeline.add_track(Track::new("V1", TrackKind::Video));
+        let upper = timeline.add_track(Track::new("V2", TrackKind::Video));
+        assert_eq!(timeline.track_ids(), &[lower, upper]);
+    }
+
+    #[test]
+    fn removing_a_track_takes_its_clips_with_it() {
+        let (mut timeline, track, clip) = fixture();
+        timeline.remove_track(track);
+
+        assert!(timeline.clip(clip).is_none());
+        assert_eq!(timeline.clip_count(), 0);
+        assert!(timeline.track_ids().is_empty());
+        assert_eq!(timeline.duration(), Rational::ZERO);
+    }
+
+    #[test]
+    fn removing_a_clip_unlinks_it_from_its_track() {
+        let (mut timeline, track, clip) = fixture();
+        assert!(timeline.remove_clip(clip).is_some());
+
+        assert!(timeline.track(track).expect("track exists").clips().is_empty());
+        assert_eq!(timeline.clip_on_track_at(track, seconds(3)), None);
+        assert!(timeline.remove_clip(clip).is_none(), "removing twice is harmless");
+    }
+
+    #[test]
+    fn a_stale_track_handle_does_not_leak_a_clip() {
+        let (mut timeline, track, _) = fixture();
+        timeline.remove_track(track);
+
+        let orphan = timeline.add_clip(track, Clip::new(MediaRef::new("c.mp4"), seconds(0), seconds(1)));
+        assert_eq!(orphan, None);
+        assert_eq!(timeline.clip_count(), 0);
+    }
+}
