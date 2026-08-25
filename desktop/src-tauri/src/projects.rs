@@ -39,6 +39,11 @@ struct Manifest {
     relay: String,
     name: String,
     video: Video,
+    /// Everything else in the file is ignored when reading settings for the
+    /// recents list. `flatten` keeps it from being dropped on a rewrite.
+    #[serde(flatten)]
+    #[allow(dead_code)]
+    rest: serde_json::Map<String, serde_json::Value>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -85,6 +90,7 @@ pub fn create(
         relay: env!("CARGO_PKG_VERSION").to_owned(),
         name: name.to_owned(),
         video: Video { width, height, rate_num, rate_den },
+        rest: serde_json::Map::new(),
     };
 
     let encoded = serde_json::to_vec_pretty(&document)
@@ -101,6 +107,45 @@ pub fn create(
         rate_den,
         opened_at: now_millis(),
     })
+}
+
+/// Writes the whole project document to `relay.json`.
+///
+/// The document is passed through as opaque JSON rather than being mirrored
+/// into Rust types. The edit model is still provisional and lives in the UI
+/// (see `lib/project.ts`); duplicating it here would mean changing two
+/// definitions in lockstep for no benefit, and the host has no decisions to
+/// make about its contents.
+///
+/// Written to a temporary file and renamed into place, because a save
+/// interrupted halfway is worse than no save at all - a truncated relay.json
+/// loses the project, while a failed rename leaves the previous one intact.
+pub fn save(path: &str, document: &serde_json::Value) -> Result<(), String> {
+    let root = PathBuf::from(path);
+    let manifest = root.join(MANIFEST);
+    let temporary = root.join(format!("{MANIFEST}.saving"));
+
+    std::fs::create_dir_all(&root)
+        .map_err(|error| format!("could not create {}: {error}", root.display()))?;
+
+    let encoded = serde_json::to_vec_pretty(document)
+        .map_err(|error| format!("could not encode the project: {error}"))?;
+
+    std::fs::write(&temporary, encoded)
+        .map_err(|error| format!("could not write {}: {error}", temporary.display()))?;
+
+    std::fs::rename(&temporary, &manifest)
+        .map_err(|error| format!("could not replace {}: {error}", manifest.display()))
+}
+
+/// Reads the whole project document back.
+pub fn read_document(path: &str) -> Result<serde_json::Value, String> {
+    let manifest = PathBuf::from(path).join(MANIFEST);
+    let bytes = std::fs::read(&manifest)
+        .map_err(|error| format!("could not read {}: {error}", manifest.display()))?;
+
+    serde_json::from_slice(&bytes)
+        .map_err(|error| format!("{} is not a Relay project: {error}", manifest.display()))
 }
 
 /// Reads an existing project's settings.

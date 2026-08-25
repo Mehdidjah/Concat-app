@@ -292,6 +292,22 @@ async fn open_project(app: tauri::AppHandle, path: String) -> Result<projects::P
     .map_err(|error| format!("open_project task failed: {error}"))?
 }
 
+/// Writes the project to disk.
+#[tauri::command]
+async fn save_project(path: String, document: serde_json::Value) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || projects::save(&path, &document))
+        .await
+        .map_err(|error| format!("save task failed: {error}"))?
+}
+
+/// Reads the whole project document back.
+#[tauri::command]
+async fn load_project(path: String) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || projects::read_document(&path))
+        .await
+        .map_err(|error| format!("load task failed: {error}"))?
+}
+
 /// The recents list, most recent first, with vanished folders left out.
 #[tauri::command]
 fn recent_projects(app: tauri::AppHandle) -> Result<Vec<projects::ProjectInfo>, String> {
@@ -380,6 +396,8 @@ pub fn run() {
             extract_filmstrip,
             create_project,
             open_project,
+            save_project,
+            load_project,
             recent_projects,
             forget_project,
             export_project
