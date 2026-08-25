@@ -74,27 +74,68 @@ Holds an FFmpeg **development** build (headers and import libraries), used only
 by the in-progress FFI decoder described below. It is gitignored, roughly
 150 MB, and nothing in the normal build path touches it. Delete it freely.
 
-## FFI decoder — in progress, not yet wired up
+## FFI decoder — optional, off by default
 
-The engine currently runs FFmpeg as a subprocess
+The engine talks to FFmpeg as a subprocess
 (`engine/docs/decisions/0002-ffmpeg-over-a-pipe.md`). That is permanent for
-probing and export, but playback needs real timestamps and frame-accurate
-seeking, which a pipe cannot provide — so a linked decoder is being added
-behind the existing `FrameSource` trait.
+probing and export. Playback is different: a pipe carries no presentation
+timestamps and cannot seek to an exact frame, so there is a second decoder that
+links FFmpeg directly, behind the `ffi` feature.
 
-Extra prerequisites for that path only:
+Nothing in the app enables it yet. **You do not need any of this to build or
+run Relay.**
 
-- **LLVM / libclang** — `bindgen` generates the FFmpeg bindings at build time.
-  `winget install LLVM.LLVM`
-- **An FFmpeg dev build** — headers plus `.lib` import libraries, which the
-  ordinary runtime download does not include. Get a `*-gpl-shared-*` archive
-  from [BtbN/FFmpeg-Builds](https://github.com/BtbN/FFmpeg-Builds/releases) and
-  unpack it into `vendor/`.
-- Environment variables pointing at it (see `engine/crates/relay-media/README`
-  once this lands).
+### Setup, exactly as verified
 
-This section will be replaced with exact, verified steps when the decoder
-actually builds. Until then, ignore it — the app does not need any of it.
+1. **Get a development build** — headers plus `.lib` import libraries, which
+   the ordinary runtime download does not include. From
+   [BtbN/FFmpeg-Builds](https://github.com/BtbN/FFmpeg-Builds/releases), take a
+   `win64-gpl-**shared**` archive and unpack it into `vendor/`:
+
+   ```sh
+   curl -L -o ff.zip https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n8.1-latest-win64-gpl-shared-8.1.zip
+   unzip ff.zip -d vendor/
+   ```
+
+   **The version has to match the bindings.** `rusty_ffmpeg` ships
+   pre-generated bindings for a specific FFmpeg, currently 8.1 — avcodec 62,
+   avformat 62, avutil 60. A different major version compiles fine and then
+   misreads struct layouts at runtime, which corrupts silently rather than
+   failing. `ffi::tests::links_against_the_expected_ffmpeg` checks this and is
+   the first thing to look at if the decoder behaves strangely.
+
+2. **Nothing else.** No LLVM, no libclang, no bindgen run — the pre-generated
+   bindings are used as-is. `engine/.cargo/config.toml` already points at
+   `vendor/`, so no environment variables to set either.
+
+   If you unpack a differently-named archive, update the paths in that file.
+
+3. **Build and test:**
+
+   ```sh
+   cd engine
+   PATH="../vendor/ffmpeg-n8.1-latest-win64-gpl-shared-8.1/bin:$PATH" \
+     cargo test -p relay-media --features ffi
+   ```
+
+   The DLLs must be on `PATH` at *run* time. Linking uses `lib/` (import
+   libraries); running needs `bin/` (the DLLs themselves). Pointing either at
+   the other is the most likely thing to go wrong — `LNK1181: cannot open input
+   file 'avcodec.lib'` means the linker was aimed at `bin/`.
+
+### What it provides
+
+`FfiDecoder` implements `FrameSource` plus `SeekableSource`:
+
+- **`position()`** — the real presentation timestamp, as an exact rational. The
+  subprocess decoder returns `None` here, honestly: raw video carries no
+  timestamps, which is why variable-frame-rate material desyncs through a pipe.
+- **`seek()`** — frame-accurate, by seeking to the preceding keyframe and
+  decoding forward. Deliberately a separate trait, so the subprocess decoder
+  cannot pretend to offer it.
+
+`tests/ffi_decode.rs` proves both against a generated fixture, and skips
+entirely if FFmpeg is not installed.
 
 ## Troubleshooting
 

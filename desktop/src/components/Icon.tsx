@@ -70,6 +70,22 @@ const GLYPHS = {
       <path d="M15 11V6.5a1.5 1.5 0 0 1 3 0V15a6 6 0 0 1-6 6h-1a7 7 0 0 1-7-7v-2a1.5 1.5 0 0 1 3 0v1" />
     </>
   ),
+  // two blocks parted by a cut line
+  split: (
+    <>
+      <path d="M12 3v18" strokeDasharray="3 3" />
+      <path d="M8 7H5a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2h3" />
+      <path d="M16 7h3a2 2 0 0 1 2 2v6a2 2 0 0 1-2 2h-3" />
+    </>
+  ),
+  // two blocks closing on a seam
+  merge: (
+    <>
+      <path d="M12 3v18" />
+      <path d="M3 7h5a2 2 0 0 1 2 2v6a2 2 0 0 1-2 2H3" />
+      <path d="M21 7h-5a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2h5" />
+    </>
+  ),
   // horseshoe magnet, for snapping
   magnet: (
     <>

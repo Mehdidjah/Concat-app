@@ -66,9 +66,25 @@ Chocolatey - binaries only, no `libavcodec/avcodec.h` and no import libs, and
 
 Budget for the build plumbing, not the Rust. The Rust is the easy half.
 
-## What would change our mind
-Building playback. Specifically, the first time we need either a real PTS or a
-frame-accurate seek - whichever comes first. Both arrive with the transport
-controls, so that is the deadline.
+## Status: the FFI half now exists
 
-Do **not** wait for 4K, and do not migrate probe or export along with it.
+`relay-media`'s `ffi` feature builds a linked decoder, `FfiDecoder`, which
+implements `FrameSource` and `SeekableSource`. Both correctness gaps above are
+closed in it and covered by `tests/ffi_decode.rs`:
+
+- real presentation timestamps, exact rationals straight from the container
+- frame-accurate seeking, verified by landing between keyframes
+
+It is **off by default and unused by the app.** The subprocess backend is still
+what runs, and probe and export are staying on it permanently.
+
+The seam held: adding it required one new type implementing an existing trait,
+one new trait for the capability the pipe genuinely lacks, and no change to
+`relay-core`, `relay-render`, or any caller.
+
+## What would change our mind
+Nothing left to decide about *whether*. What remains is wiring playback to the
+linked decoder, at which point scrubbing stops respawning a process per seek.
+
+Do **not** migrate probe or export along with it - for those, the tradeoff
+never flips.

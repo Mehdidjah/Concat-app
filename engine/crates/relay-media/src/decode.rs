@@ -28,6 +28,30 @@ pub trait FrameSource {
 
     /// The next frame, or `Ok(None)` at the end of the stream.
     fn next_frame(&mut self) -> Result<Option<Frame>>;
+
+    /// When the frame just returned is meant to be shown.
+    ///
+    /// `None` means the source cannot say. The subprocess backend never can -
+    /// raw video carries no timestamps - which is exactly why variable frame
+    /// rate material desyncs through a pipe. A linked decoder reports the real
+    /// presentation timestamp.
+    fn position(&self) -> Option<Rational> {
+        None
+    }
+}
+
+/// A source that can jump to an arbitrary point.
+///
+/// Deliberately separate from [`FrameSource`]. Seeking over a pipe would mean
+/// respawning the process and decoding forward from a keyframe, which is not
+/// the same operation and should not be able to masquerade as one - so the
+/// subprocess decoder simply does not implement this.
+pub trait SeekableSource: FrameSource {
+    /// Moves to `to`, or the nearest decodable point before it.
+    ///
+    /// The next [`FrameSource::next_frame`] returns the first frame at or
+    /// after that point.
+    fn seek(&mut self, to: Rational) -> Result<()>;
 }
 
 /// How to open a decoder.

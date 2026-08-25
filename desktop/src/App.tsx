@@ -28,6 +28,7 @@ import {
   firstFreeTrack,
   findMedia,
   findTrack,
+  mergeClips,
   moveClip,
   moveClips,
   projectDuration,
@@ -40,6 +41,7 @@ import {
   toMediaItem,
   updateClip,
   trimClip,
+  whyNotMerge,
   type MediaItem,
   type Project,
 } from "./lib/project";
@@ -338,6 +340,14 @@ function Editor({
     });
   }, [playhead, selectedClipIds]);
 
+  const mergeSelected = useCallback(() => {
+    setProject((current) => {
+      const { project: next, clipId } = mergeClips(current, selectedClipIds);
+      if (clipId) setSelectedClipIds([clipId]);
+      return next;
+    });
+  }, [selectedClipIds]);
+
   const deleteSelected = useCallback(() => {
     if (selectedClipIds.length === 0) return;
     // Free the audio element first: once the clip is gone the sync pass has
@@ -413,6 +423,9 @@ function Editor({
         case "KeyS":
           splitAtPlayhead();
           break;
+        case "KeyM":
+          mergeSelected();
+          break;
         case "Delete":
         case "Backspace":
           deleteSelected();
@@ -424,7 +437,7 @@ function Editor({
 
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [deleteSelected, duration, frameRate, splitAtPlayhead, transport]);
+  }, [deleteSelected, duration, frameRate, mergeSelected, splitAtPlayhead, transport]);
 
   // The exporter works from a flat list: the engine rebuilds a real timeline
   // from it, so track *order* has to survive the trip even though track
@@ -671,6 +684,8 @@ function Editor({
               setProject((current) => trimClip(current, clipId, edge, delta))
             }
             onSplitAtPlayhead={splitAtPlayhead}
+            onMergeSelected={mergeSelected}
+            mergeBlockedBecause={whyNotMerge(project, selectedClipIds)}
             onDeleteSelected={deleteSelected}
             mediaDrag={mediaDrag ? { x: mediaDrag.x, y: mediaDrag.y } : null}
             onZoom={zoom}
@@ -717,6 +732,16 @@ function Editor({
                     hint: "S",
                     onSelect: splitAtPlayhead,
                   },
+                  ...(whyNotMerge(project, target) === null
+                    ? [
+                        {
+                          label: `Merge ${target.length} clips`,
+                          icon: "merge" as const,
+                          hint: "M",
+                          onSelect: mergeSelected,
+                        },
+                      ]
+                    : []),
                   {
                     label: "Move to playhead",
                     icon: "select",

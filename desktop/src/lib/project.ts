@@ -411,6 +411,105 @@ export function clipsOnTrack(project: Project, trackId: string): Clip[] {
   return project.clips.filter((clip) => clip.trackId === trackId);
 }
 
+/**
+ * How far apart two clips may sit and still count as touching, in seconds.
+ *
+ * Splitting produces edges that meet exactly, but the numbers have been
+ * through float arithmetic on the way, so an exact comparison would
+ * occasionally refuse to rejoin a clip it had just cut.
+ */
+const JOIN_EPSILON = 1e-6;
+
+/**
+ * Why these clips cannot be merged, or `null` if they can.
+ *
+ * Merge is the inverse of split: it rejoins pieces of *one* source that are
+ * still lying end to end. It is not a way to weld two different files into a
+ * single clip - that is a compound clip, which needs nesting and a render of
+ * its own, and pretending otherwise here would produce a clip whose source
+ * range means nothing.
+ *
+ * Returns a sentence, because a disabled button that will not say why is worse
+ * than no button.
+ */
+export function whyNotMerge(project: Project, clipIds: readonly string[]): string | null {
+  if (clipIds.length < 2) return "Select two or more clips to merge.";
+
+  const clips = clipIds.flatMap((id) => {
+    const clip = findClip(project, id);
+    return clip ? [clip] : [];
+  });
+  if (clips.length < 2) return "Select two or more clips to merge.";
+
+  if (clips.some((clip) => clip.trackId !== clips[0].trackId)) {
+    return "Merged clips must be on the same track.";
+  }
+  if (clips.some((clip) => clip.mediaId !== clips[0].mediaId)) {
+    return "Merged clips must come from the same file.";
+  }
+
+  const ordered = [...clips].sort((left, right) => left.start - right.start);
+  for (let index = 1; index < ordered.length; index += 1) {
+    const previous = ordered[index - 1];
+    const current = ordered[index];
+
+    if (Math.abs(current.start - (previous.start + previous.duration)) > JOIN_EPSILON) {
+      return "Merged clips must touch, with no gap or overlap.";
+    }
+    // The source has to be continuous too. Two halves that were rearranged
+    // are adjacent on the timeline but no longer a single run of the file,
+    // and joining them would silently change what plays.
+    if (
+      Math.abs(current.sourceStart - (previous.sourceStart + previous.duration)) > JOIN_EPSILON
+    ) {
+      return "These pieces are no longer in their original order.";
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Rejoins adjacent pieces of one source into a single clip.
+ *
+ * Does nothing unless [`whyNotMerge`] returns null. The surviving clip keeps
+ * the first piece's identity, so a selection referring to it stays valid.
+ */
+export function mergeClips(
+  project: Project,
+  clipIds: readonly string[],
+): { project: Project; clipId: string | null } {
+  if (whyNotMerge(project, clipIds) !== null) return { project, clipId: null };
+
+  const ordered = clipIds
+    .flatMap((id) => {
+      const clip = findClip(project, id);
+      return clip ? [clip] : [];
+    })
+    .sort((left, right) => left.start - right.start);
+
+  const first = ordered[0];
+  const last = ordered[ordered.length - 1];
+  const doomed = new Set(ordered.slice(1).map((clip) => clip.id));
+
+  const merged: Clip = {
+    ...first,
+    duration: last.start + last.duration - first.start,
+    // Gain and fades come from the first piece; the later ones are discarded
+    // along with their clips, which is what "these are one clip again" means.
+  };
+
+  return {
+    project: {
+      ...project,
+      clips: project.clips
+        .filter((clip) => !doomed.has(clip.id))
+        .map((clip) => (clip.id === first.id ? merged : clip)),
+    },
+    clipId: first.id,
+  };
+}
+
 export function setTrackFlag(
   project: Project,
   trackId: string,

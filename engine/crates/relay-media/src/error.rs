@@ -70,6 +70,17 @@ pub enum Error {
         want: usize,
     },
 
+    /// A libav* call failed. Only produced by the linked backend.
+    #[error("{operation} failed for {path}: {detail}")]
+    Ffi {
+        /// The libav function that failed.
+        operation: &'static str,
+        /// The file being worked on.
+        path: PathBuf,
+        /// FFmpeg's own description of the error code.
+        detail: String,
+    },
+
     /// A frame handed to an encoder was not the size the encoder was opened for.
     #[error("expected {want_width}x{want_height} frames, got {got_width}x{got_height}")]
     FrameSizeMismatch {

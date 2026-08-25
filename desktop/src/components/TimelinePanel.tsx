@@ -130,6 +130,8 @@ export function TimelinePanel({
   onMoveClips,
   onTrimClip,
   onSplitAtPlayhead,
+  onMergeSelected,
+  mergeBlockedBecause,
   onDeleteSelected,
   mediaDrag,
   onZoom,
@@ -165,6 +167,9 @@ export function TimelinePanel({
   onMoveClips: (moves: ClipMove[]) => void;
   onTrimClip: (clipId: string, edge: "start" | "end", delta: number) => void;
   onSplitAtPlayhead: () => void;
+  onMergeSelected: () => void;
+  /** Null when the selection can be merged; otherwise why it cannot. */
+  mergeBlockedBecause: string | null;
   onDeleteSelected: () => void;
   /** A bin item currently being dragged, in client coordinates. */
   mediaDrag: { x: number; y: number } | null;
@@ -214,8 +219,8 @@ export function TimelinePanel({
 
   // The draw loop reads everything through this ref, so a prop change never
   // tears down and rebuilds the loop.
-  const view = useRef({ project, playhead, playing, secondsPerPixel, scrollLeft, trackScroll, frameRate, selected, rows, dropTrack, assets });
-  view.current = { project, playhead, playing, secondsPerPixel, scrollLeft, trackScroll, frameRate, selected, rows, dropTrack, assets };
+  const view = useRef({ project, playhead, playing, secondsPerPixel, scrollLeft, trackScroll, frameRate, selected, rows, dropTrack, assets, tool });
+  view.current = { project, playhead, playing, secondsPerPixel, scrollLeft, trackScroll, frameRate, selected, rows, dropTrack, assets, tool };
 
   const timeAt = useCallback(
     (clientX: number) => {
@@ -362,6 +367,41 @@ export function TimelinePanel({
         state.assets,
         state.secondsPerPixel,
       );
+    }
+
+    // Razor guide: a dashed line at the pointer, but only while it is over a
+    // clip. Showing it in empty space would promise a cut that does nothing.
+    if (state.tool === "razor" && pointer.current && !drag.current) {
+      const canvas = canvasRef.current;
+      const bounds = canvas?.getBoundingClientRect();
+      if (bounds) {
+        const localX = pointer.current.x - bounds.left;
+        const localY = pointer.current.y - bounds.top;
+        const time = localX * state.secondsPerPixel + state.scrollLeft;
+        const rowIndex = Math.floor((localY - RULER_HEIGHT + state.trackScroll) / TRACK_HEIGHT);
+        const track = state.rows[rowIndex];
+
+        const overClip =
+          localY > RULER_HEIGHT &&
+          track !== undefined &&
+          state.project.clips.some(
+            (clip) =>
+              clip.trackId === track.id && time > clip.start && time < clip.start + clip.duration,
+          );
+
+        if (overClip) {
+          const guide = Math.round(localX) + 0.5;
+          context.save();
+          context.strokeStyle = COLORS.playhead;
+          context.lineWidth = 1;
+          context.setLineDash([4, 3]);
+          context.beginPath();
+          context.moveTo(guide, RULER_HEIGHT);
+          context.lineTo(guide, height);
+          context.stroke();
+          context.restore();
+        }
+      }
     }
 
     // The selection band, drawn over the clips it is catching.
@@ -667,7 +707,15 @@ export function TimelinePanel({
           onClick={() => onToolChange("razor")}
         />
         <Divider />
-        <IconButton icon="minus" label="Split at playhead (S)" onClick={onSplitAtPlayhead} />
+        <IconButton icon="split" label="Split at playhead (S)" onClick={onSplitAtPlayhead} />
+        <IconButton
+          icon="merge"
+          // The reason lives in the tooltip: a button that greys out without
+          // saying why leaves you guessing at the rule.
+          label={mergeBlockedBecause ?? "Merge selected clips (M)"}
+          disabled={mergeBlockedBecause !== null}
+          onClick={onMergeSelected}
+        />
         <IconButton
           icon="trash"
           label={
