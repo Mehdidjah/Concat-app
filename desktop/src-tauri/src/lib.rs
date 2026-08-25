@@ -358,34 +358,57 @@ fn describe(error: relay_media::Error) -> String {
     message
 }
 
-/// Points the engine at the bundled FFmpeg, if there is one.
+/// Points the engine at the bundled FFmpeg.
 ///
-/// Tauri drops sidecar binaries next to the app executable with the target
-/// triple stripped, so this looks for them there and silently leaves the
-/// engine on its `PATH` default otherwise. That fallback is what keeps
-/// `cargo run` working without copying binaries into the build directory.
+/// Relay ships its own copy so that a fresh install works without the user
+/// having installed anything - "is FFmpeg on PATH?" is not a question anyone
+/// should have to answer to open a video file.
 ///
-/// Both must be present to switch: a bundled decoder paired with whatever
-/// `ffprobe` happens to be on PATH is a version mismatch waiting to happen.
-fn use_bundled_ffmpeg() {
-    let Ok(executable) = std::env::current_exe() else { return };
-    let Some(directory) = executable.parent() else { return };
+/// Searched in order: the bundled resource directory, then beside the
+/// executable (which is where a `cargo run` build finds it), then nothing -
+/// leaving the engine on its `PATH` default, which is what keeps development
+/// working without copying 170 MB into every build directory.
+///
+/// Both binaries must be present to switch. A bundled decoder paired with
+/// whatever `ffprobe` happens to be on PATH is a version mismatch waiting to
+/// happen, and it would be an intermittent one.
+fn use_bundled_ffmpeg(app: &tauri::App) {
+    use tauri::Manager;
 
     let suffix = if cfg!(windows) { ".exe" } else { "" };
-    let ffmpeg = directory.join(format!("ffmpeg{suffix}"));
-    let ffprobe = directory.join(format!("ffprobe{suffix}"));
 
-    if ffmpeg.is_file() && ffprobe.is_file() {
-        relay_media::set_binaries(ffmpeg, ffprobe);
+    let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+    if let Ok(resources) = app.path().resource_dir() {
+        candidates.push(resources.join("ffmpeg"));
+    }
+    if let Ok(executable) = std::env::current_exe() {
+        if let Some(directory) = executable.parent() {
+            candidates.push(directory.join("ffmpeg"));
+            candidates.push(directory.to_path_buf());
+        }
+    }
+
+    for directory in candidates {
+        let ffmpeg = directory.join(format!("ffmpeg{suffix}"));
+        let ffprobe = directory.join(format!("ffprobe{suffix}"));
+
+        if ffmpeg.is_file() && ffprobe.is_file() {
+            relay_media::set_binaries(ffmpeg, ffprobe);
+            return;
+        }
     }
 }
 
 /// Builds and runs the editor window.
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    use_bundled_ffmpeg();
-
     tauri::Builder::default()
+        .setup(|app| {
+            // Resolved here rather than before the builder, because finding
+            // the resource directory needs the app to exist.
+            use_bundled_ffmpeg(app);
+            Ok(())
+        })
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![

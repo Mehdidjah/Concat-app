@@ -102,6 +102,60 @@ export function Slider({
   );
 }
 
+/**
+ * A sliding on/off switch.
+ *
+ * A real `<button role="switch">` rather than a native checkbox: the platform
+ * control cannot be styled into this shape, and it looks like a form field
+ * dropped into a tool that has none. Being a button means keyboard and screen
+ * reader behaviour come for free, which a restyled `<div>` would have thrown
+ * away.
+ *
+ * The knob subtracts its own width as it travels so it stays inside the track
+ * at both ends - the same trick the Slider knob uses.
+ */
+export function Toggle({
+  label,
+  hint,
+  checked,
+  onChange,
+}: {
+  label: string;
+  hint?: string;
+  checked: boolean;
+  onChange: (checked: boolean) => void;
+}) {
+  return (
+    <div className="mb-3 flex items-start justify-between gap-3">
+      <span className="min-w-0">
+        <span className="block text-[12px] text-primary">{label}</span>
+        {hint && (
+          <span className="mt-0.5 block text-[11px] leading-snug text-tertiary">{hint}</span>
+        )}
+      </span>
+
+      <button
+        type="button"
+        role="switch"
+        aria-checked={checked}
+        aria-label={label}
+        onClick={() => onChange(!checked)}
+        className={`relative mt-0.5 h-[22px] w-[38px] shrink-0 cursor-pointer rounded-full
+                    p-[3px] transition-colors duration-200 ${
+                      checked ? "bg-accent" : "bg-tertiary/40"
+                    }`}
+      >
+        <span
+          className={`block h-4 w-4 rounded-full bg-white shadow-[0_1px_2px_rgba(0,0,0,0.3)]
+                      transition-transform duration-200 ${
+                        checked ? "translate-x-4" : "translate-x-0"
+                      }`}
+        />
+      </button>
+    </div>
+  );
+}
+
 /** A labelled group of controls. */
 export function Group({ title, children }: { title: string; children: React.ReactNode }) {
   return (

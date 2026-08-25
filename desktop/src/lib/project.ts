@@ -98,6 +98,36 @@ export interface Clip {
   fadeOut: number;
 
   /**
+   * How big the picture is drawn, where 1 fills the frame.
+   *
+   * "Fills the frame" means the size the clip would be with no transform at
+   * all - fitted to the project's frame, preserving its aspect. Everything is
+   * relative to that, so a transform means the same thing on a 4K clip and a
+   * 720p one.
+   */
+  scale: number;
+  /** Offset from centred, as a fraction of frame width. */
+  offsetX: number;
+  /** Offset from centred, as a fraction of frame height. */
+  offsetY: number;
+
+  /**
+   * Playback rate. 1 is normal, 2 is twice as fast.
+   *
+   * Changing it rescales the clip's timeline duration, because the same span
+   * of source now takes a different amount of time to play. That is what every
+   * editor does and what people expect from a speed control.
+   */
+  speed: number;
+  /**
+   * Whether pitch stays put when the speed changes.
+   *
+   * True is the modern default - time-stretching that leaves the voice where
+   * it was. False is the tape behaviour, where faster also means higher.
+   */
+  preservePitch: boolean;
+
+  /**
    * Audio filters, applied in order.
    *
    * An array rather than a set because order is audible: an EQ before a
@@ -217,6 +247,11 @@ export function addClip(
     volume: 1,
     fadeIn: 0,
     fadeOut: 0,
+    scale: 1,
+    offsetX: 0,
+    offsetY: 0,
+    speed: 1,
+    preservePitch: true,
     filters: [],
   };
 
@@ -519,6 +554,49 @@ export function mergeClips(
     },
     clipId: first.id,
   };
+}
+
+/**
+ * Changes a clip's speed, rescaling its duration to match.
+ *
+ * The amount of *source* the clip covers is held constant - that is what makes
+ * this a speed change rather than a trim. Playing the same material twice as
+ * fast means occupying half as much timeline.
+ */
+export function setClipSpeed(project: Project, clipId: string, speed: number): Project {
+  const clip = findClip(project, clipId);
+  if (!clip) return project;
+
+  const next = Math.max(0.1, Math.min(8, speed));
+  const sourceCovered = clip.duration * clip.speed;
+
+  return updateClip(project, clipId, {
+    speed: next,
+    duration: Math.max(MIN_CLIP_DURATION, sourceCovered / next),
+  });
+}
+
+/** Limits, so a clip cannot be scaled or dragged out of reach. */
+export const MIN_SCALE = 0.05;
+export const MAX_SCALE = 8;
+const MAX_OFFSET = 3;
+
+/** Moves and resizes a clip's picture, clamped to something recoverable. */
+export function setClipTransform(
+  project: Project,
+  clipId: string,
+  transform: Partial<Pick<Clip, "scale" | "offsetX" | "offsetY">>,
+): Project {
+  const clamp = (value: number, limit: number) => Math.max(-limit, Math.min(limit, value));
+
+  const patch: Partial<Clip> = {};
+  if (transform.scale !== undefined) {
+    patch.scale = Math.max(MIN_SCALE, Math.min(MAX_SCALE, transform.scale));
+  }
+  if (transform.offsetX !== undefined) patch.offsetX = clamp(transform.offsetX, MAX_OFFSET);
+  if (transform.offsetY !== undefined) patch.offsetY = clamp(transform.offsetY, MAX_OFFSET);
+
+  return updateClip(project, clipId, patch);
 }
 
 export function setTrackFlag(

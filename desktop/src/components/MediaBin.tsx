@@ -1,15 +1,24 @@
 import { useEffect, useRef, useState } from "react";
-import type { PointerEvent as ReactPointerEvent, ReactNode } from "react";
+import { open } from "@tauri-apps/plugin-dialog";
+import type { PointerEvent as ReactPointerEvent } from "react";
 
 import type { MediaAssets } from "../lib/assets";
 import { subscribeAssets } from "../lib/assets";
 import type { MediaItem } from "../lib/project";
 import { themeColor } from "../lib/theme";
 import { shortDuration } from "../lib/time";
-import { Icon, IconButton } from "./Icon";
+import { Icon } from "./Icon";
+import { Menu } from "./Menu";
 import { Empty, Panel } from "./Panel";
 
-export type BinTab = "media" | "audio";
+/** Which kinds of media the bin is showing. */
+export interface BinFilter {
+  video: boolean;
+  audio: boolean;
+  image: boolean;
+}
+
+export const ALL_MEDIA: BinFilter = { video: true, audio: true, image: true };
 
 /**
  * The media bin.
@@ -21,11 +30,11 @@ export type BinTab = "media" | "audio";
  */
 export function MediaBin({
   items,
-  tab,
+  filter,
   selectedId,
   busy,
   error,
-  onTab,
+  onFilter,
   onSelect,
   onImport,
   onRemove,
@@ -36,7 +45,7 @@ export function MediaBin({
   dropping,
 }: {
   items: MediaItem[];
-  tab: BinTab;
+  filter: BinFilter;
   /** A file is being dragged over the window from outside. */
   dropping: boolean;
   /** Shared with the timeline, so a waveform is only ever computed once. */
@@ -44,16 +53,37 @@ export function MediaBin({
   selectedId: string | null;
   busy: boolean;
   error: string | null;
-  onTab: (tab: BinTab) => void;
+  onFilter: (filter: BinFilter) => void;
   onSelect: (id: string) => void;
-  onImport: (path: string) => void;
+  onImport: (paths: string[]) => void;
   onRemove: (id: string) => void;
   onDismissError: () => void;
   /** Called once the pointer has moved far enough to count as a drag. */
   onBeginDrag: (item: MediaItem, clientX: number, clientY: number) => void;
   onAddToTimeline: (mediaId: string) => void;
 }) {
-  const [path, setPath] = useState("");
+  const browse = async () => {
+    if (busy) return;
+    const chosen = await open({
+      multiple: true,
+      title: "Import media",
+      filters: [
+        {
+          name: "Media",
+          extensions: [
+            "mp4", "mov", "mkv", "webm", "avi", "m4v",
+            "mp3", "wav", "flac", "aac", "m4a", "ogg", "opus",
+            "png", "jpg", "jpeg", "webp", "bmp", "tif", "tiff", "avif", "gif",
+          ],
+        },
+        { name: "All files", extensions: ["*"] },
+      ],
+    });
+
+    // The picker hands back a string for one file and an array for many.
+    if (Array.isArray(chosen)) onImport(chosen);
+    else if (typeof chosen === "string") onImport([chosen]);
+  };
 
   /**
    * Starts a drag using raw pointer events rather than HTML5 drag-and-drop.
@@ -85,20 +115,11 @@ export function MediaBin({
     window.addEventListener("pointerup", cleanup);
   };
 
-  const visible = items.filter((item) => (tab === "audio" ? item.kind === "audio" : true));
-
-  const submit = () => {
-    // Windows' "Copy as path" wraps the path in quotes, and pasting that
-    // straight in is the single most likely first action.
-    const trimmed = path.trim().replace(/^"|"$/g, "");
-    if (!trimmed || busy) return;
-    onImport(trimmed);
-    setPath("");
-  };
+  const visible = items.filter((item) => filter[item.kind]);
 
   return (
     <Panel
-      title={tab === "audio" ? "Audio" : "Media"}
+      title="Media"
       // Dropped files land in the bin, so the bin is what lights up. A
       // full-screen overlay would obscure the editor to say something that
       // only concerns one panel.
@@ -109,33 +130,48 @@ export function MediaBin({
         </span>
       }
     >
-      <div className="flex gap-0.5 px-2 pb-2 pt-2">
-        <TabButton active={tab === "media"} onClick={() => onTab("media")} icon="folder">
-          All
-        </TabButton>
-        <TabButton active={tab === "audio"} onClick={() => onTab("audio")} icon="music">
-          Audio
-        </TabButton>
+      <div className="px-2 pb-2 pt-2">
+        <Menu
+          groups={[
+            (["video", "audio", "image"] as const).map((kind) => ({
+              label: KIND_LABELS[kind],
+              checked: filter[kind],
+              // Turning the last one off would leave a bin that shows nothing
+              // and gives no hint why, so the final kind stays on.
+              onSelect: () => {
+                const next = { ...filter, [kind]: !filter[kind] };
+                if (next.video || next.audio || next.image) onFilter(next);
+              },
+            })),
+          ]}
+          trigger={(open) => (
+            <span
+              className={`flex w-full items-center gap-1.5 rounded-lg px-2 py-1.5 text-xs
+                          transition-colors ${
+                            open ? "bg-active text-primary" : "text-secondary hover:bg-hover"
+                          }`}
+            >
+              <Icon name="search" size={13} />
+              <span className="min-w-0 flex-1 truncate text-left">{summarise(filter)}</span>
+              <Icon name="chevronDown" size={12} />
+            </span>
+          )}
+        />
       </div>
 
-      <div className="flex gap-1.5 px-2 pb-2">
-        <input
-          value={path}
-          onChange={(event) => setPath(event.target.value)}
-          onKeyDown={(event) => event.key === "Enter" && submit()}
-          placeholder="Paste a file path"
-          spellCheck={false}
-          className="min-w-0 flex-1 rounded-lg border border-hairline bg-sunken px-2 py-1.5
-                     text-xs text-primary placeholder:text-tertiary
-                     focus:border-accent focus:outline-none"
-        />
-        <IconButton
-          icon="plus"
-          label="Add media"
-          size={7}
-          onClick={submit}
-          disabled={busy || path.trim() === ""}
-        />
+      <div className="px-2 pb-2">
+        <button
+          type="button"
+          onClick={() => void browse()}
+          disabled={busy}
+          className="flex w-full cursor-pointer items-center justify-center gap-2 rounded-lg
+                     border border-dashed border-hairline-strong px-3 py-2.5 text-xs text-secondary
+                     transition-colors hover:border-accent hover:bg-hover hover:text-primary
+                     disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          <Icon name="import" size={14} />
+          {busy ? "Importing..." : "Import media"}
+        </button>
       </div>
 
       {error && (
@@ -170,55 +206,81 @@ export function MediaBin({
             : "Drop video and audio files anywhere in the window, or paste a path above."}
         </Empty>
       ) : (
-        <ul className="flex flex-col gap-0.5 px-2 pb-2">
+        <ul className="grid grid-cols-2 gap-2 px-2 pb-2">
           {visible.map((item) => (
             <li
               key={item.id}
               onPointerDown={(event) => beginDrag(event, item)}
               onClick={() => onSelect(item.id)}
               onDoubleClick={() => onAddToTimeline(item.id)}
-              title="Drag onto a track, or double-click to add at the playhead"
-              className={`group flex cursor-grab select-none items-center gap-2.5 rounded-lg px-2 py-2
-                          transition-colors active:cursor-grabbing ${
-                            item.id === selectedId
-                              ? "bg-accent-soft ring-1 ring-accent"
-                              : "hover:bg-hover"
-                          }`}
+              // The details that used to sit on a second line live here now.
+              // They are worth having, but not worth a permanent row each.
+              title={`${item.name}
+${describe(item)}
+Drag onto a track, or double-click to add at the playhead`}
+              className="group cursor-grab select-none active:cursor-grabbing"
             >
-              <MediaThumb item={item} assets={assets} />
-
-              <span className="min-w-0 flex-1">
-                <span className="block truncate text-xs text-primary">{item.name}</span>
-                <span className="block truncate font-technical text-[10px] text-secondary">
-                  {item.kind === "audio"
-                    ? (item.audioCodec ?? "audio")
-                    : item.kind === "image"
-                      ? `${item.width}x${item.height} still`
-                      : `${item.width}x${item.height} · ${item.frameRate?.toFixed(2)} fps`}
-                  {" · "}
-                  {shortDuration(item.duration)}
-                </span>
-              </span>
-
-              <button
-                type="button"
-                aria-label={`Remove ${item.name}`}
-                title="Remove from bin"
-                onClick={(event) => {
-                  event.stopPropagation();
-                  onRemove(item.id);
-                }}
-                className="hidden shrink-0 cursor-pointer rounded p-1 text-secondary
-                           hover:bg-active hover:text-primary group-hover:block"
+              <div
+                className={`relative overflow-hidden rounded-lg transition-shadow ${
+                  item.id === selectedId
+                    ? "ring-2 ring-accent"
+                    : "ring-1 ring-hairline group-hover:ring-hairline-strong"
+                }`}
               >
-                <Icon name="close" size={12} />
-              </button>
+                <MediaThumb item={item} assets={assets} />
+
+                <span className="pointer-events-none absolute left-1 top-1 flex h-5 w-5
+                                 items-center justify-center rounded bg-black/55 text-white">
+                  <Icon
+                    name={item.kind === "video" ? "film" : item.kind === "image" ? "image" : "music"}
+                    size={11}
+                  />
+                </span>
+
+                <span className="pointer-events-none absolute bottom-1 right-1 rounded bg-black/55
+                                 px-1 py-px font-technical text-[10px] text-white">
+                  {item.kind === "image" ? "still" : shortDuration(item.duration)}
+                </span>
+
+                <button
+                  type="button"
+                  aria-label={`Remove ${item.name}`}
+                  title="Remove from bin"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    onRemove(item.id);
+                  }}
+                  className="invisible absolute right-1 top-1 cursor-pointer rounded bg-black/55 p-1
+                             text-white transition-colors hover:bg-danger group-hover:visible"
+                >
+                  <Icon name="close" size={10} />
+                </button>
+              </div>
+
+              <span className="mt-1 block truncate text-[11px] leading-tight text-secondary">
+                {item.name}
+              </span>
             </li>
           ))}
         </ul>
       )}
     </Panel>
   );
+}
+
+const KIND_LABELS = { video: "Video", audio: "Audio", image: "Images" } as const;
+
+/** "All media" when nothing is filtered out, otherwise what is showing. */
+function summarise(filter: BinFilter): string {
+  const on = (["video", "audio", "image"] as const).filter((kind) => filter[kind]);
+  return on.length === 3 ? "All media" : on.map((kind) => KIND_LABELS[kind]).join(", ");
+}
+
+/** The second line that used to be shown for every item, now on hover. */
+function describe(item: MediaItem): string {
+  if (item.kind === "audio") return item.audioCodec ?? "audio";
+  const size = `${item.width}x${item.height}`;
+  return item.kind === "image" ? `${size} still` : `${size} · ${item.frameRate?.toFixed(2)} fps`;
 }
 
 /**
@@ -328,29 +390,3 @@ function MediaThumb({ item, assets }: { item: MediaItem; assets: MediaAssets }) 
   );
 }
 
-function TabButton({
-  active,
-  onClick,
-  icon,
-  children,
-}: {
-  active: boolean;
-  onClick: () => void;
-  icon: "folder" | "music";
-  children: ReactNode;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      aria-pressed={active}
-      className={`flex flex-1 cursor-pointer items-center justify-center gap-1.5 rounded-lg px-2 py-1.5
-                  text-xs transition-colors ${
-                    active ? "bg-accent text-on-accent" : "text-secondary hover:bg-hover"
-                  }`}
-    >
-      <Icon name={icon} size={13} />
-      {children}
-    </button>
-  );
-}

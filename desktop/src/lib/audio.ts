@@ -33,6 +33,10 @@ export interface Voice {
   time: number;
   /** Linear gain, fades already applied. May exceed 1. */
   volume: number;
+  /** Playback rate. */
+  speed: number;
+  /** False lets pitch rise with speed, like tape. */
+  preservePitch: boolean;
   /**
    * A filtered render of this clip, when it has filters.
    *
@@ -154,6 +158,11 @@ export class AudioPreview {
 
       // No clamp. A boost is meant to be audible.
       loaded.gain.gain.value = Math.max(0, voice.volume);
+
+      // `preservesPitch` is exactly the toggle: on, the browser time-stretches
+      // and the voice stays put; off, it resamples and pitch rides the rate.
+      element.playbackRate = Math.max(0.0625, Math.min(16, voice.speed));
+      element.preservesPitch = voice.preservePitch;
 
       // A filtered render starts at the clip's in-point, so the same instant
       // sits at a different offset inside it than in the original file.

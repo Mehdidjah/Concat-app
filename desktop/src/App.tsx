@@ -6,7 +6,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { ContextMenu, type ContextTarget } from "./components/ContextMenu";
 import { ExportDialog } from "./components/ExportDialog";
 import { Icon } from "./components/Icon";
-import { MediaBin, type BinTab } from "./components/MediaBin";
+import { ALL_MEDIA, MediaBin, type BinFilter } from "./components/MediaBin";
 import { Preview, type PreviewSource } from "./components/Preview";
 import { Resizer } from "./components/Resizer";
 import { RightPanel, type RightTab } from "./components/RightPanel";
@@ -15,7 +15,13 @@ import { TitleBar } from "./components/TitleBar";
 import { TimelinePanel, resolveDrop, type Tool } from "./components/TimelinePanel";
 import { createAssets, requestAssets } from "./lib/assets";
 import { AudioPreview } from "./lib/audio";
-import { engineVersion, probeMedia, type ExportClip } from "./lib/engine";
+import {
+  engineVersion,
+  loadProject,
+  probeMedia,
+  saveProject,
+  type ExportClip,
+} from "./lib/engine";
 import {
   addClip,
   addMedia,
@@ -35,6 +41,7 @@ import {
   removeClips,
   removeTrack,
   renameTrack,
+  setClipSpeed,
   setTrackFlag,
   snapTime,
   splitClip,
@@ -47,6 +54,7 @@ import {
   type Project,
 } from "./lib/project";
 import { buildChain, chainKey } from "./lib/filters";
+import { fromDocument, toDocument } from "./lib/persist";
 import { useTheme, type Theme } from "./lib/theme";
 import { useTransport } from "./lib/transport";
 
@@ -116,7 +124,7 @@ function Editor({
   const [selectedMediaId, setSelectedMediaId] = useState<string | null>(null);
   const [tool, setTool] = useState<Tool>("select");
   const [snap, setSnap] = useState(true);
-  const [tab, setTab] = useState<BinTab>("media");
+  const [binFilter, setBinFilter] = useState<BinFilter>(ALL_MEDIA);
   const [version, setVersion] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -127,6 +135,9 @@ function Editor({
   );
   const [exporting, setExporting] = useState(false);
   const [rightTab, setRightTab] = useState<RightTab>("details");
+  const [saveState, setSaveState] = useState<"idle" | "saving" | "saved" | "failed">("idle");
+  /** Blocks autosave until the project on disk has been read in. */
+  const [loaded, setLoaded] = useState(false);
 
   // Panel geometry.
   const [leftWidth, setLeftWidth] = useState(340);
@@ -152,6 +163,42 @@ function Editor({
   // The project's rate is authoritative, not the first clip's. Timecode that
   // changes meaning when you import a 25fps file is worse than useless.
   const frameRate = session.frameRate;
+
+  // Load the saved timeline before anything can autosave over it.
+  useEffect(() => {
+    let cancelled = false;
+    void loadProject(session.path)
+      .then((document) => {
+        const restored = fromDocument(document);
+        if (!cancelled && restored) setProject(restored);
+      })
+      .catch(() => undefined)
+      .finally(() => {
+        if (!cancelled) setLoaded(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [session.path]);
+
+  const save = useCallback(async () => {
+    setSaveState("saving");
+    try {
+      await saveProject(session.path, toDocument(session, latest.current.project));
+      setSaveState("saved");
+    } catch (cause) {
+      setSaveState("failed");
+      setError(String(cause));
+    }
+  }, [session]);
+
+  // Autosave, debounced. The edit is the thing people lose; making them
+  // remember a keystroke to keep it is a design decision nobody wants.
+  useEffect(() => {
+    if (!loaded) return;
+    const timer = window.setTimeout(() => void save(), 1500);
+    return () => clearTimeout(timer);
+  }, [project, loaded, save]);
 
   useEffect(() => {
     engineVersion()
@@ -227,7 +274,11 @@ function Editor({
           {
             clipId: clip.id,
             path: media.path,
-            time: clip.sourceStart + (playhead - clip.start),
+            // Source advances at `speed`, so the same playhead maps further
+            // into the file on a sped-up clip.
+            time: clip.sourceStart + (playhead - clip.start) * clip.speed,
+            speed: clip.speed,
+            preservePitch: clip.preservePitch,
             // A filtered clip plays a render of itself, produced by the same
             // ffmpeg chain the exporter will use.
             filter: chainFor(clip),
@@ -403,6 +454,36 @@ function Editor({
       // Never steal keys from a text field.
       if (event.target instanceof HTMLInputElement) return;
 
+      /*
+       * Modified shortcuts are handled separately and then we return.
+       *
+       * Without this the two sets ran together: Ctrl+S matched the bare `S`
+       * case and split the clip instead of saving, which is exactly the sort
+       * of thing that makes an app feel hostile.
+       */
+      if (event.ctrlKey || event.metaKey) {
+        switch (event.code) {
+          case "KeyS":
+            event.preventDefault();
+            void save();
+            break;
+          case "KeyB":
+            event.preventDefault();
+            splitAtPlayhead();
+            break;
+          case "KeyE":
+            event.preventDefault();
+            setExporting(true);
+            break;
+          default:
+            break;
+        }
+        return;
+      }
+
+      // Alt is left alone entirely; nothing here claims it.
+      if (event.altKey) return;
+
       const step = event.shiftKey ? 10 : 1;
       switch (event.code) {
         case "Space":
@@ -447,7 +528,7 @@ function Editor({
 
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [deleteSelected, duration, frameRate, mergeSelected, splitAtPlayhead, transport]);
+  }, [deleteSelected, duration, frameRate, mergeSelected, save, splitAtPlayhead, transport]);
 
   // Filters are rendered per clip, keyed so that returning a slider to a value
   // you already heard reuses the render instead of producing it again.
@@ -486,6 +567,8 @@ function Editor({
             fadeIn: clip.fadeIn,
             fadeOut: clip.fadeOut,
             filterChain: buildChain(clip.filters) ?? "",
+            speed: clip.speed,
+            preservePitch: clip.preservePitch,
           },
         ];
       }),
@@ -506,7 +589,17 @@ function Editor({
     <div className="flex h-full flex-col overflow-hidden">
       <TitleBar
         projectName={session.name}
-        status={version ? `engine ${version}` : undefined}
+        status={
+          saveState === "saving"
+            ? "saving..."
+            : saveState === "failed"
+              ? "save failed"
+              : saveState === "saved"
+                ? "saved"
+                : version
+                  ? `engine ${version}`
+                  : undefined
+        }
         theme={theme}
         onToggleTheme={onToggleTheme}
         actions={
@@ -530,6 +623,12 @@ function Editor({
                   icon: "plus",
                   disabled: !selectedMediaId,
                   onSelect: () => selectedMediaId && addToTimeline(selectedMediaId),
+                },
+                {
+                  label: "Save",
+                  icon: "folder",
+                  hint: "Ctrl+S",
+                  onSelect: () => void save(),
                 },
                 {
                   label: "Export...",
@@ -557,7 +656,7 @@ function Editor({
             label: "Edit",
             groups: [
               [
-                { label: "Split at playhead", icon: "razor", hint: "S", onSelect: splitAtPlayhead },
+                { label: "Split at playhead", icon: "razor", hint: "Ctrl+B", onSelect: splitAtPlayhead },
                 {
                   label:
                     selectedClipIds.length > 1
@@ -613,16 +712,16 @@ function Editor({
               items={project.media}
               assets={assets.current}
               dropping={dropping}
-              tab={tab}
+              filter={binFilter}
               selectedId={selectedMediaId}
               busy={busy}
               error={error}
-              onTab={setTab}
+              onFilter={setBinFilter}
               onSelect={(id) => {
                 setSelectedMediaId(id);
                 setSelectedClipIds([]);
               }}
-              onImport={(path) => void importPaths([path])}
+              onImport={(paths) => void importPaths(paths)}
               onRemove={(id) =>
                 setProject((current) => ({
                   ...current,
@@ -674,6 +773,10 @@ function Editor({
               onChangeClip={(patch) => {
                 if (selectedClipIds.length !== 1) return;
                 setProject((current) => updateClip(current, selectedClipIds[0], patch));
+              }}
+              onSpeedChange={(speed) => {
+                if (selectedClipIds.length !== 1) return;
+                setProject((current) => setClipSpeed(current, selectedClipIds[0], speed));
               }}
             />
           </div>

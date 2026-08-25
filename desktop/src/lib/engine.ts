@@ -109,6 +109,16 @@ export async function openProject(path: string): Promise<ProjectInfo> {
   return invoke<ProjectInfo>("open_project", { path });
 }
 
+/** Writes the whole project document to the project folder. */
+export async function saveProject(path: string, document: unknown): Promise<void> {
+  return invoke<void>("save_project", { path, document });
+}
+
+/** Reads the whole project document back. */
+export async function loadProject(path: string): Promise<unknown> {
+  return invoke<unknown>("load_project", { path });
+}
+
 /** Recently opened projects, newest first, with vanished folders left out. */
 export async function recentProjects(): Promise<ProjectInfo[]> {
   return invoke<ProjectInfo[]>("recent_projects");

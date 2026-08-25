@@ -28,6 +28,7 @@ export function RightPanel({
   media,
   frameRate,
   onChangeClip,
+  onSpeedChange,
   rendering,
 }: {
   tab: RightTab;
@@ -36,6 +37,7 @@ export function RightPanel({
   media: MediaItem | null;
   frameRate: number;
   onChangeClip: (patch: Partial<Clip>) => void;
+  onSpeedChange: (speed: number) => void;
   /** True while the selected clip's filtered audio is being rendered. */
   rendering: boolean;
 }) {
@@ -62,7 +64,9 @@ export function RightPanel({
       </div>
 
       {tab === "details" && <Inspector clip={clip} media={media} frameRate={frameRate} />}
-      {tab === "adjust" && <AdjustPanel clip={clip} onChange={onChangeClip} />}
+      {tab === "adjust" && (
+        <AdjustPanel clip={clip} onChange={onChangeClip} onSpeedChange={onSpeedChange} />
+      )}
       {tab === "filters" && (
         <FiltersPanel
           clip={clip}

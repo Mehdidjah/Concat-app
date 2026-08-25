@@ -1,5 +1,5 @@
 import type { Clip } from "../lib/project";
-import { Group, Slider } from "./controls";
+import { Group, Slider, Toggle } from "./controls";
 import { Icon } from "./Icon";
 import { Empty } from "./Panel";
 
@@ -48,9 +48,12 @@ function formatDecibels(decibels: number): string {
 export function AdjustPanel({
   clip,
   onChange,
+  onSpeedChange,
 }: {
   clip: Clip | null;
   onChange: (patch: Partial<Clip>) => void;
+  /** Separate, because changing speed also rescales the clip's duration. */
+  onSpeedChange: (speed: number) => void;
 }) {
   if (!clip) {
     return (
@@ -85,6 +88,31 @@ export function AdjustPanel({
           onChange={(decibels) => onChange({ volume: fromDecibels(decibels) })}
         />
       </Group>
+
+      {clip.kind === "audio" && (
+        <Group title="Speed">
+          <Slider
+            label="Rate"
+            value={clip.speed}
+            min={0.25}
+            max={4}
+            step={0.05}
+            format={(value) => `${value.toFixed(2)}x`}
+            onReset={() => onSpeedChange(1)}
+            onChange={onSpeedChange}
+          />
+          <Toggle
+            label="Change pitch with speed"
+            hint="Off keeps the voice where it is. On is tape behaviour - faster also means higher."
+            checked={!clip.preservePitch}
+            onChange={(checked) => onChange({ preservePitch: !checked })}
+          />
+          <p className="-mt-1 mb-1 text-[11px] leading-snug text-tertiary">
+            The clip covers the same audio either way, so its length on the timeline
+            changes to match.
+          </p>
+        </Group>
+      )}
 
       <Group title="Fades">
         <Slider

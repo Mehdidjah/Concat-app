@@ -51,6 +51,16 @@ pub struct ExportClip {
     /// FFmpeg filter chain from the Filters tab, or empty.
     #[serde(default)]
     pub filter_chain: String,
+    /// Playback rate. 1 is normal.
+    #[serde(default = "unity")]
+    pub speed: f64,
+    /// False lets pitch rise with the rate, like tape.
+    #[serde(default = "yes")]
+    pub preserve_pitch: bool,
+}
+
+fn yes() -> bool {
+    true
 }
 
 fn unity() -> f64 {
@@ -303,10 +313,30 @@ fn mix_audio(clips: &[&ExportClip], duration: f64, destination: &Path) -> Result
         // Gain and fades sit between the restamp and the delay: after the
         // restamp so the fade times are measured from the clip's own start,
         // and before the delay so they are not pushed along with it.
+        // A sped-up clip covers more source than its timeline length, so the
+        // trim has to take `duration * speed` before the rate is applied.
+        let speed = clip.speed.clamp(0.1, 8.0);
         let mut stage = format!(
             "[{index}:a]atrim=start={:.6}:duration={:.6},asetpts=PTS-STARTPTS",
-            clip.source_start, clip.duration
+            clip.source_start,
+            clip.duration * speed
         );
+
+        if (speed - 1.0).abs() > f64::EPSILON {
+            if clip.preserve_pitch {
+                // atempo time-stretches, leaving pitch alone. Its per-instance
+                // range is limited, so a large change is split into stages
+                // that multiply out to the requested rate.
+                for factor in tempo_stages(speed) {
+                    stage.push_str(&format!(",atempo={factor:.6}"));
+                }
+            } else {
+                // Resampling moves pitch and tempo together - the tape effect.
+                stage.push_str(&format!(
+                    ",asetrate=48000*{speed:.6},aresample=48000"
+                ));
+            }
+        }
 
         // Filters first: they are what the clip *is* now, and gain and fades
         // are adjustments applied to that result. Reversing the order would
@@ -349,6 +379,27 @@ fn mix_audio(clips: &[&ExportClip], duration: f64, destination: &Path) -> Result
     run_ffmpeg(command, "mixing audio")
 }
 
+/// Splits a rate into `atempo` stages that each stay inside its valid range.
+///
+/// One filter instance is limited, so 4x has to become 2x then 2x. Multiplying
+/// the stages back together is what keeps the result exact.
+fn tempo_stages(speed: f64) -> Vec<f64> {
+    let mut stages = Vec::new();
+    let mut remaining = speed;
+
+    while remaining > 2.0 {
+        stages.push(2.0);
+        remaining /= 2.0;
+    }
+    while remaining < 0.5 {
+        stages.push(0.5);
+        remaining /= 0.5;
+    }
+
+    stages.push(remaining);
+    stages
+}
+
 fn mux(video: &Path, audio: &Path, output: &Path) -> Result<(), String> {
     let mut command = std::process::Command::new(relay_media::ffmpeg());
     command
@@ -383,4 +434,32 @@ fn run_ffmpeg(mut command: std::process::Command, stage: &str) -> Result<(), Str
 fn emit(app: &tauri::AppHandle, frame: i64, total: i64, stage: &'static str) {
     // A dropped progress event is not worth failing an export over.
     let _ = app.emit("export://progress", Progress { frame, total, stage });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tempo_stages_multiply_back_to_the_requested_rate() {
+        for speed in [0.25, 0.5, 0.9, 1.0, 1.5, 2.0, 3.0, 4.0, 8.0] {
+            let product: f64 = tempo_stages(speed).iter().product();
+            assert!(
+                (product - speed).abs() < 1e-9,
+                "stages for {speed} multiplied to {product}",
+            );
+        }
+    }
+
+    #[test]
+    fn every_stage_is_within_the_filter_range() {
+        for speed in [0.25, 0.5, 1.0, 4.0, 8.0] {
+            for factor in tempo_stages(speed) {
+                assert!(
+                    (0.5..=2.0).contains(&factor),
+                    "{factor} is outside atempo's range, from speed {speed}",
+                );
+            }
+        }
+    }
 }

@@ -62,3 +62,7 @@ desktop.ini
 # FFmpeg development build for the FFI decoder (headers + import libs).
 # Large, machine-specific, and not needed for a normal build - see BUILD.md.
 /vendor/
+
+# Bundled FFmpeg, staged for packaging. Produced by .github/workflows/ffmpeg.yml
+# or copied from a dev build - either way it is a binary artifact, not source.
+desktop/src-tauri/ffmpeg/

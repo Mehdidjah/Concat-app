@@ -707,7 +707,7 @@ export function TimelinePanel({
           onClick={() => onToolChange("razor")}
         />
         <Divider />
-        <IconButton icon="split" label="Split at playhead (S)" onClick={onSplitAtPlayhead} />
+        <IconButton icon="split" label="Split at playhead (Ctrl+B)" onClick={onSplitAtPlayhead} />
         <IconButton
           icon="merge"
           // The reason lives in the tooltip: a button that greys out without

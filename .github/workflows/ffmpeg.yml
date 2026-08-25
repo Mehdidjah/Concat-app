@@ -1,0 +1,127 @@
+name: Build FFmpeg
+
+# Builds the cut-down FFmpeg that Relay ships.
+#
+# Run by hand, not on every push. The output only changes when the version or
+# the feature list below changes, which is roughly never - so this produces an
+# artifact you download once and commit to the release, rather than something
+# that runs on your time.
+#
+# Why not build locally: the reduced build takes 20-35 minutes on a 4-core
+# machine, and most of that is `configure` spawning thousands of tiny probes,
+# which Windows is bad at. Here it runs while you do something else, and the
+# exact source and configure line are recorded in the log.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "FFmpeg release tag (e.g. n8.1.2)"
+        required: true
+        default: "n8.1.2"
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+
+    steps:
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          # nasm is not optional: without it the x86 assembly is skipped and
+          # decoding runs several times slower.
+          install: >-
+            base-devel
+            git
+            diffutils
+            make
+            pkgconf
+            nasm
+            yasm
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-x264
+
+      - name: Fetch FFmpeg source
+        run: |
+          git clone --depth 1 --branch "${{ inputs.version }}" \
+            https://github.com/FFmpeg/FFmpeg.git ffmpeg
+          cd ffmpeg && git rev-parse HEAD > ../SOURCE-COMMIT.txt
+
+      - name: Configure
+        run: |
+          cd ffmpeg
+          #
+          # Everything off, then only what Relay actually invokes turned back
+          # on. This is where the size comes from: a full avcodec carries some
+          # five hundred codecs, and an editor opens perhaps a dozen.
+          #
+          # If you add a format to the app, add it here too - the failure mode
+          # is "could not open", not a crash.
+          #
+          ./configure \
+            --prefix=../out \
+            --disable-everything \
+            --disable-doc \
+            --disable-debug \
+            --disable-network \
+            --disable-autodetect \
+            --disable-ffplay \
+            --disable-shared \
+            --enable-static \
+            --enable-small \
+            --enable-gpl \
+            --enable-libx264 \
+            --enable-decoder=h264,hevc,vp8,vp9,av1,mpeg4,mjpeg,prores,dnxhd,png,webp,bmp,tiff,gif,aac,mp3,flac,opus,vorbis,alac,pcm_s16le,pcm_s24le,pcm_s32le,pcm_f32le \
+            --enable-encoder=libx264,aac,mjpeg,png,pcm_s16le \
+            --enable-demuxer=mov,matroska,avi,mp3,wav,flac,ogg,aac,image2,gif,rawvideo,concat,lavfi \
+            --enable-muxer=mp4,mov,mp3,wav,ipod,mjpeg,image2,rawvideo,null \
+            --enable-parser=h264,hevc,vp8,vp9,av1,aac,mpegaudio,flac,vorbis,png,mjpeg \
+            --enable-bsf=h264_mp4toannexb,hevc_mp4toannexb,aac_adtstoasc \
+            --enable-protocol=file,pipe \
+            --enable-filter=scale,tile,fps,format,null,copy,setpts,trim,transpose,crop,overlay \
+            --enable-filter=aresample,asetrate,atempo,aformat,anull,atrim,asetpts,adelay,amix,apad,afade,volume \
+            --enable-filter=highpass,lowpass,equalizer,bass,treble,compand,deesser,aecho,alimiter,aphaser,flanger \
+            --enable-filter=abuffer,abuffersink,buffer,buffersink,anullsrc,aevalsrc,testsrc2,sine
+
+      - name: Build
+        run: cd ffmpeg && make -j"$(nproc)" && make install
+
+      - name: Verify it can do the work
+        run: |
+          set -e
+          BIN=out/bin
+          "$BIN/ffmpeg.exe" -hide_banner -version | head -1
+          "$BIN/ffprobe.exe" -hide_banner -version | head -1
+
+          # Not a smoke test of the binary - a check that the *feature list*
+          # above is sufficient. Each of these mirrors something the app does.
+          "$BIN/ffmpeg.exe" -hide_banner -loglevel error -y \
+            -f lavfi -i testsrc2=size=320x240:rate=30 -t 1 \
+            -c:v libx264 -pix_fmt yuv420p probe.mp4
+          "$BIN/ffprobe.exe" -v error -show_streams -of json probe.mp4 > /dev/null
+          "$BIN/ffmpeg.exe" -hide_banner -loglevel error -y -i probe.mp4 \
+            -vf "fps=4,scale=-2:72,tile=4x1" -frames:v 1 -f mjpeg strip.jpg
+          "$BIN/ffmpeg.exe" -hide_banner -loglevel error -y -i probe.mp4 \
+            -f rawvideo -pix_fmt rgba - > /dev/null
+          "$BIN/ffmpeg.exe" -hide_banner -loglevel error -y \
+            -f lavfi -i sine=frequency=220:duration=1 \
+            -af "aresample=48000,asetrate=52000,aresample=48000,atempo=0.92,highpass=f=85,equalizer=f=4200:t=q:w=0.8:g=3,compand=attacks=0.01:decays=0.18:points=-80/-80|0/-1.5,deesser=i=0.3,aecho=0.8:0.82:38:0.02,alimiter=limit=0.94" \
+            -f wav filtered.wav
+          echo "every path the app uses is present"
+
+      - name: Report size
+        run: |
+          ls -l out/bin
+          du -sh out/bin
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ffmpeg-${{ inputs.version }}-win64
+          path: |
+            out/bin/ffmpeg.exe
+            out/bin/ffprobe.exe
+            SOURCE-COMMIT.txt
+          if-no-files-found: error

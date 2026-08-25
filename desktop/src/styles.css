@@ -94,6 +94,16 @@
    */
   --color-stage: #000000;
   --color-on-stage: rgba(255, 255, 255, 0.38);
+  /*
+   * Selection highlight, the same in both themes.
+   *
+   * Lime is legible against near-black and near-white alike, which is what a
+   * selection has to be - it lands on whatever text happens to be underneath
+   * it. The dark ink on top is fixed for the same reason.
+   */
+  --color-selection: #c6f432;
+  --color-on-selection: #101014;
+
   --color-playhead: #ff3b30;
   --color-clip-video: #0a6cc4;
   --color-clip-video-body: #cfe3f7;
@@ -180,6 +190,20 @@
   --color-ruler: #131316;
 }
 
+/**
+ * Opts a region back into text selection.
+ *
+ * The app disables selection globally, because dragging clips around a
+ * timeline should not paint half the interface blue. Read-only information is
+ * the exception - a file path you cannot copy is a file path you have to
+ * retype.
+ */
+@utility selectable {
+  user-select: text;
+  -webkit-user-select: text;
+  cursor: auto;
+}
+
 /* Panel scrollbars: no visible track or gutter, just a small rounded thumb. */
 @utility thin-scroll {
   scrollbar-width: thin;
@@ -257,6 +281,11 @@
   input {
     user-select: text;
     -webkit-user-select: text;
+  }
+
+  ::selection {
+    background-color: var(--color-selection);
+    color: var(--color-on-selection);
   }
 
   /* Numbers that change in place must not reflow as they do. */

@@ -29,7 +29,7 @@ export function Inspector({
           Select a clip or a bin item.
         </Empty>
       ) : (
-        <div className="px-3 py-2">
+        <div className="selectable px-3 py-2">
           {clip && (
             <Section title="Clip">
               <Row label="Name" value={clip.name} />
