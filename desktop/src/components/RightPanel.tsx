@@ -1,8 +1,9 @@
 import type { Clip, MediaItem } from "../lib/project";
+import type { ClipFilter } from "../lib/filters";
 import { AdjustPanel } from "./AdjustPanel";
-import { Icon } from "./Icon";
+import { FiltersPanel } from "./FiltersPanel";
 import { Inspector } from "./Inspector";
-import { Empty, Panel } from "./Panel";
+import { Panel } from "./Panel";
 
 export type RightTab = "details" | "adjust" | "filters";
 
@@ -27,6 +28,7 @@ export function RightPanel({
   media,
   frameRate,
   onChangeClip,
+  rendering,
 }: {
   tab: RightTab;
   onTab: (tab: RightTab) => void;
@@ -34,6 +36,8 @@ export function RightPanel({
   media: MediaItem | null;
   frameRate: number;
   onChangeClip: (patch: Partial<Clip>) => void;
+  /** True while the selected clip's filtered audio is being rendered. */
+  rendering: boolean;
 }) {
   return (
     <Panel>
@@ -60,13 +64,11 @@ export function RightPanel({
       {tab === "details" && <Inspector clip={clip} media={media} frameRate={frameRate} />}
       {tab === "adjust" && <AdjustPanel clip={clip} onChange={onChangeClip} />}
       {tab === "filters" && (
-        // Said plainly rather than dressed up with a disabled list of effects
-        // that do not exist. Audio filters need the preview to run through Web
-        // Audio so that what you hear matches what ffmpeg will render.
-        <Empty icon={<Icon name="settings" size={26} strokeWidth={1.5} />}>
-          No filters yet. Audio effects arrive once the preview runs through a real
-          mixer rather than a media element.
-        </Empty>
+        <FiltersPanel
+          clip={clip}
+          rendering={rendering}
+          onChange={(filters: ClipFilter[]) => onChangeClip({ filters })}
+        />
       )}
     </Panel>
   );

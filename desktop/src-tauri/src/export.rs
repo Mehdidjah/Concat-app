@@ -48,6 +48,9 @@ pub struct ExportClip {
     pub fade_in: f64,
     #[serde(default)]
     pub fade_out: f64,
+    /// FFmpeg filter chain from the Filters tab, or empty.
+    #[serde(default)]
+    pub filter_chain: String,
 }
 
 fn unity() -> f64 {
@@ -304,6 +307,14 @@ fn mix_audio(clips: &[&ExportClip], duration: f64, destination: &Path) -> Result
             "[{index}:a]atrim=start={:.6}:duration={:.6},asetpts=PTS-STARTPTS",
             clip.source_start, clip.duration
         );
+
+        // Filters first: they are what the clip *is* now, and gain and fades
+        // are adjustments applied to that result. Reversing the order would
+        // let a compressor inside a filter chain undo the fade.
+        if !clip.filter_chain.is_empty() {
+            stage.push(',');
+            stage.push_str(&clip.filter_chain);
+        }
 
         if (clip.volume - 1.0).abs() > f64::EPSILON {
             stage.push_str(&format!(",volume={:.4}", clip.volume.max(0.0)));

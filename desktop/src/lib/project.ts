@@ -21,6 +21,7 @@
  */
 
 import type { MediaSummary } from "./engine";
+import type { ClipFilter } from "./filters";
 
 /**
  * What a piece of media is.
@@ -95,6 +96,14 @@ export interface Clip {
   fadeIn: number;
   /** Fade-out length in seconds. Zero means no fade. */
   fadeOut: number;
+
+  /**
+   * Audio filters, applied in order.
+   *
+   * An array rather than a set because order is audible: an EQ before a
+   * limiter is a different sound from the reverse.
+   */
+  filters: ClipFilter[];
 }
 
 export interface Project {
@@ -208,6 +217,7 @@ export function addClip(
     volume: 1,
     fadeIn: 0,
     fadeOut: 0,
+    filters: [],
   };
 
   return { project: { ...project, clips: [...project.clips, clip] }, clipId: clip.id };
@@ -338,13 +348,14 @@ export function splitClip(project: Project, clipId: string, time: number): Proje
     return project;
   }
 
-  const head: Clip = { ...clip, duration: offset };
+  const head: Clip = { ...clip, duration: offset, filters: [...clip.filters] };
   const tail: Clip = {
     ...clip,
     id: nextId("c"),
     start: clip.start + offset,
     duration: clip.duration - offset,
     sourceStart: clip.sourceStart + offset,
+    filters: [...clip.filters],
   };
 
   return {

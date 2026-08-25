@@ -42,9 +42,11 @@ import {
   updateClip,
   trimClip,
   whyNotMerge,
+  type Clip,
   type MediaItem,
   type Project,
 } from "./lib/project";
+import { buildChain, chainKey } from "./lib/filters";
 import { useTheme, type Theme } from "./lib/theme";
 import { useTransport } from "./lib/transport";
 
@@ -205,8 +207,13 @@ function Editor({
   const audio = useRef<AudioPreview | null>(null);
   if (audio.current === null) audio.current = new AudioPreview();
 
+  const [renderingClips, setRenderingClips] = useState<ReadonlySet<string>>(new Set());
+
   useEffect(() => {
     const preview = audio.current;
+    if (preview) {
+      preview.onRenderChange = () => setRenderingClips(new Set(preview.pending()));
+    }
     return () => preview?.dispose();
   }, []);
 
@@ -221,6 +228,9 @@ function Editor({
             clipId: clip.id,
             path: media.path,
             time: clip.sourceStart + (playhead - clip.start),
+            // A filtered clip plays a render of itself, produced by the same
+            // ffmpeg chain the exporter will use.
+            filter: chainFor(clip),
             // Uncapped: the preview routes through a gain node, so what you
             // hear matches what the exporter will render.
             volume: clipGainAt(clip, playhead),
@@ -439,6 +449,19 @@ function Editor({
     return () => window.removeEventListener("keydown", onKey);
   }, [deleteSelected, duration, frameRate, mergeSelected, splitAtPlayhead, transport]);
 
+  // Filters are rendered per clip, keyed so that returning a slider to a value
+  // you already heard reuses the render instead of producing it again.
+  const chainFor = useCallback((clip: Clip) => {
+    const chain = buildChain(clip.filters);
+    if (!chain) return undefined;
+    return {
+      key: chainKey(clip.mediaId, clip.sourceStart, clip.duration, clip.filters),
+      chain,
+      sourceStart: clip.sourceStart,
+      duration: clip.duration,
+    };
+  }, []);
+
   // The exporter works from a flat list: the engine rebuilds a real timeline
   // from it, so track *order* has to survive the trip even though track
   // identity does not.
@@ -462,6 +485,7 @@ function Editor({
             volume: clip.volume,
             fadeIn: clip.fadeIn,
             fadeOut: clip.fadeOut,
+            filterChain: buildChain(clip.filters) ?? "",
           },
         ];
       }),
@@ -646,6 +670,7 @@ function Editor({
               clip={selectedClip}
               media={inspectorMedia}
               frameRate={frameRate}
+              rendering={selectedClipIds.some((id) => renderingClips.has(id))}
               onChangeClip={(patch) => {
                 if (selectedClipIds.length !== 1) return;
                 setProject((current) => updateClip(current, selectedClipIds[0], patch));

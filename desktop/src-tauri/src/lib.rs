@@ -195,6 +195,63 @@ fn filmstrip(path: &str, count: u32, height: u32) -> Result<Vec<u8>, String> {
     Ok(output.stdout)
 }
 
+/// Renders one clip's audio through a filter chain and returns it as WAV.
+///
+/// This is what lets the preview play filtered audio *exactly* as the export
+/// will render it. The alternative - reimplementing pitch shifting, companding
+/// and de-essing in Web Audio - would be a second implementation to keep in
+/// step with the first, and it would be wrong in ways nobody would notice
+/// until the exported file sounded different from the edit.
+///
+/// WAV because it decodes instantly in the browser and needs no container
+/// seeking; the result is short-lived and never written to disk.
+#[tauri::command]
+async fn render_filtered_audio(
+    path: String,
+    source_start: f64,
+    duration: f64,
+    chain: String,
+) -> Result<tauri::ipc::Response, String> {
+    let bytes = tauri::async_runtime::spawn_blocking(move || {
+        // A filter chain arrives as text and goes straight to FFmpeg, so it
+        // must not be able to smuggle in another argument.
+        if chain.contains('\n') || chain.contains('\r') {
+            return Err("filter chain contains a line break".to_owned());
+        }
+
+        let mut command = std::process::Command::new(relay_media::ffmpeg());
+        command
+            .args(["-hide_banner", "-nostdin", "-loglevel", "error"])
+            .args(["-ss", &format!("{source_start:.6}")])
+            .args(["-t", &format!("{duration:.6}")])
+            .args(["-i", &path])
+            .args(["-vn", "-af", &chain])
+            // 16-bit stereo at 48k: what the filters run at anyway, and small
+            // enough to move over the bridge without a second thought.
+            .args(["-ac", "2", "-ar", "48000", "-c:a", "pcm_s16le"])
+            .args(["-f", "wav", "-"]);
+
+        let output = command
+            .output()
+            .map_err(|error| format!("could not run ffmpeg: {error}"))?;
+
+        if !output.status.success() {
+            let detail = String::from_utf8_lossy(&output.stderr);
+            let tail = detail.lines().rev().take(2).collect::<Vec<_>>().join(" / ");
+            return Err(format!("filter failed: {tail}"));
+        }
+        if output.stdout.is_empty() {
+            return Err("filter produced no audio".to_owned());
+        }
+
+        Ok(output.stdout)
+    })
+    .await
+    .map_err(|error| format!("filter task failed: {error}"))??;
+
+    Ok(tauri::ipc::Response::new(bytes))
+}
+
 /// Creates a project folder, writes its manifest and records it as recent.
 #[tauri::command]
 async fn create_project(
@@ -319,6 +376,7 @@ pub fn run() {
             probe_media,
             engine_version,
             read_media_bytes,
+            render_filtered_audio,
             extract_filmstrip,
             create_project,
             open_project,

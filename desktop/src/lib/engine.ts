@@ -60,6 +60,21 @@ export async function readMediaBytes(path: string): Promise<ArrayBuffer> {
   return invoke<ArrayBuffer>("read_media_bytes", { path });
 }
 
+/**
+ * Renders a clip's audio through an FFmpeg filter chain, returning WAV bytes.
+ *
+ * The same chain string the exporter uses, so the preview cannot drift from
+ * the rendered file.
+ */
+export async function renderFilteredAudio(request: {
+  path: string;
+  sourceStart: number;
+  duration: number;
+  chain: string;
+}): Promise<ArrayBuffer> {
+  return invoke<ArrayBuffer>("render_filtered_audio", request);
+}
+
 /** A project on disk, as the launch screen sees it. */
 export interface ProjectInfo {
   path: string;
@@ -119,6 +134,8 @@ export interface ExportClip {
   volume: number;
   fadeIn: number;
   fadeOut: number;
+  /** FFmpeg filter chain, or empty for none. */
+  filterChain: string;
 }
 
 export interface ExportRequest {
