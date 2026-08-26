@@ -65,4 +65,8 @@ desktop.ini
 
 # Bundled FFmpeg, staged for packaging. Produced by .github/workflows/ffmpeg.yml
 # or copied from a dev build - either way it is a binary artifact, not source.
-desktop/src-tauri/ffmpeg/
+# The README stays tracked so the directory exists on a fresh checkout - the
+# `ffmpeg/*` resources glob in tauri.conf.json fails the build if it matches
+# nothing.
+desktop/src-tauri/ffmpeg/*
+!desktop/src-tauri/ffmpeg/README.md
