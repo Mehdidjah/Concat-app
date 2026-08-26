@@ -1,7 +1,15 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import {
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type PointerEvent as ReactPointerEvent,
+} from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 
 import { timecode } from "../lib/time";
+import { MAX_SCALE, MIN_SCALE } from "../lib/project";
 import { textCss, type TextStyle } from "../lib/text";
 import { Icon, IconButton } from "./Icon";
 import { Menu } from "./Menu";
@@ -41,6 +49,16 @@ export interface PreviewSource {
   isStill: boolean;
 }
 
+/** How the displayed clip's picture sits in the frame. Mirrors the engine's
+ * `Transform`: scale over the fitted size, offsets as frame fractions from
+ * centre, clockwise degrees about the picture's centre. */
+export interface PreviewTransform {
+  scale: number;
+  offsetX: number;
+  offsetY: number;
+  rotation: number;
+}
+
 /** A title to draw over the picture, already positioned. */
 export interface TextOverlay {
   clipId: string;
@@ -48,6 +66,90 @@ export interface TextOverlay {
   /** Offset from centred, as a fraction of the frame. */
   offsetX: number;
   offsetY: number;
+}
+
+/** Alignment guides live while something is being dragged: a vertical line at
+ * `x` and a horizontal one at `y`, both fractions of the frame. Null = none. */
+interface Guides {
+  x: number | null;
+  y: number | null;
+}
+
+const NO_GUIDES: Guides = { x: null, y: null };
+
+/** How close an alignment has to be before it takes, in screen pixels. Small
+ * on purpose: a guide should feel like a nudge you barely notice accepting,
+ * never like a magnet fighting the drag. */
+const SNAP_PX = 6;
+
+/** Chrome shared by every draggable box in the monitor. */
+const HANDLE_CLASS =
+  "absolute h-2.5 w-2.5 -translate-x-1/2 -translate-y-1/2 rounded-[3px] border border-black/50 bg-white shadow-sm";
+
+/**
+ * A window-scoped pointer drag.
+ *
+ * Listeners go on the window because the pointer leaves a ten-pixel handle on
+ * the first movement. Moves are coalesced to one per animation frame: writing
+ * the project re-renders the whole editor, and macOS delivers pointer events
+ * faster than frames paint. Returns a detach that is safe to call twice - the
+ * component may unmount mid-drag when the playhead runs off the clip.
+ */
+function startDrag(onFrame: (pointer: PointerEvent) => void, onEnd: () => void): () => void {
+  let pending: PointerEvent | null = null;
+  let scheduled = 0;
+  let done = false;
+
+  const flush = () => {
+    scheduled = 0;
+    if (pending) onFrame(pending);
+    pending = null;
+  };
+  const move = (pointer: PointerEvent) => {
+    pending = pointer;
+    if (!scheduled) scheduled = requestAnimationFrame(flush);
+  };
+  const finish = () => {
+    if (done) return;
+    done = true;
+    window.removeEventListener("pointermove", move);
+    window.removeEventListener("pointerup", finish);
+    if (scheduled) cancelAnimationFrame(scheduled);
+    // The last computed position still lands - releasing mid-frame should not
+    // lose the final pixel of the drag.
+    flush();
+    onEnd();
+  };
+
+  window.addEventListener("pointermove", move);
+  window.addEventListener("pointerup", finish);
+  return finish;
+}
+
+/**
+ * Softly snaps one axis of a centre offset while dragging.
+ *
+ * Candidates are the frame's centre and, for an axis-aligned picture, its two
+ * edges. Within `SNAP_PX` the value lands exactly on the target and the
+ * matching guide line is reported; outside it the raw value passes through
+ * untouched - there is no pull, no resistance, just a small final settle.
+ */
+function softSnap(
+  raw: number,
+  frameSpan: number,
+  extent: number | null,
+): { value: number; guide: number | null } {
+  const targets = [{ value: 0, guide: 0.5 }];
+  if (extent !== null) {
+    targets.push(
+      { value: (extent - frameSpan) / 2 / frameSpan, guide: 0 },
+      { value: (frameSpan - extent) / 2 / frameSpan, guide: 1 },
+    );
+  }
+  for (const target of targets) {
+    if (Math.abs(raw - target.value) * frameSpan < SNAP_PX) return target;
+  }
+  return { value: raw, guide: null };
 }
 
 /**
@@ -71,6 +173,12 @@ export function Preview({
   duration,
   frameRate,
   frame,
+  transform,
+  mediaSize,
+  selectedClipId,
+  onSelectClip,
+  onTransformChange,
+  onOverlayChange,
   onFrameChange,
   onTogglePlay,
   onStep,
@@ -85,6 +193,20 @@ export function Preview({
   frameRate: number;
   /** The project's output size, shown and changed in the footer. */
   frame: { width: number; height: number };
+  /** The displayed clip's picture transform. Null when nothing is showing. */
+  transform: PreviewTransform | null;
+  /** The source's pixel size, when the probe reported one. */
+  mediaSize: { width: number; height: number } | null;
+  /** The single selected clip, if there is one - its box shows handles. */
+  selectedClipId: string | null;
+  onSelectClip: (clipId: string) => void;
+  onTransformChange: (clipId: string, transform: Partial<PreviewTransform>) => void;
+  /** Edits to a title dragged in the monitor: position, and size from the
+   * corner handles. */
+  onOverlayChange: (
+    clipId: string,
+    change: { offsetX?: number; offsetY?: number; fontSize?: number },
+  ) => void;
   onFrameChange: (width: number, height: number) => void;
   onTogglePlay: () => void;
   onStep: (frames: number) => void;
@@ -92,6 +214,20 @@ export function Preview({
 }) {
   const video = useRef<HTMLVideoElement>(null);
   const loadedClip = useRef<string | null>(null);
+
+  // The picture's true pixel size, measured off the element once it has
+  // decoded. The probe's numbers are the *coded* size, which lies for rotated
+  // phone footage and anything anamorphic; `videoWidth`/`naturalWidth` are
+  // what `object-contain` actually lays out, so the gizmo box is derived from
+  // the same truth as the picture and the two can never disagree.
+  const [pictureSize, setPictureSize] = useState<{ width: number; height: number } | null>(null);
+  useEffect(() => {
+    setPictureSize(null);
+  }, [source?.clipId]);
+
+  // Alignment guides, drawn while a drag holds one. State lives here because
+  // both the picture's gizmo and every title box report into the same lines.
+  const [guides, setGuides] = useState<Guides>(NO_GUIDES);
 
   // Text is sized as a fraction of the frame, so drawing it needs the pixel
   // height of the surface it lands on. That is a layout fact, not a prop, and
@@ -115,11 +251,47 @@ export function Preview({
     return () => observer.disconnect();
   }, []);
 
+  // The frame, letterboxed into the stage. Transforms are fractions *of the
+  // frame*, so drawing them against the raw panel would lie whenever the panel
+  // and the project have different shapes - a 9:16 edit in a wide panel most
+  // of all. Everything visual lives inside this box; the compositor will clip
+  // at its edge, so the preview does too.
+  const frameRect = useMemo(() => {
+    if (surface.width <= 0 || surface.height <= 0) return null;
+    const fit = Math.min(surface.width / frame.width, surface.height / frame.height);
+    const width = frame.width * fit;
+    const height = frame.height * fit;
+    return {
+      left: (surface.width - width) / 2,
+      top: (surface.height - height) / 2,
+      width,
+      height,
+    };
+  }, [surface, frame]);
+  const hasFrame = frameRect !== null;
+
+  // The same placement the exporter applies, as CSS. Order matters and matches
+  // the compositor: scale about the picture's centre, rotate about it, then
+  // translate. (CSS applies the list right to left.)
+  const mediaCss =
+    transform && frameRect
+      ? {
+          transform: `translate(${transform.offsetX * frameRect.width}px, ${
+            transform.offsetY * frameRect.height
+          }px) rotate(${transform.rotation}deg) scale(${transform.scale})`,
+        }
+      : undefined;
+
   // Swap the source only when the clip under the playhead actually changes.
   // Reassigning `src` every frame would restart the decoder continuously.
+  // `hasFrame` is a dependency because the element only exists once the stage
+  // has been measured - the first run of this effect finds no element at all.
   useEffect(() => {
     const element = video.current;
-    if (!element) return;
+    if (!element) {
+      loadedClip.current = null;
+      return;
+    }
 
     // A still never goes near the video element - it is rendered as an <img>
     // below - so release whatever the element was holding.
@@ -135,7 +307,7 @@ export function Preview({
       element.src = convertFileSrc(source.path);
       element.load();
     }
-  }, [source]);
+  }, [source, hasFrame]);
 
   // Same corrective sync as the audio preview: generous tolerance while
   // playing (a reseek is a visible stutter), tight while paused (a seek is the
@@ -155,7 +327,7 @@ export function Preview({
 
     if (playing && element.paused) void element.play().catch(() => undefined);
     if (!playing && !element.paused) element.pause();
-  }, [source, playing]);
+  }, [source, playing, hasFrame]);
 
   return (
     <div className={PANEL_SHELL}>
@@ -177,57 +349,125 @@ export function Preview({
       */}
       <div className="min-h-0 min-w-0 flex-1 overflow-hidden bg-stage p-4">
         <div ref={stage} data-preview-surface className="relative h-full w-full">
-          {/* Picture only. Every drop of audio - a video clip's included -
-              comes from the engine's mixer, so there is exactly one clock and
-              one gain law. */}
-          <video
-            ref={video}
-            muted
-            playsInline
-            className={`absolute inset-0 h-full w-full object-contain ${
-              source && !source.isStill ? "block" : "hidden"
-            }`}
-          />
-          {source?.isStill && (
-            <img
-              // Keyed on the clip so switching between two stills actually
-              // swaps the picture rather than reusing the decoded one.
-              key={source.clipId}
-              src={convertFileSrc(source.path)}
-              alt=""
-              draggable={false}
-              className="absolute inset-0 h-full w-full object-contain"
+          {frameRect && (
+            <div
+              // The frame itself. It clips, because the compositor clips: a
+              // picture dragged past the edge is gone in the export, so it has
+              // to be gone here too. The ring is the only hint of where the
+              // frame ends on an all-black stage.
+              className="absolute overflow-hidden ring-1 ring-white/15"
+              style={{
+                left: frameRect.left,
+                top: frameRect.top,
+                width: frameRect.width,
+                height: frameRect.height,
+              }}
+            >
+              {/* Picture only. Every drop of audio - a video clip's included -
+                  comes from the engine's mixer, so there is exactly one clock
+                  and one gain law. */}
+              {/* The picture's transform lives on a wrapper rather than the
+                  media element itself: WKWebView keeps `<video>` in its own
+                  compositing layer, and animating transforms directly on it
+                  is unreliable where a plain div never is. */}
+              <div className="absolute inset-0" style={mediaCss}>
+                <video
+                  ref={video}
+                  muted
+                  playsInline
+                  onLoadedMetadata={(event) =>
+                    setPictureSize({
+                      width: event.currentTarget.videoWidth,
+                      height: event.currentTarget.videoHeight,
+                    })
+                  }
+                  className={`absolute inset-0 h-full w-full object-contain ${
+                    source && !source.isStill ? "block" : "hidden"
+                  }`}
+                />
+                {source?.isStill && (
+                  <img
+                    // Keyed on the clip so switching between two stills
+                    // actually swaps the picture rather than reusing the
+                    // decoded one.
+                    key={source.clipId}
+                    src={convertFileSrc(source.path)}
+                    alt=""
+                    draggable={false}
+                    onLoad={(event) =>
+                      setPictureSize({
+                        width: event.currentTarget.naturalWidth,
+                        height: event.currentTarget.naturalHeight,
+                      })
+                    }
+                    className="absolute inset-0 h-full w-full object-contain"
+                  />
+                )}
+              </div>
+
+              {/* Alignment guides, only alive mid-drag. Dashed and faint on
+                  purpose: a hint that something lined up, not a grid. */}
+              {guides.x !== null && (
+                <div
+                  className="pointer-events-none absolute inset-y-0 w-0 border-l border-dashed
+                             border-white/45"
+                  style={{ left: `${guides.x * 100}%` }}
+                />
+              )}
+              {guides.y !== null && (
+                <div
+                  className="pointer-events-none absolute inset-x-0 h-0 border-t border-dashed
+                             border-white/45"
+                  style={{ top: `${guides.y * 100}%` }}
+                />
+              )}
+            </div>
+          )}
+
+          {/* Above the frame and unclipped, so handles survive being dragged
+              past the edge. */}
+          {frameRect && source && transform && (
+            <TransformGizmo
+              clipId={source.clipId}
+              transform={transform}
+              frameRect={frameRect}
+              mediaSize={pictureSize ?? mediaSize}
+              selected={selectedClipId === source.clipId}
+              onSelect={onSelectClip}
+              onChange={onTransformChange}
+              onGuides={setGuides}
             />
           )}
+
           {/*
-            Titles sit above the picture and below the empty-state message.
-            `pointer-events-none` matters: the overlay covers the whole stage,
-            and without it the transport underneath would still be clickable
-            but the video would not.
+            Titles sit above the picture *and* above the picture's gizmo: they
+            draw on top, so they select on top - clicking a title must never
+            fall through to the footage behind it. The layer clips like the
+            frame does.
           */}
-          {surface.height > 0 &&
-            overlays.map((overlay) => (
-              <div
-                key={overlay.clipId}
-                className="pointer-events-none absolute inset-0 flex items-center justify-center"
-              >
-                <div
-                  style={{
-                    ...textCss(overlay.style, surface.height),
-                    // Percentages here would resolve against the text block's
-                    // own width, which varies with the words. The frame is the
-                    // thing offsets are relative to, so they are converted
-                    // against the measured surface instead.
-                    transform: `translate(${overlay.offsetX * surface.width}px, ${
-                      overlay.offsetY * surface.height
-                    }px)`,
-                    maxWidth: "92%",
-                  }}
-                >
-                  {overlay.style.content}
-                </div>
-              </div>
-            ))}
+          {frameRect && overlays.length > 0 && (
+            <div
+              className="absolute overflow-hidden"
+              style={{
+                left: frameRect.left,
+                top: frameRect.top,
+                width: frameRect.width,
+                height: frameRect.height,
+              }}
+            >
+              {overlays.map((overlay) => (
+                <TextOverlayBox
+                  key={overlay.clipId}
+                  overlay={overlay}
+                  frameRect={frameRect}
+                  selected={selectedClipId === overlay.clipId}
+                  onSelect={onSelectClip}
+                  onChange={onOverlayChange}
+                  onGuides={setGuides}
+                />
+              ))}
+            </div>
+          )}
 
           {!source && overlays.length === 0 && (
             // No surface of its own: an empty monitor *is* black, and drawing
@@ -327,6 +567,322 @@ export function Preview({
             {frameRate.toFixed(2)} fps
           </span>
         </span>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Direct manipulation of the displayed clip's picture.
+ *
+ * Drag the body to move, a corner to scale, the lollipop above the top edge to
+ * rotate. The box is laid out exactly where the picture is - fitted size times
+ * scale, centred plus offset, rotated - so grabbing the picture is grabbing
+ * the picture, not a proxy for it.
+ *
+ * Pointer moves write absolute transform values through `onChange`; clamping
+ * lives with the project model, not here.
+ */
+function TransformGizmo({
+  clipId,
+  transform,
+  frameRect,
+  mediaSize,
+  selected,
+  onSelect,
+  onChange,
+  onGuides,
+}: {
+  clipId: string;
+  transform: PreviewTransform;
+  frameRect: { left: number; top: number; width: number; height: number };
+  mediaSize: { width: number; height: number } | null;
+  selected: boolean;
+  onSelect: (clipId: string) => void;
+  onChange: (clipId: string, transform: Partial<PreviewTransform>) => void;
+  onGuides: (guides: Guides) => void;
+}) {
+  const box = useRef<HTMLDivElement>(null);
+  const detach = useRef<(() => void) | null>(null);
+
+  // A drag can outlive the gizmo - the playhead runs past the clip, say - and
+  // window listeners do not clean themselves up.
+  useEffect(() => () => detach.current?.(), []);
+
+  // The picture's box: the fitted size the engine calls scale 1, times the
+  // scale, centred plus the offset. Unknown media dimensions mean the fit
+  // cannot be computed, so the frame itself stands in - same as `object-contain`
+  // does for the element underneath.
+  const fit = mediaSize
+    ? Math.min(frameRect.width / mediaSize.width, frameRect.height / mediaSize.height)
+    : null;
+  const width = (fit && mediaSize ? mediaSize.width * fit : frameRect.width) * transform.scale;
+  const height = (fit && mediaSize ? mediaSize.height * fit : frameRect.height) * transform.scale;
+  const centerX = frameRect.width / 2 + transform.offsetX * frameRect.width;
+  const centerY = frameRect.height / 2 + transform.offsetY * frameRect.height;
+
+  const beginDrag = (mode: "move" | "scale" | "rotate") => (event: ReactPointerEvent) => {
+    // Left button only; right-click should not start moving things around.
+    if (event.button !== 0) return;
+    event.preventDefault();
+    event.stopPropagation();
+    onSelect(clipId);
+    detach.current?.();
+
+    // Everything is captured at the pointer-down so every move is computed
+    // from absolute positions rather than accumulated deltas - no drift, no
+    // stale closures.
+    const start = { ...transform };
+    const startX = event.clientX;
+    const startY = event.clientY;
+    const bounds = box.current?.getBoundingClientRect();
+    // The bounding rect of a rotated box is axis-aligned, but its centre is
+    // still the true centre, which is all scale and rotate need.
+    const centre = bounds
+      ? { x: bounds.left + bounds.width / 2, y: bounds.top + bounds.height / 2 }
+      : { x: startX, y: startY };
+    const startDistance = Math.max(1, Math.hypot(startX - centre.x, startY - centre.y));
+    const startAngle = Math.atan2(startY - centre.y, startX - centre.x);
+    // Edge guides only mean something while the box is axis-aligned; a tilted
+    // picture has no edge that can line up with the frame's.
+    const quarter = Math.abs(start.rotation % 180);
+    const extentX = quarter === 0 ? width : quarter === 90 ? height : null;
+    const extentY = quarter === 0 ? height : quarter === 90 ? width : null;
+
+    detach.current = startDrag(
+      (pointer) => {
+        if (mode === "move") {
+          const x = softSnap(
+            start.offsetX + (pointer.clientX - startX) / frameRect.width,
+            frameRect.width,
+            extentX,
+          );
+          const y = softSnap(
+            start.offsetY + (pointer.clientY - startY) / frameRect.height,
+            frameRect.height,
+            extentY,
+          );
+          onChange(clipId, { offsetX: x.value, offsetY: y.value });
+          onGuides({ x: x.guide, y: y.guide });
+        } else if (mode === "scale") {
+          const distance = Math.hypot(pointer.clientX - centre.x, pointer.clientY - centre.y);
+          const scale = start.scale * (distance / startDistance);
+          onChange(clipId, { scale: Math.max(MIN_SCALE, Math.min(MAX_SCALE, scale)) });
+        } else {
+          const angle = Math.atan2(pointer.clientY - centre.y, pointer.clientX - centre.x);
+          let rotation = start.rotation + ((angle - startAngle) * 180) / Math.PI;
+          if (pointer.shiftKey) {
+            // Shift is the deliberate grid; 15 is the step every editor uses.
+            rotation = Math.round(rotation / 15) * 15;
+          } else {
+            // A soft catch at the right angles, because "exactly straight" is
+            // what a free-hand rotation is trying to hit nine times in ten.
+            const cardinal = Math.round(rotation / 90) * 90;
+            if (Math.abs(rotation - cardinal) < 3) rotation = cardinal;
+          }
+          onChange(clipId, { rotation });
+        }
+      },
+      () => {
+        onGuides(NO_GUIDES);
+        detach.current = null;
+      },
+    );
+  };
+
+  return (
+    <div
+      className="pointer-events-none absolute"
+      style={{
+        left: frameRect.left,
+        top: frameRect.top,
+        width: frameRect.width,
+        height: frameRect.height,
+      }}
+    >
+      <div
+        ref={box}
+        className="pointer-events-auto absolute cursor-move"
+        style={{
+          left: centerX,
+          top: centerY,
+          width,
+          height,
+          transform: `translate(-50%, -50%) rotate(${transform.rotation}deg)`,
+          touchAction: "none",
+        }}
+        onPointerDown={beginDrag("move")}
+      >
+        {selected && (
+          <>
+            <div className="pointer-events-none absolute -inset-px border border-selection" />
+
+            {/* The rotate lollipop: a stem out of the top edge, a knob to grab. */}
+            <div
+              className="pointer-events-none absolute left-1/2 h-6 w-px -translate-x-1/2 bg-selection"
+              style={{ top: -24 }}
+            />
+            <div
+              className="absolute left-1/2 h-3 w-3 -translate-x-1/2 -translate-y-1/2 cursor-grab
+                         rounded-full border border-black/50 bg-white shadow-sm"
+              style={{ top: -28, touchAction: "none" }}
+              onPointerDown={beginDrag("rotate")}
+            />
+
+            {[
+              { x: 0, y: 0, cursor: "nwse-resize" },
+              { x: 1, y: 0, cursor: "nesw-resize" },
+              { x: 0, y: 1, cursor: "nesw-resize" },
+              { x: 1, y: 1, cursor: "nwse-resize" },
+            ].map((corner) => (
+              <div
+                key={`${corner.x}-${corner.y}`}
+                className={HANDLE_CLASS}
+                style={{
+                  left: `${corner.x * 100}%`,
+                  top: `${corner.y * 100}%`,
+                  cursor: corner.cursor,
+                  touchAction: "none",
+                }}
+                onPointerDown={beginDrag("scale")}
+              />
+            ))}
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/** Bounds shared by TextPanel's Size slider; the corner drag obeys the same
+ * law the slider does. */
+const MIN_FONT_SIZE = 0.02;
+const MAX_FONT_SIZE = 0.4;
+
+/**
+ * A title in the monitor: the same rendered block as before, now grabbable.
+ *
+ * The box is the text block itself rather than computed geometry - the border
+ * hugs whatever the words actually occupy, padding and plate included, so
+ * there is nothing to get out of sync. Dragging moves the offsets; the corner
+ * handles resize the type through the same fraction-of-frame-height law the
+ * Text panel's Size slider uses. No rotate handle: nothing downstream can
+ * draw a rotated title yet, and a handle that lies is worse than none.
+ */
+function TextOverlayBox({
+  overlay,
+  frameRect,
+  selected,
+  onSelect,
+  onChange,
+  onGuides,
+}: {
+  overlay: TextOverlay;
+  frameRect: { left: number; top: number; width: number; height: number };
+  selected: boolean;
+  onSelect: (clipId: string) => void;
+  onChange: (clipId: string, change: { offsetX?: number; offsetY?: number; fontSize?: number }) => void;
+  onGuides: (guides: Guides) => void;
+}) {
+  const block = useRef<HTMLDivElement>(null);
+  const detach = useRef<(() => void) | null>(null);
+  useEffect(() => () => detach.current?.(), []);
+
+  const begin = (mode: "move" | "scale") => (event: ReactPointerEvent) => {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    event.stopPropagation();
+    onSelect(overlay.clipId);
+    detach.current?.();
+
+    const start = {
+      offsetX: overlay.offsetX,
+      offsetY: overlay.offsetY,
+      fontSize: overlay.style.fontSize,
+    };
+    const startX = event.clientX;
+    const startY = event.clientY;
+    const bounds = block.current?.getBoundingClientRect();
+    const centre = bounds
+      ? { x: bounds.left + bounds.width / 2, y: bounds.top + bounds.height / 2 }
+      : { x: startX, y: startY };
+    const startDistance = Math.max(1, Math.hypot(startX - centre.x, startY - centre.y));
+
+    detach.current = startDrag(
+      (pointer) => {
+        if (mode === "move") {
+          // Centre guides only: a block of type has ragged edges, and lining
+          // those up with the frame edge is not a thing anyone means to do.
+          const x = softSnap(
+            start.offsetX + (pointer.clientX - startX) / frameRect.width,
+            frameRect.width,
+            null,
+          );
+          const y = softSnap(
+            start.offsetY + (pointer.clientY - startY) / frameRect.height,
+            frameRect.height,
+            null,
+          );
+          onChange(overlay.clipId, { offsetX: x.value, offsetY: y.value });
+          onGuides({ x: x.guide, y: y.guide });
+        } else {
+          const distance = Math.hypot(pointer.clientX - centre.x, pointer.clientY - centre.y);
+          const fontSize = start.fontSize * (distance / startDistance);
+          onChange(overlay.clipId, {
+            fontSize: Math.max(MIN_FONT_SIZE, Math.min(MAX_FONT_SIZE, fontSize)),
+          });
+        }
+      },
+      () => {
+        onGuides(NO_GUIDES);
+        detach.current = null;
+      },
+    );
+  };
+
+  return (
+    <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
+      <div
+        ref={block}
+        className="pointer-events-auto relative cursor-move"
+        style={{
+          ...textCss(overlay.style, frameRect.height),
+          // Percentages here would resolve against the text block's own
+          // width, which varies with the words. The frame is the thing
+          // offsets are relative to, so they are converted against its
+          // measured box instead.
+          transform: `translate(${overlay.offsetX * frameRect.width}px, ${
+            overlay.offsetY * frameRect.height
+          }px)`,
+          maxWidth: "92%",
+          touchAction: "none",
+        }}
+        onPointerDown={begin("move")}
+      >
+        {overlay.style.content}
+        {selected && (
+          <>
+            <div className="pointer-events-none absolute -inset-1 border border-selection" />
+            {[
+              { x: 0, y: 0, cursor: "nwse-resize" },
+              { x: 1, y: 0, cursor: "nesw-resize" },
+              { x: 0, y: 1, cursor: "nesw-resize" },
+              { x: 1, y: 1, cursor: "nwse-resize" },
+            ].map((corner) => (
+              <div
+                key={`${corner.x}-${corner.y}`}
+                className={HANDLE_CLASS}
+                style={{
+                  left: `${corner.x * 100}%`,
+                  top: `${corner.y * 100}%`,
+                  cursor: corner.cursor,
+                  touchAction: "none",
+                }}
+                onPointerDown={begin("scale")}
+              />
+            ))}
+          </>
+        )}
       </div>
     </div>
   );

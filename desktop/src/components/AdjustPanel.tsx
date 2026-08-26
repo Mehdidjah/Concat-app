@@ -1,4 +1,4 @@
-import type { Clip } from "../lib/project";
+import { MAX_SCALE, MIN_SCALE, type Clip } from "../lib/project";
 import { Group, Slider, Toggle } from "./controls";
 import { Icon } from "./Icon";
 import { Empty } from "./Panel";
@@ -63,19 +63,63 @@ export function AdjustPanel({
     );
   }
 
-  if (clip.kind === "image") {
-    return (
-      <Empty icon={<Icon name="image" size={26} strokeWidth={1.5} />}>
-        A still has nothing to adjust yet. Opacity and transform land with the
-        compositor.
-      </Empty>
-    );
-  }
-
   const fadeLimit = Math.max(0.1, Math.min(MAX_FADE, clip.duration / 2));
+  const hasPicture = clip.kind === "video" || clip.kind === "image";
+  // A still is picture only: no gain to set, nothing a fade could quieten.
+  const hasSound = clip.kind !== "image";
 
   return (
     <div className="px-3 py-3">
+      {hasPicture && (
+        <Group title="Transform">
+          <Slider
+            label="Scale"
+            value={clip.scale}
+            min={MIN_SCALE}
+            max={MAX_SCALE}
+            step={0.01}
+            format={(value) => `${Math.round(value * 100)}%`}
+            onReset={() => onChange({ scale: 1 })}
+            onChange={(scale) => onChange({ scale })}
+          />
+          <Slider
+            label="Position X"
+            value={clip.offsetX}
+            min={-1}
+            max={1}
+            step={0.005}
+            format={(value) => `${Math.round(value * 100)}%`}
+            onReset={() => onChange({ offsetX: 0 })}
+            onChange={(offsetX) => onChange({ offsetX })}
+          />
+          <Slider
+            label="Position Y"
+            value={clip.offsetY}
+            min={-1}
+            max={1}
+            step={0.005}
+            format={(value) => `${Math.round(value * 100)}%`}
+            onReset={() => onChange({ offsetY: 0 })}
+            onChange={(offsetY) => onChange({ offsetY })}
+          />
+          <Slider
+            label="Rotation"
+            value={clip.rotation}
+            min={-180}
+            max={180}
+            step={1}
+            format={(value) => `${Math.round(value)}°`}
+            onReset={() => onChange({ rotation: 0 })}
+            onChange={(rotation) => onChange({ rotation })}
+          />
+          <p className="-mt-1 mb-1 text-[11px] leading-snug text-tertiary">
+            Or drag the picture in the preview - corners scale, the handle above
+            rotates.
+          </p>
+        </Group>
+      )}
+
+      {hasSound && (
       <Group title="Volume">
         <Slider
           label="Level"
@@ -88,6 +132,7 @@ export function AdjustPanel({
           onChange={(decibels) => onChange({ volume: fromDecibels(decibels) })}
         />
       </Group>
+      )}
 
       {clip.kind === "audio" && (
         <Group title="Speed">
@@ -114,6 +159,7 @@ export function AdjustPanel({
         </Group>
       )}
 
+      {hasSound && (
       <Group title="Fades">
         <Slider
           label="Fade in"
@@ -136,6 +182,7 @@ export function AdjustPanel({
           onChange={(fadeOut) => onChange({ fadeOut })}
         />
       </Group>
+      )}
 
       <p className="text-[11px] leading-relaxed text-tertiary">
         Double-click a label to reset it.

@@ -122,6 +122,8 @@ export interface Clip {
   offsetX: number;
   /** Offset from centred, as a fraction of frame height. */
   offsetY: number;
+  /** Clockwise rotation in degrees, about the picture's centre. */
+  rotation: number;
 
   /**
    * Playback rate. 1 is normal, 2 is twice as fast.
@@ -292,6 +294,7 @@ export function addClip(
     scale: 1,
     offsetX: 0,
     offsetY: 0,
+    rotation: 0,
     speed: 1,
     preservePitch: true,
     filters: [],
@@ -340,6 +343,7 @@ export function addTextClip(
     scale: 1,
     offsetX: 0,
     offsetY: 0,
+    rotation: 0,
     speed: 1,
     preservePitch: true,
     filters: [],
@@ -784,11 +788,11 @@ export const MIN_SCALE = 0.05;
 export const MAX_SCALE = 8;
 const MAX_OFFSET = 3;
 
-/** Moves and resizes a clip's picture, clamped to something recoverable. */
+/** Moves, resizes and rotates a clip's picture, clamped to something recoverable. */
 export function setClipTransform(
   project: Project,
   clipId: string,
-  transform: Partial<Pick<Clip, "scale" | "offsetX" | "offsetY">>,
+  transform: Partial<Pick<Clip, "scale" | "offsetX" | "offsetY" | "rotation">>,
 ): Project {
   const clamp = (value: number, limit: number) => Math.max(-limit, Math.min(limit, value));
 
@@ -798,6 +802,12 @@ export function setClipTransform(
   }
   if (transform.offsetX !== undefined) patch.offsetX = clamp(transform.offsetX, MAX_OFFSET);
   if (transform.offsetY !== undefined) patch.offsetY = clamp(transform.offsetY, MAX_OFFSET);
+  if (transform.rotation !== undefined) {
+    // Kept in (-180, 180] so a full drag around the dial never accumulates
+    // turns - the number in the panel always reads like an angle, not a count.
+    const wrapped = ((transform.rotation % 360) + 540) % 360 - 180;
+    patch.rotation = wrapped === -180 ? 180 : wrapped;
+  }
 
   return updateClip(project, clipId, patch);
 }

@@ -132,6 +132,20 @@ export interface ExportClip {
   fadeOut: number;
   /** FFmpeg filter chain, or empty for none. */
   filterChain: string;
+  /** Playback rate, 1 being normal. */
+  speed: number;
+  preservePitch: boolean;
+  /** Multiplier over the fitted size. 1 fills the frame, preserving aspect. */
+  scale: number;
+  /** Offset of the picture's centre from frame centre, frame-width fraction. */
+  offsetX: number;
+  /** Offset as a frame-height fraction. */
+  offsetY: number;
+  /** Clockwise rotation in degrees. */
+  rotation: number;
+  /** The source's pixel size, when known - what makes an aspect-correct fit possible. */
+  mediaWidth: number | null;
+  mediaHeight: number | null;
 }
 
 export interface ExportRequest {

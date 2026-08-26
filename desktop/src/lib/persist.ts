@@ -155,6 +155,7 @@ export function fromDocument(raw: unknown): Project | null {
             scale: Math.max(0.05, number(clip.scale, 1)),
             offsetX: number(clip.offsetX, 0),
             offsetY: number(clip.offsetY, 0),
+            rotation: number(clip.rotation, 0),
             speed: Math.max(0.1, number(clip.speed, 1)),
             preservePitch: flag(clip.preservePitch, true),
             muted: flag(clip.muted, false) || undefined,

@@ -47,6 +47,7 @@ import {
   removeTrack,
   renameTrack,
   setClipSpeed,
+  setClipTransform,
   setTrackFlag,
   snapTime,
   splitClip,
@@ -504,6 +505,11 @@ function Editor({
     };
   }, [project, playhead]);
 
+  // What the monitor's transform gizmo works on: the displayed clip's picture
+  // transform, and the source's pixel size so the fitted rect can be computed.
+  const previewClip = previewSource ? findClip(project, previewSource.clipId) : null;
+  const previewMedia = previewClip ? findMedia(project, previewClip.mediaId) : null;
+
   // ── edit operations ──────────────────────────────────────────────────────
   const placeMedia = useCallback((mediaId: string, trackId: string, start: number) => {
     setProject((current) => {
@@ -745,6 +751,12 @@ function Editor({
             filterChain: buildChain(clip.filters) ?? "",
             speed: clip.speed,
             preservePitch: clip.preservePitch,
+            scale: clip.scale,
+            offsetX: clip.offsetX,
+            offsetY: clip.offsetY,
+            rotation: clip.rotation,
+            mediaWidth: media.width,
+            mediaHeight: media.height,
           },
         ];
       }),
@@ -928,6 +940,46 @@ function Editor({
               duration={duration}
               frameRate={frameRate}
               frame={frame}
+              transform={
+                previewClip
+                  ? {
+                      scale: previewClip.scale,
+                      offsetX: previewClip.offsetX,
+                      offsetY: previewClip.offsetY,
+                      rotation: previewClip.rotation,
+                    }
+                  : null
+              }
+              mediaSize={
+                previewMedia && previewMedia.width && previewMedia.height
+                  ? { width: previewMedia.width, height: previewMedia.height }
+                  : null
+              }
+              selectedClipId={selectedClipIds.length === 1 ? selectedClipIds[0] : null}
+              onSelectClip={(clipId) => setSelectedClipIds([clipId])}
+              onTransformChange={(clipId, transform) =>
+                setProject((current) => setClipTransform(current, clipId, transform))
+              }
+              onOverlayChange={(clipId, change) =>
+                setProject((current) => {
+                  let next = current;
+                  if (change.offsetX !== undefined || change.offsetY !== undefined) {
+                    next = setClipTransform(next, clipId, {
+                      offsetX: change.offsetX,
+                      offsetY: change.offsetY,
+                    });
+                  }
+                  if (change.fontSize !== undefined) {
+                    const clip = findClip(next, clipId);
+                    if (clip?.text) {
+                      next = updateClip(next, clipId, {
+                        text: { ...clip.text, fontSize: change.fontSize },
+                      });
+                    }
+                  }
+                  return next;
+                })
+              }
               onFrameChange={(width, height) => setFrame({ width, height })}
               onTogglePlay={transport.toggle}
               onStep={(frames) => transport.step(frames, frameRate)}
