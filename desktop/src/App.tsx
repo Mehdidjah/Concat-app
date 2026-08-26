@@ -683,6 +683,10 @@ function Editor({
   const exportClips = useMemo<ExportClip[]>(
     () =>
       project.clips.flatMap((clip) => {
+        // Titles have no file to hand the exporter, so they are rasterised
+        // separately and appended as full-frame overlays - see `textLayers`.
+        if (clip.kind === "text") return [];
+
         const media = findMedia(project, clip.mediaId);
         const track = findTrack(project, clip.trackId);
         const index = project.tracks.findIndex((candidate) => candidate.id === clip.trackId);
