@@ -28,6 +28,11 @@ relay-media = { path = "../../engine/crates/relay-media" }
 relay-render = { path = "../../engine/crates/relay-render" }
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 
+# Engine-owned audio playback: cpal talks to the output device, memmap2 keeps
+# decoded PCM disk-backed instead of resident.
+cpal = "0.16"
+memmap2 = "0.9"
+
 [profile.release]
 opt-level = 3
 lto = true

@@ -7,6 +7,7 @@
 //! `relay-render` where it can be unit-tested without a window.
 
 mod export;
+mod playback;
 mod projects;
 
 use serde::Serialize;
@@ -140,6 +141,49 @@ fn read_media_bytes(path: String) -> Result<tauri::ipc::Response, String> {
         .map_err(|error| format!("could not read {path}: {error}"))
 }
 
+/// Where one artwork file lives inside a project's cache.
+///
+/// The cache sits in the project folder so it travels with the project and
+/// vanishes with it. The key is confined to a single flat filename - anything
+/// that could walk out of the folder is refused rather than sanitised,
+/// because the only caller is our own frontend and a strange key is a bug.
+fn artwork_file(project: &str, key: &str) -> Result<std::path::PathBuf, String> {
+    if key.is_empty()
+        || !key
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+        || key.starts_with('.')
+    {
+        return Err(format!("refusing artwork key {key:?}"));
+    }
+    let root = std::path::Path::new(project);
+    if !root.is_dir() {
+        return Err(format!("{project} is not a project folder"));
+    }
+    Ok(root.join("cache").join(key))
+}
+
+/// Returns one cached artwork file, or an error the frontend treats as a miss.
+#[tauri::command]
+fn read_artwork(project: String, key: String) -> Result<tauri::ipc::Response, String> {
+    let file = artwork_file(&project, &key)?;
+    std::fs::read(&file)
+        .map(tauri::ipc::Response::new)
+        .map_err(|error| format!("no cached artwork {key}: {error}"))
+}
+
+/// Stores one artwork file in the project's cache. Best-effort: the caller
+/// fires and forgets, and a failed write only means regenerating next launch.
+#[tauri::command]
+fn write_artwork(project: String, key: String, bytes: Vec<u8>) -> Result<(), String> {
+    let file = artwork_file(&project, &key)?;
+    if let Some(parent) = file.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| format!("could not create {}: {error}", parent.display()))?;
+    }
+    std::fs::write(&file, bytes).map_err(|error| format!("could not write {key}: {error}"))
+}
+
 /// Renders a strip of evenly spaced frames from a video as one JPEG.
 ///
 /// One image rather than N, because the timeline draws the frames as slices of
@@ -176,12 +220,15 @@ fn filmstrip(path: &str, count: u32, height: u32) -> Result<Vec<u8>, String> {
             "-vf",
             // scale=-2 keeps the aspect ratio and an even width, which the
             // JPEG encoder requires.
+            // lanczos because the default bilinear leaves 4K sources visibly
+            // mushy at thumbnail sizes, and the strip is rendered once but
+            // looked at constantly.
             &format!(
-                "fps={:.6},scale=-2:{height},tile={count}x1",
+                "fps={:.6},scale=-2:{height}:flags=lanczos,tile={count}x1",
                 f64::from(count) / duration
             ),
         ])
-        .args(["-frames:v", "1", "-q:v", "6", "-f", "mjpeg", "-"])
+        .args(["-frames:v", "1", "-q:v", "3", "-f", "mjpeg", "-"])
         .output()
         .map_err(|error| format!("could not run ffmpeg: {error}"))?;
 
@@ -195,61 +242,33 @@ fn filmstrip(path: &str, count: u32, height: u32) -> Result<Vec<u8>, String> {
     Ok(output.stdout)
 }
 
-/// Renders one clip's audio through a filter chain and returns it as WAV.
+/// The audible clip set, replaced wholesale whenever the timeline changes.
 ///
-/// This is what lets the preview play filtered audio *exactly* as the export
-/// will render it. The alternative - reimplementing pitch shifting, companding
-/// and de-essing in Web Audio - would be a second implementation to keep in
-/// step with the first, and it would be wrong in ways nobody would notice
-/// until the exported file sounded different from the edit.
-///
-/// WAV because it decodes instantly in the browser and needs no container
-/// seeking; the result is short-lived and never written to disk.
+/// Decoding, mixing and the playback clock all live in the engine - see
+/// `playback.rs`. The UI describes what should be audible and follows the
+/// engine's `transport` position events.
 #[tauri::command]
-async fn render_filtered_audio(
-    path: String,
-    source_start: f64,
-    duration: f64,
-    chain: String,
-) -> Result<tauri::ipc::Response, String> {
-    let bytes = tauri::async_runtime::spawn_blocking(move || {
-        // A filter chain arrives as text and goes straight to FFmpeg, so it
-        // must not be able to smuggle in another argument.
-        if chain.contains('\n') || chain.contains('\r') {
-            return Err("filter chain contains a line break".to_owned());
-        }
+fn audio_set_clips(
+    state: tauri::State<'_, std::sync::Arc<playback::Playback>>,
+    project: String,
+    clips: Vec<playback::ClipSpec>,
+) {
+    state.set_clips(std::path::PathBuf::from(project), clips);
+}
 
-        let mut command = std::process::Command::new(relay_media::ffmpeg());
-        command
-            .args(["-hide_banner", "-nostdin", "-loglevel", "error"])
-            .args(["-ss", &format!("{source_start:.6}")])
-            .args(["-t", &format!("{duration:.6}")])
-            .args(["-i", &path])
-            .args(["-vn", "-af", &chain])
-            // 16-bit stereo at 48k: what the filters run at anyway, and small
-            // enough to move over the bridge without a second thought.
-            .args(["-ac", "2", "-ar", "48000", "-c:a", "pcm_s16le"])
-            .args(["-f", "wav", "-"]);
+#[tauri::command]
+fn transport_play(state: tauri::State<'_, std::sync::Arc<playback::Playback>>, position: f64) {
+    state.play(position);
+}
 
-        let output = command
-            .output()
-            .map_err(|error| format!("could not run ffmpeg: {error}"))?;
+#[tauri::command]
+fn transport_pause(state: tauri::State<'_, std::sync::Arc<playback::Playback>>) {
+    state.pause();
+}
 
-        if !output.status.success() {
-            let detail = String::from_utf8_lossy(&output.stderr);
-            let tail = detail.lines().rev().take(2).collect::<Vec<_>>().join(" / ");
-            return Err(format!("filter failed: {tail}"));
-        }
-        if output.stdout.is_empty() {
-            return Err("filter produced no audio".to_owned());
-        }
-
-        Ok(output.stdout)
-    })
-    .await
-    .map_err(|error| format!("filter task failed: {error}"))??;
-
-    Ok(tauri::ipc::Response::new(bytes))
+#[tauri::command]
+fn transport_seek(state: tauri::State<'_, std::sync::Arc<playback::Playback>>, position: f64) {
+    state.seek(position);
 }
 
 /// Creates a project folder, writes its manifest and records it as recent.
@@ -406,7 +425,9 @@ pub fn run() {
         .setup(|app| {
             // Resolved here rather than before the builder, because finding
             // the resource directory needs the app to exist.
+            use tauri::Manager;
             use_bundled_ffmpeg(app);
+            app.manage(playback::Playback::start(app.handle().clone()));
             Ok(())
         })
         .plugin(tauri_plugin_opener::init())
@@ -415,8 +436,13 @@ pub fn run() {
             probe_media,
             engine_version,
             read_media_bytes,
-            render_filtered_audio,
+            audio_set_clips,
+            transport_play,
+            transport_pause,
+            transport_seek,
             extract_filmstrip,
+            read_artwork,
+            write_artwork,
             create_project,
             open_project,
             save_project,

@@ -148,6 +148,18 @@ export interface Clip {
   filters: ClipFilter[];
 
   /**
+   * True when this video clip's embedded audio is left out of preview and
+   * export - the state "Detach audio" puts it in. Meaningless on other kinds.
+   */
+  muted?: boolean;
+
+  /**
+   * On a detached audio clip: the id of the video clip the sound came from.
+   * The link is what makes "Reattach audio" possible from either side.
+   */
+  detachedFrom?: string;
+
+  /**
    * The overlay, when this is a text clip. Absent on every other kind.
    *
    * On the clip rather than in the bin because two titles are two different
@@ -473,6 +485,95 @@ export function removeClip(project: Project, clipId: string): Project {
 export function removeClips(project: Project, clipIds: readonly string[]): Project {
   const doomed = new Set(clipIds);
   return { ...project, clips: project.clips.filter((clip) => !doomed.has(clip.id)) };
+}
+
+/** The audio clips holding sound detached from this video clip, if any. */
+export function detachedAudioOf(project: Project, videoClipId: string): Clip[] {
+  return project.clips.filter((clip) => clip.detachedFrom === videoClipId);
+}
+
+/**
+ * Splits a video clip's sound onto its own audio clip - "Detach audio".
+ *
+ * The video clip goes quiet (`muted`) and a linked audio clip appears with the
+ * same span of the same file, taking the audio filters with it - they were
+ * always about the sound. The link (`detachedFrom`) is what reattachment
+ * follows later. Does nothing for a clip that has no audio to give.
+ */
+export function detachAudio(project: Project, clipId: string): Project {
+  const clip = findClip(project, clipId);
+  const media = clip ? findMedia(project, clip.mediaId) : null;
+  if (!clip || clip.kind !== "video" || clip.muted || !media?.hasAudio) return project;
+  if (detachedAudioOf(project, clipId).length > 0) return project;
+
+  // A lane free for the whole span, or a fresh one - never on top of a clip.
+  const end = clip.start + clip.duration;
+  const free = project.tracks.find(
+    (track) =>
+      !project.clips.some(
+        (other) =>
+          other.trackId === track.id &&
+          other.start < end &&
+          clip.start < other.start + other.duration,
+      ),
+  );
+  let base = project;
+  let trackId = free?.id ?? "";
+  if (!trackId) {
+    const grown = addTrack(project);
+    base = grown.project;
+    trackId = grown.trackId;
+  }
+
+  const sound: Clip = {
+    ...clip,
+    id: nextId("c"),
+    trackId,
+    kind: "audio",
+    filters: [...clip.filters],
+    detachedFrom: clip.id,
+    muted: undefined,
+  };
+
+  return {
+    ...base,
+    clips: [
+      ...base.clips.map((other) =>
+        other.id === clipId ? { ...other, muted: true, filters: [] } : other,
+      ),
+      sound,
+    ],
+  };
+}
+
+/**
+ * Puts detached audio back into its video clip - "Reattach audio".
+ *
+ * Accepts either side of the link: the muted video clip or any of its
+ * detached audio clips. Every linked audio clip is absorbed (a detached clip
+ * that was split leaves several), the video clip sounds again, and the audio
+ * filters ride back with it. Does nothing when the other side is gone.
+ */
+export function reattachAudio(project: Project, clipId: string): Project {
+  const clip = findClip(project, clipId);
+  if (!clip) return project;
+
+  const videoId = clip.kind === "audio" && clip.detachedFrom ? clip.detachedFrom : clip.id;
+  const video = findClip(project, videoId);
+  const sounds = detachedAudioOf(project, videoId);
+  if (!video || sounds.length === 0) return project;
+
+  const doomed = new Set(sounds.map((sound) => sound.id));
+  return {
+    ...project,
+    clips: project.clips
+      .filter((other) => !doomed.has(other.id))
+      .map((other) =>
+        other.id === videoId
+          ? { ...other, muted: undefined, filters: [...sounds[0].filters] }
+          : other,
+      ),
+  };
 }
 
 /** Cuts a clip in two at `time`. Does nothing if the cut misses the clip. */

@@ -335,6 +335,7 @@ function MediaThumb({ item, assets }: { item: MediaItem; assets: MediaAssets }) 
         // most of it, and a crop reads better than bars at this size.
         const tile = strip.width / frames;
         const scale = Math.max(width / tile, height / strip.height);
+        context.imageSmoothingQuality = "high";
         const drawWidth = tile * scale;
         const drawHeight = strip.height * scale;
         context.drawImage(

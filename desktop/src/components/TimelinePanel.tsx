@@ -1272,6 +1272,8 @@ function drawFilmstrip(
   const drawWidth = height * (tileWidth / strip.height);
   if (!Number.isFinite(drawWidth) || drawWidth <= 0) return;
 
+  context.imageSmoothingQuality = "high";
+
   const columns = Math.ceil(width / drawWidth);
   for (let column = 0; column < columns; column += 1) {
     const fraction = columns > 1 ? column / (columns - 1) : 0;

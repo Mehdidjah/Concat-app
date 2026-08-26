@@ -13,5 +13,5 @@
 pub mod compositor;
 pub mod plan;
 
-pub use compositor::{Compositor, CpuCompositor, Layer};
+pub use compositor::{Compositor, CpuCompositor, Layer, Placement};
 pub use plan::{FramePlan, PlannedLayer, plan_frame};

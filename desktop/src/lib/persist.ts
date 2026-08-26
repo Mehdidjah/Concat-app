@@ -157,6 +157,8 @@ export function fromDocument(raw: unknown): Project | null {
             offsetY: number(clip.offsetY, 0),
             speed: Math.max(0.1, number(clip.speed, 1)),
             preservePitch: flag(clip.preservePitch, true),
+            muted: flag(clip.muted, false) || undefined,
+            detachedFrom: typeof clip.detachedFrom === "string" ? clip.detachedFrom : undefined,
             filters: Array.isArray(clip.filters)
               ? clip.filters.flatMap((filter) => {
                   if (typeof filter !== "object" || filter === null) return [];

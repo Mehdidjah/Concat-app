@@ -17,11 +17,11 @@ use std::path::{Path, PathBuf};
 
 use relay_core::frame::Frame;
 use relay_core::time::{FrameRate, Rational};
-use relay_core::timeline::{Clip, ClipId, MediaRef, Timeline, Track, TrackKind};
+use relay_core::timeline::{Clip, ClipId, MediaRef, Timeline, Track, TrackKind, Transform};
 use relay_media::{
     DecodeOptions, EncodeOptions, FfmpegDecoder, FfmpegEncoder, FrameSink, FrameSource,
 };
-use relay_render::{Compositor, CpuCompositor, Layer, plan_frame};
+use relay_render::{Compositor, CpuCompositor, Layer, Placement, plan_frame};
 use serde::{Deserialize, Serialize};
 use tauri::Emitter;
 
@@ -57,6 +57,25 @@ pub struct ExportClip {
     /// False lets pitch rise with the rate, like tape.
     #[serde(default = "yes")]
     pub preserve_pitch: bool,
+    /// Multiplier over the fitted size. 1 fills the frame, preserving aspect.
+    #[serde(default = "unity")]
+    pub scale: f64,
+    /// Offset of the picture's centre from frame centre, frame-width fraction.
+    #[serde(default)]
+    pub offset_x: f64,
+    /// Offset as a frame-height fraction.
+    #[serde(default)]
+    pub offset_y: f64,
+    /// Clockwise rotation in degrees.
+    #[serde(default)]
+    pub rotation: f64,
+    /// The source's pixel size, when the UI knows it. What makes an
+    /// aspect-correct decode possible - absent, the frame is filled edge to
+    /// edge the way it always was.
+    #[serde(default)]
+    pub media_width: Option<u32>,
+    #[serde(default)]
+    pub media_height: Option<u32>,
 }
 
 fn yes() -> bool {
@@ -170,7 +189,7 @@ fn render_picture(
     visible: &[&ExportClip],
     destination: &Path,
 ) -> Result<(), String> {
-    let (timeline, stills) = build_timeline(request, rate, visible);
+    let (timeline, stills, decode_sizes) = build_timeline(request, rate, visible);
 
     let mut encoder = FfmpegEncoder::create(
         destination,
@@ -197,14 +216,21 @@ fn render_picture(
         let time = rate.time_of_frame(index);
         let plan = plan_frame(&timeline, time);
 
-        let mut sources: Vec<(Frame, f32)> = Vec::with_capacity(plan.layers.len());
+        let mut sources: Vec<(Frame, f32, Transform)> = Vec::with_capacity(plan.layers.len());
         for layer in &plan.layers {
             let decoder = match decoders.entry(layer.clip) {
                 std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
                 std::collections::hash_map::Entry::Vacant(entry) => {
+                    // Aspect-correct: decode at the source's fitted size and
+                    // let the compositor place it, rather than stretching to
+                    // the frame and losing the picture's shape.
+                    let (decode_width, decode_height) = decode_sizes
+                        .get(&layer.clip)
+                        .copied()
+                        .unwrap_or((request.width, request.height));
                     let mut options = DecodeOptions::default()
                         .starting_at(layer.source_time)
-                        .scaled_to(request.width, request.height)
+                        .scaled_to(decode_width, decode_height)
                         .at_rate(rate);
 
                     // A still is a one-frame stream. Without looping it would
@@ -224,13 +250,33 @@ fn render_picture(
             // aborting the export - a clip trimmed past its media's end is a
             // mistake in the edit, not a failure of the renderer.
             if let Some(frame) = decoder.next_frame().map_err(|error| error.to_string())? {
-                sources.push((frame, layer.opacity));
+                sources.push((frame, layer.opacity, layer.transform));
             }
         }
 
         let layers: Vec<Layer<'_>> = sources
             .iter()
-            .map(|(frame, opacity)| Layer::new(frame).with_opacity(*opacity))
+            .map(|(frame, opacity, transform)| {
+                // Fitted and centred is the base; the clip's transform moves
+                // it from there. The fraction-to-pixel conversion happens
+                // here and nowhere else.
+                let x = (i64::from(request.width) - i64::from(frame.width())) / 2;
+                let y = (i64::from(request.height) - i64::from(frame.height())) / 2;
+                let placement = if transform.is_identity() {
+                    Placement::IDENTITY
+                } else {
+                    Placement {
+                        scale: transform.scale as f32,
+                        rotation: transform.rotation.to_radians() as f32,
+                        translate_x: (transform.offset_x * f64::from(request.width)) as f32,
+                        translate_y: (transform.offset_y * f64::from(request.height)) as f32,
+                    }
+                };
+                Layer::new(frame)
+                    .at(x as i32, y as i32)
+                    .with_opacity(*opacity)
+                    .with_placement(placement)
+            })
             .collect();
 
         let composed = compositor.composite(request.width, request.height, &layers);
@@ -257,9 +303,14 @@ fn build_timeline(
     request: &ExportRequest,
     rate: FrameRate,
     visible: &[&ExportClip],
-) -> (Timeline, std::collections::HashSet<ClipId>) {
+) -> (
+    Timeline,
+    std::collections::HashSet<ClipId>,
+    HashMap<ClipId, (u32, u32)>,
+) {
     let mut timeline = Timeline::new(request.width, request.height, rate);
     let mut stills = std::collections::HashSet::new();
+    let mut decode_sizes: HashMap<ClipId, (u32, u32)> = HashMap::new();
 
     let lanes = visible.iter().map(|clip| clip.track).max().unwrap_or(0) + 1;
     let tracks: Vec<_> = (0..lanes)
@@ -278,15 +329,39 @@ fn build_timeline(
 
         let mut engine_clip = Clip::new(MediaRef::new(&clip.path), start, duration);
         engine_clip.source_start = quantise(clip.source_start, rate);
+        engine_clip.transform = Transform {
+            scale: clip.scale,
+            offset_x: clip.offset_x,
+            offset_y: clip.offset_y,
+            rotation: clip.rotation,
+        };
 
         if let Some(id) = timeline.add_clip(tracks[clip.track], engine_clip) {
             if clip.kind == "image" {
                 stills.insert(id);
             }
+            if let Some(size) = fitted_size(request, clip) {
+                decode_sizes.insert(id, size);
+            }
         }
     }
 
-    (timeline, stills)
+    (timeline, stills, decode_sizes)
+}
+
+/// The source's contain-fitted size inside the output frame, or `None` when
+/// the UI never learnt the source's dimensions.
+fn fitted_size(request: &ExportRequest, clip: &ExportClip) -> Option<(u32, u32)> {
+    let media_width = clip.media_width.filter(|value| *value > 0)?;
+    let media_height = clip.media_height.filter(|value| *value > 0)?;
+
+    let fit = (f64::from(request.width) / f64::from(media_width))
+        .min(f64::from(request.height) / f64::from(media_height));
+    let width = ((f64::from(media_width) * fit).round() as u32).max(2);
+    let height = ((f64::from(media_height) * fit).round() as u32).max(2);
+    // Even, because a decoder asked for an odd width may round it itself and
+    // then every frame read is misaligned by a pixel's worth of bytes.
+    Some((width & !1, height & !1))
 }
 
 fn quantise(seconds: f64, rate: FrameRate) -> Rational {

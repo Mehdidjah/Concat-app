@@ -92,7 +92,7 @@ jobs:
             --enable-decoder=rawvideo,h264,hevc,vp8,vp9,av1,mpeg4,mjpeg,prores,dnxhd,png,webp,bmp,tiff,gif,aac,mp3,flac,opus,vorbis,alac,pcm_s16le,pcm_s24le,pcm_s32le,pcm_f32le \
             --enable-encoder=rawvideo,libx264,aac,mjpeg,png,pcm_s16le \
             --enable-demuxer=mov,matroska,avi,mp3,wav,flac,ogg,aac,image2,gif,rawvideo,pcm_s16le,concat \
-            --enable-muxer=mp4,mov,mp3,wav,ipod,mjpeg,image2,rawvideo,null \
+            --enable-muxer=mp4,mov,mp3,wav,ipod,mjpeg,image2,rawvideo,pcm_s16le,null \
             --enable-parser=h264,hevc,vp8,vp9,av1,aac,mpegaudio,flac,vorbis,png,mjpeg \
             --enable-bsf=h264_mp4toannexb,hevc_mp4toannexb,aac_adtstoasc \
             --enable-protocol=file,pipe \
@@ -141,6 +141,14 @@ jobs:
           # Sound: the preview render, then the full export mix and mux.
           "$BIN/ffmpeg.exe" -hide_banner -loglevel error -y \
             -f s16le -ar 48000 -ac 2 -i tone.pcm -c:a aac tone.m4a
+
+          # The playback engine's decode: a clip span straight to raw PCM.
+          # See desktop/src-tauri/src/playback.rs - this needs the pcm_s16le
+          # *muxer*, easy to forget because the demuxer of the same name is
+          # enabled for a different reason.
+          "$BIN/ffmpeg.exe" -hide_banner -loglevel error -y -ss 0 -t 1 -i tone.m4a -vn \
+            -af "aresample=48000,aformat=sample_fmts=s16:channel_layouts=stereo" \
+            -f s16le span.pcm
           "$BIN/ffmpeg.exe" -hide_banner -loglevel error -y -i tone.m4a -vn \
             -af "aresample=48000,asetrate=52000,aresample=48000,atempo=0.92,highpass=f=85,equalizer=f=4200:t=q:w=0.8:g=3,compand=attacks=0.01:decays=0.18:points=-80/-80|0/-1.5,deesser=i=0.3,aecho=0.8:0.82:38:0.02,alimiter=limit=0.94,aphaser=type=t:speed=1.2,flanger=delay=2:depth=4,bass=g=5,treble=g=4" \
             -ac 2 -ar 48000 -c:a pcm_s16le -f wav filtered.wav

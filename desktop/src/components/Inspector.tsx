@@ -1,13 +1,11 @@
 import type { ReactNode } from "react";
 
-import type { Clip, MediaItem } from "../lib/project";
+import type { Clip, MediaItem, Project } from "../lib/project";
 import { shortDuration, timecode } from "../lib/time";
-import { Icon } from "./Icon";
-import { Empty } from "./Panel";
 
 /**
  * Properties of the current selection - a clip if one is selected, otherwise
- * the highlighted bin item.
+ * the highlighted bin item, otherwise the project itself.
  *
  * Read-only for now. When these become editable the edits go to the engine as
  * commands and come back as new state; the panel stays dumb. That is what
@@ -17,17 +15,40 @@ export function Inspector({
   clip,
   media,
   frameRate,
+  project,
+  projectName,
+  projectPath,
+  frame,
+  duration,
 }: {
   clip: Clip | null;
   media: MediaItem | null;
   frameRate: number;
+  project: Project;
+  projectName: string;
+  projectPath: string;
+  /** The output size, as currently set in the preview footer. */
+  frame: { width: number; height: number };
+  /** Timeline length in seconds. */
+  duration: number;
 }) {
   return (
     <div>
       {!clip && !media ? (
-        <Empty icon={<Icon name="info" size={26} strokeWidth={1.5} />}>
-          Select a clip or a bin item.
-        </Empty>
+        <div className="selectable px-3 py-2">
+          <Section title="Project">
+            <Row label="Name" value={projectName} />
+            <Row label="Folder" value={projectPath} mono wrap />
+            <Row label="Output" value={`${frame.width} x ${frame.height}`} mono />
+            <Row label="Rate" value={`${frameRate.toFixed(2)} fps`} mono />
+            <Row label="Duration" value={timecode(duration, frameRate)} mono />
+          </Section>
+          <Section title="Contents">
+            <Row label="Media" value={`${project.media.length}`} mono />
+            <Row label="Tracks" value={`${project.tracks.length}`} mono />
+            <Row label="Clips" value={`${project.clips.length}`} mono />
+          </Section>
+        </div>
       ) : (
         <div className="selectable px-3 py-2">
           {clip && (

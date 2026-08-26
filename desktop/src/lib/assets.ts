@@ -71,7 +71,13 @@ const BUCKETS_PER_SECOND = 200;
 
 /** Frames per filmstrip. Enough to read the shot, few enough to stay cheap. */
 const STRIP_FRAMES = 24;
-const STRIP_HEIGHT = 72;
+/**
+ * Strip frames are drawn at ~32-72 CSS pixels tall, so they need the
+ * display's real pixel density or a Retina screen upscales them into mush.
+ * Capped at the engine's 240 limit; the ratio is read once because a strip
+ * cached at one density is not worth regenerating on a monitor change.
+ */
+const STRIP_HEIGHT = Math.min(240, Math.round(72 * (window.devicePixelRatio || 1)));
 
 /**
  * Starts producing artwork for one media item if it is not already cached.
@@ -86,19 +92,34 @@ export function requestAssets(
     path: string;
     kind: "video" | "audio" | "image";
     duration: number | null;
+    hasAudio: boolean;
   },
+  /** Project folder holding the on-disk artwork cache; null skips caching. */
+  projectPath: string | null = null,
 ): void {
   if (assets.pending.has(media.id)) return;
-  if (assets.peaks.has(media.id) || assets.strips.has(media.id)) return;
+
+  // Video peaks are deliberately NOT loaded here. Decoding a video's audio
+  // means reading the whole file and crunching every sample, which stalls the
+  // main thread hard enough to make playback stutter - so it happens only on
+  // demand, via requestVideoPeaks, when a detached audio clip needs drawing.
+  const wantsPeaks = media.kind === "audio" && !assets.peaks.has(media.id);
+  const wantsStrip = media.kind !== "audio" && !assets.strips.has(media.id);
+  if (!wantsPeaks && !wantsStrip) return;
 
   assets.pending.add(media.id);
 
-  const work =
-    media.kind === "audio"
-      ? loadPeaks(media.path).then((peaks) => {
-          if (peaks) assets.peaks.set(media.id, peaks);
-        })
-      : media.kind === "image"
+  const jobs: Promise<unknown>[] = [];
+  if (wantsPeaks) {
+    jobs.push(
+      loadPeaks(media.path, projectPath).then((peaks) => {
+        if (peaks) assets.peaks.set(media.id, peaks);
+      }),
+    );
+  }
+  if (wantsStrip) {
+    jobs.push(
+      media.kind === "image"
         ? // A still is a one-frame filmstrip. Storing it that way means the
           // timeline and the bin draw it with the code they already have, and
           // a long still clip tiles the same frame instead of stretching it.
@@ -108,21 +129,127 @@ export function requestAssets(
               assets.stripFrames.set(media.id, 1);
             }
           })
-        : loadStrip(media.path, media.duration).then((strip) => {
+        : loadStrip(media.path, media.duration, projectPath).then((strip) => {
             if (strip) {
               assets.strips.set(media.id, strip);
               assets.stripFrames.set(media.id, STRIP_FRAMES);
             }
-          });
+          }),
+    );
+  }
 
-  void work.finally(() => {
+  void Promise.allSettled(jobs).then(() => {
     assets.pending.delete(media.id);
     announce(assets);
   });
 }
 
+/**
+ * Waveform for a video's audio track, on demand.
+ *
+ * Called when a detached audio clip exists (or is being created) for a video,
+ * which is the only time a video needs peaks. Expensive on first run - the
+ * whole file is read and decoded - but the result lands in the disk cache, so
+ * a reopened project pays only a file read.
+ */
+export function requestVideoPeaks(
+  assets: MediaAssets,
+  media: { id: string; path: string; kind: "video" | "audio" | "image"; hasAudio: boolean },
+  projectPath: string | null = null,
+): void {
+  if (media.kind !== "video" || !media.hasAudio) return;
+  if (assets.peaks.has(media.id)) return;
+
+  const pendingKey = `${media.id}:peaks`;
+  if (assets.pending.has(pendingKey)) return;
+  assets.pending.add(pendingKey);
+
+  void loadPeaks(media.path, projectPath)
+    .then((peaks) => {
+      if (peaks) assets.peaks.set(media.id, peaks);
+    })
+    .finally(() => {
+      assets.pending.delete(pendingKey);
+      announce(assets);
+    });
+}
+
+/**
+ * The on-disk artwork cache, kept in the project's folder.
+ *
+ * Strips and peaks survive a relaunch there, which is the difference between
+ * a reopened project showing its artwork immediately and every launch paying
+ * for ffmpeg runs and full audio decodes again. Reads and writes both fail
+ * soft: a miss or a failed write only means generating now, caching later.
+ */
+function artworkKey(path: string): string {
+  // FNV-1a over the absolute path. Collisions are astronomically unlikely at
+  // bin sizes, and a collision's worst case is a wrong thumbnail.
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < path.length; index += 1) {
+    hash ^= path.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return hash.toString(16).padStart(8, "0");
+}
+
+async function readArtwork(project: string | null, key: string): Promise<ArrayBuffer | null> {
+  if (!project) return null;
+  try {
+    return await invoke<ArrayBuffer>("read_artwork", { project, key });
+  } catch {
+    return null;
+  }
+}
+
+function writeArtwork(project: string | null, key: string, bytes: Uint8Array): void {
+  if (!project) return;
+  // Serialising the payload for IPC is main-thread work, and nothing about a
+  // cache write is urgent - it waits for an idle moment so it never competes
+  // with playback.
+  const send = () =>
+    void invoke("write_artwork", { project, key, bytes: Array.from(bytes) }).catch(
+      () => undefined,
+    );
+  if (typeof window.requestIdleCallback === "function") window.requestIdleCallback(() => send());
+  else window.setTimeout(send, 500);
+}
+
+/** [bucketsPerSecond f32][count u32][min f32...][max f32...], little-endian. */
+function encodePeaks(peaks: Peaks): Uint8Array {
+  const count = peaks.min.length;
+  const buffer = new ArrayBuffer(8 + count * 8);
+  const view = new DataView(buffer);
+  view.setFloat32(0, peaks.bucketsPerSecond, true);
+  view.setUint32(4, count, true);
+  new Float32Array(buffer, 8, count).set(peaks.min);
+  new Float32Array(buffer, 8 + count * 4, count).set(peaks.max);
+  return new Uint8Array(buffer);
+}
+
+function decodePeaks(bytes: ArrayBuffer): Peaks | null {
+  if (bytes.byteLength < 8) return null;
+  const view = new DataView(bytes);
+  const bucketsPerSecond = view.getFloat32(0, true);
+  const count = view.getUint32(4, true);
+  if (!Number.isFinite(bucketsPerSecond) || bucketsPerSecond <= 0) return null;
+  if (bytes.byteLength !== 8 + count * 8) return null;
+  return {
+    min: new Float32Array(bytes, 8, count),
+    max: new Float32Array(bytes, 8 + count * 4, count),
+    bucketsPerSecond,
+  };
+}
+
 /** Decodes a file and reduces it to min/max pairs. */
-async function loadPeaks(path: string): Promise<Peaks | null> {
+async function loadPeaks(path: string, project: string | null): Promise<Peaks | null> {
+  const key = `${artworkKey(path)}-b${BUCKETS_PER_SECOND}.peaks`;
+  const cached = await readArtwork(project, key);
+  if (cached) {
+    const peaks = decodePeaks(cached);
+    if (peaks) return peaks;
+  }
+
   try {
     const bytes = await readMediaBytes(path);
 
@@ -153,7 +280,9 @@ async function loadPeaks(path: string): Promise<Peaks | null> {
       max[bucket] = high;
     }
 
-    return { min, max, bucketsPerSecond: buffer.sampleRate / bucketSize };
+    const peaks = { min, max, bucketsPerSecond: buffer.sampleRate / bucketSize };
+    writeArtwork(project, key, encodePeaks(peaks));
+    return peaks;
   } catch (cause) {
     console.warn(`WolfCut: no waveform for ${path}`, cause);
     return null;
@@ -172,8 +301,24 @@ async function loadImage(path: string): Promise<ImageBitmap | null> {
 }
 
 /** Asks the engine for a strip of frames and decodes it into an ImageBitmap. */
-async function loadStrip(path: string, duration: number | null): Promise<ImageBitmap | null> {
+async function loadStrip(
+  path: string,
+  duration: number | null,
+  project: string | null,
+): Promise<ImageBitmap | null> {
   if (!duration || duration <= 0) return null;
+
+  // The key carries the strip's shape, so a density or frame-count change
+  // regenerates rather than serving yesterday's resolution.
+  const key = `${artworkKey(path)}-f${STRIP_FRAMES}-h${STRIP_HEIGHT}.strip.jpg`;
+  const cached = await readArtwork(project, key);
+  if (cached) {
+    try {
+      return await createImageBitmap(new Blob([cached], { type: "image/jpeg" }));
+    } catch {
+      // A corrupt cache entry falls through to regeneration.
+    }
+  }
 
   try {
     const bytes = await invoke<ArrayBuffer>("extract_filmstrip", {
@@ -181,6 +326,7 @@ async function loadStrip(path: string, duration: number | null): Promise<ImageBi
       count: STRIP_FRAMES,
       height: STRIP_HEIGHT,
     });
+    writeArtwork(project, key, new Uint8Array(bytes));
     // createImageBitmap decodes off the main thread, so a slow JPEG does not
     // stall the timeline.
     return await createImageBitmap(new Blob([bytes], { type: "image/jpeg" }));

@@ -31,10 +31,13 @@ export function Menu({
   groups,
   trigger,
   align = "left",
+  direction = "down",
 }: {
   groups: MenuOption[][];
   trigger: (open: boolean) => ReactNode;
   align?: "left" | "right";
+  /** "up" hangs the menu above the trigger, for triggers near the bottom edge. */
+  direction?: "down" | "up";
 }) {
   const [open, setOpen] = useState(false);
   const root = useRef<HTMLDivElement>(null);
@@ -73,7 +76,8 @@ export function Menu({
       {open && (
         <div
           role="menu"
-          className={`surface absolute z-50 mt-1.5 min-w-52 rounded-xl px-1.5 py-1.5 text-primary
+          className={`surface absolute z-50 min-w-52 rounded-xl px-1.5 py-1.5 text-primary
+                      ${direction === "up" ? "bottom-full mb-1.5" : "mt-1.5"}
                       ${align === "right" ? "right-0" : "left-0"}`}
         >
           {groups.map((group, groupIndex) => (

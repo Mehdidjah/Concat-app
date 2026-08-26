@@ -1,11 +1,35 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 
-import { connectElement } from "../lib/audio";
 import { timecode } from "../lib/time";
 import { textCss, type TextStyle } from "../lib/text";
 import { Icon, IconButton } from "./Icon";
+import { Menu } from "./Menu";
 import { PANEL_SHELL } from "./Panel";
+
+/**
+ * Output frames people actually deliver to. Dimensions rather than bare
+ * ratios, because a ratio alone does not say how many pixels the export has.
+ */
+const FRAME_PRESETS = [
+  { label: "16:9", width: 1920, height: 1080 },
+  { label: "16:9 · 4K", width: 3840, height: 2160 },
+  { label: "9:16", width: 1080, height: 1920 },
+  { label: "1:1", width: 1080, height: 1080 },
+  { label: "4:3", width: 1440, height: 1080 },
+  { label: "21:9", width: 2560, height: 1080 },
+] as const;
+
+/** "16:9" for a preset size, the reduced fraction for anything else. */
+function ratioLabel(width: number, height: number): string {
+  const preset = FRAME_PRESETS.find(
+    (candidate) => candidate.width === width && candidate.height === height,
+  );
+  if (preset) return preset.label.split(" ")[0];
+  const gcd = (a: number, b: number): number => (b === 0 ? a : gcd(b, a % b));
+  const divisor = gcd(width, height) || 1;
+  return `${width / divisor}:${height / divisor}`;
+}
 
 /** The video clip that should be on screen right now, if any. */
 export interface PreviewSource {
@@ -13,9 +37,6 @@ export interface PreviewSource {
   path: string;
   /** Where in the source file the playhead sits, in seconds. */
   time: number;
-  muted: boolean;
-  /** Linear gain with fades applied. May exceed 1; see lib/audio.ts. */
-  volume: number;
   /** A still is shown as an image; there is nothing to seek or play. */
   isStill: boolean;
 }
@@ -49,6 +70,8 @@ export function Preview({
   playhead,
   duration,
   frameRate,
+  frame,
+  onFrameChange,
   onTogglePlay,
   onStep,
   onSeek,
@@ -60,6 +83,9 @@ export function Preview({
   playhead: number;
   duration: number;
   frameRate: number;
+  /** The project's output size, shown and changed in the footer. */
+  frame: { width: number; height: number };
+  onFrameChange: (width: number, height: number) => void;
   onTogglePlay: () => void;
   onStep: (frames: number) => void;
   onSeek: (seconds: number) => void;
@@ -118,17 +144,6 @@ export function Preview({
     const element = video.current;
     if (!element || !source || source.isStill) return;
 
-    element.muted = source.muted;
-
-    // Through a gain node, not element.volume, which browsers cap at 1.0.
-    // A video clip's audio obeys the same clip gain as an audio clip's.
-    try {
-      connectElement(element).gain.value = Math.max(0, source.volume);
-    } catch {
-      // Routing can only fail if the element was already claimed by another
-      // graph, which cannot happen here - but silence is not worth a crash.
-    }
-
     const tolerance = playing ? 0.3 : 0.03;
     if (element.readyState > 0 && Math.abs(element.currentTime - source.time) > tolerance) {
       try {
@@ -162,8 +177,12 @@ export function Preview({
       */}
       <div className="min-h-0 min-w-0 flex-1 overflow-hidden bg-stage p-4">
         <div ref={stage} data-preview-surface className="relative h-full w-full">
+          {/* Picture only. Every drop of audio - a video clip's included -
+              comes from the engine's mixer, so there is exactly one clock and
+              one gain law. */}
           <video
             ref={video}
+            muted
             playsInline
             className={`absolute inset-0 h-full w-full object-contain ${
               source && !source.isStill ? "block" : "hidden"
@@ -275,8 +294,38 @@ export function Preview({
           />
         </div>
 
-        <span className="min-w-0 truncate justify-self-end font-technical text-[10px] text-tertiary">
-          {frameRate.toFixed(2)} fps
+        <span className="flex min-w-0 items-center gap-2 justify-self-end">
+          <Menu
+            align="right"
+            direction="up"
+            groups={[
+              FRAME_PRESETS.map((preset) => ({
+                label: `${preset.label} — ${preset.width} x ${preset.height}`,
+                icon:
+                  preset.width === frame.width && preset.height === frame.height
+                    ? ("check" as const)
+                    : undefined,
+                onSelect: () => onFrameChange(preset.width, preset.height),
+              })),
+            ]}
+            trigger={(open) => (
+              <span
+                title="Output size"
+                className={`flex items-center gap-1 rounded-md px-1.5 py-0.5 font-technical text-[10px]
+                            transition-colors ${
+                              open
+                                ? "bg-active text-primary"
+                                : "text-tertiary hover:bg-hover hover:text-secondary"
+                            }`}
+              >
+                {ratioLabel(frame.width, frame.height)} · {frame.width}x{frame.height}
+                <Icon name="chevronDown" size={10} />
+              </span>
+            )}
+          />
+          <span className="truncate font-technical text-[10px] text-tertiary">
+            {frameRate.toFixed(2)} fps
+          </span>
         </span>
       </div>
     </div>

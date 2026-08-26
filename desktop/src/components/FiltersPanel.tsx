@@ -26,12 +26,9 @@ import { Empty } from "./Panel";
  */
 export function FiltersPanel({
   clip,
-  rendering,
   onChange,
 }: {
   clip: Clip | null;
-  /** True while the preview is re-rendering this clip's audio. */
-  rendering: boolean;
   onChange: (filters: ClipFilter[]) => void;
 }) {
   const [category, setCategory] = useState<FilterCategory>("voice");
@@ -76,11 +73,6 @@ export function FiltersPanel({
         <section className="mb-5">
           <h3 className="mb-2 flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wider text-tertiary">
             Applied
-            {rendering && (
-              <span className="font-normal normal-case tracking-normal text-accent">
-                rendering...
-              </span>
-            )}
           </h3>
 
           <ul className="flex flex-col gap-2">

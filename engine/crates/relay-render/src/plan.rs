@@ -11,7 +11,7 @@
 use std::path::PathBuf;
 
 use relay_core::time::Rational;
-use relay_core::timeline::{ClipId, Timeline, TrackKind};
+use relay_core::timeline::{ClipId, Timeline, TrackKind, Transform};
 
 /// One visible layer at one instant.
 #[derive(Clone, PartialEq, Debug)]
@@ -24,6 +24,8 @@ pub struct PlannedLayer {
     pub source_time: Rational,
     /// Blend strength over everything beneath, in `0.0..=1.0`.
     pub opacity: f32,
+    /// The clip's placement in the frame, resolution-independent.
+    pub transform: Transform,
 }
 
 /// Everything needed to draw one output frame.
@@ -73,6 +75,7 @@ pub fn plan_frame(timeline: &Timeline, time: Rational) -> FramePlan {
             media: clip.media.path.clone(),
             source_time,
             opacity: clip.opacity.clamp(0.0, 1.0),
+            transform: clip.transform,
         });
     }
 

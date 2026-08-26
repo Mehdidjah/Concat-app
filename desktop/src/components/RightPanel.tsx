@@ -8,23 +8,24 @@ import { TextPanel } from "./TextPanel";
 
 export type RightTab = "details" | "adjust" | "filters" | "text";
 
-const TABS: { id: RightTab; label: string }[] = [
-  { id: "details", label: "Details" },
+/**
+ * The tab strip follows the selection.
+ *
+ * Nothing selected: only Details, showing the project itself - there is
+ * nothing to edit, so no editing tabs. A media clip selected: Adjust and
+ * Filters, the things that can actually be changed. A title: just Text,
+ * because a text clip has no volume, no speed and no audio filters, and
+ * offering those tabs would be offering panels that can only say "nothing
+ * here".
+ */
+const DETAILS_TABS: { id: RightTab; label: string }[] = [{ id: "details", label: "Details" }];
+
+const CLIP_TABS: { id: RightTab; label: string }[] = [
   { id: "adjust", label: "Adjust" },
   { id: "filters", label: "Filters" },
 ];
 
-/**
- * Text replaces Adjust and Filters when a title is selected.
- *
- * A text clip has no volume, no speed and no audio filters, so offering those
- * tabs would be offering three panels that can only say "nothing here". The
- * tab strip therefore depends on what is selected rather than being fixed.
- */
-const TEXT_TABS: { id: RightTab; label: string }[] = [
-  { id: "details", label: "Details" },
-  { id: "text", label: "Text" },
-];
+const TEXT_TABS: { id: RightTab; label: string }[] = [{ id: "text", label: "Text" }];
 
 /**
  * The right-hand panel.
@@ -40,33 +41,37 @@ export function RightPanel({
   clip,
   media,
   project,
+  projectName,
+  projectPath,
+  frame,
+  duration,
   frameRate,
   onChangeClip,
   onSpeedChange,
   onAddFont,
   onRemoveFont,
-  rendering,
 }: {
   tab: RightTab;
   onTab: (tab: RightTab) => void;
   clip: Clip | null;
   media: MediaItem | null;
   project: Project;
+  projectName: string;
+  projectPath: string;
+  frame: { width: number; height: number };
+  duration: number;
   frameRate: number;
   onChangeClip: (patch: Partial<Clip>) => void;
   onSpeedChange: (speed: number) => void;
   onAddFont: () => void;
   onRemoveFont: (family: string) => void;
-  /** True while the selected clip's filtered audio is being rendered. */
-  rendering: boolean;
 }) {
   const isText = clip?.kind === "text";
-  const tabs = isText ? TEXT_TABS : TABS;
+  const tabs = clip ? (isText ? TEXT_TABS : CLIP_TABS) : DETAILS_TABS;
 
-  // Selecting a title while sitting on Filters would otherwise leave the strip
-  // with nothing highlighted and the panel showing a tab that is no longer
-  // offered, so the selection falls back to one that exists.
-  const active = tabs.some((entry) => entry.id === tab) ? tab : "details";
+  // A selection change can leave the strip showing a tab that is no longer
+  // offered, so the active tab falls back to the first one that exists.
+  const active = tabs.some((entry) => entry.id === tab) ? tab : tabs[0].id;
 
   return (
     <Panel>
@@ -90,7 +95,18 @@ export function RightPanel({
         </div>
       </div>
 
-      {active === "details" && <Inspector clip={clip} media={media} frameRate={frameRate} />}
+      {active === "details" && (
+        <Inspector
+          clip={clip}
+          media={media}
+          frameRate={frameRate}
+          project={project}
+          projectName={projectName}
+          projectPath={projectPath}
+          frame={frame}
+          duration={duration}
+        />
+      )}
       {active === "text" && (
         <TextPanel
           clip={clip}
@@ -106,7 +122,6 @@ export function RightPanel({
       {active === "filters" && (
         <FiltersPanel
           clip={clip}
-          rendering={rendering}
           onChange={(filters: ClipFilter[]) => onChangeClip({ filters })}
         />
       )}

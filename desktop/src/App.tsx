@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { isTauri } from "@tauri-apps/api/core";
+import { invoke, isTauri } from "@tauri-apps/api/core";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -14,8 +14,7 @@ import { RightPanel, type RightTab } from "./components/RightPanel";
 import { StartScreen, type ProjectSession } from "./components/StartScreen";
 import { TitleBar } from "./components/TitleBar";
 import { TimelinePanel, resolveDrop, type Tool } from "./components/TimelinePanel";
-import { createAssets, requestAssets } from "./lib/assets";
-import { AudioPreview } from "./lib/audio";
+import { createAssets, requestAssets, requestVideoPeaks } from "./lib/assets";
 import {
   engineVersion,
   loadProject,
@@ -28,10 +27,10 @@ import {
   addClip,
   addMedia,
   addTrack,
-  clipGainAt,
   clipsAt,
-  clipsOnTrack,
   createProject,
+  detachAudio,
+  detachedAudioOf,
   findClip,
   firstFreeTrack,
   findMedia,
@@ -42,6 +41,7 @@ import {
   moveClip,
   moveClips,
   projectDuration,
+  reattachAudio,
   removeClips,
   removeFont,
   removeTrack,
@@ -54,11 +54,10 @@ import {
   updateClip,
   trimClip,
   whyNotMerge,
-  type Clip,
   type MediaItem,
   type Project,
 } from "./lib/project";
-import { buildChain, chainKey } from "./lib/filters";
+import { buildChain } from "./lib/filters";
 import { familyForPath, registerFont } from "./lib/text";
 import { fromDocument, toDocument } from "./lib/persist";
 import { useTheme, type Theme } from "./lib/theme";
@@ -71,7 +70,7 @@ const MAX_SECONDS_PER_PIXEL = 2;
  * The window: either the launch screen or an open editor.
  *
  * The editor is a separate component rather than a branch inside one, so that
- * every hook it owns - transport, audio, asset cache - mounts when a project
+ * every hook it owns - transport, asset cache - mounts when a project
  * opens and unmounts when it closes. Closing a project therefore cannot leave
  * a stale audio element or a half-finished waveform behind.
  */
@@ -144,6 +143,11 @@ function Editor({
   const [saveState, setSaveState] = useState<"idle" | "saving" | "saved" | "failed">("idle");
   /** Blocks autosave until the project on disk has been read in. */
   const [loaded, setLoaded] = useState(false);
+  /**
+   * The output frame. Starts from the project settings but is editable from
+   * the preview footer, and the edited value is what the document keeps.
+   */
+  const [frame, setFrame] = useState({ width: session.width, height: session.height });
 
   // Panel geometry.
   const [leftWidth, setLeftWidth] = useState(340);
@@ -163,8 +167,8 @@ function Editor({
   const { playhead, playing } = transport;
 
   // Read by event listeners that outlive the render that installed them.
-  const latest = useRef({ project, secondsPerPixel, scrollLeft, trackScroll, snap, playhead });
-  latest.current = { project, secondsPerPixel, scrollLeft, trackScroll, snap, playhead };
+  const latest = useRef({ project, secondsPerPixel, scrollLeft, trackScroll, snap, playhead, frame });
+  latest.current = { project, secondsPerPixel, scrollLeft, trackScroll, snap, playhead, frame };
 
   // The project's rate is authoritative, not the first clip's. Timecode that
   // changes meaning when you import a 25fps file is worse than useless.
@@ -177,6 +181,18 @@ function Editor({
       .then((document) => {
         const restored = fromDocument(document);
         if (!cancelled && restored) setProject(restored);
+        // The document's frame wins over the manifest: it is where an edited
+        // output size was saved.
+        const video = (document as { video?: { width?: unknown; height?: unknown } }).video;
+        if (
+          !cancelled &&
+          typeof video?.width === "number" &&
+          typeof video?.height === "number" &&
+          video.width > 0 &&
+          video.height > 0
+        ) {
+          setFrame({ width: Math.round(video.width), height: Math.round(video.height) });
+        }
       })
       .catch(() => undefined)
       .finally(() => {
@@ -283,13 +299,42 @@ function Editor({
   const save = useCallback(async () => {
     setSaveState("saving");
     try {
-      await saveProject(session.path, toDocument(session, latest.current.project));
+      await saveProject(
+        session.path,
+        toDocument(
+          { ...session, width: latest.current.frame.width, height: latest.current.frame.height },
+          latest.current.project,
+        ),
+      );
       setSaveState("saved");
+      return true;
     } catch (cause) {
       setSaveState("failed");
       setError(String(cause));
+      return false;
     }
   }, [session]);
+
+  // A deliberate save deserves an acknowledgement; the autosave stays silent
+  // because a toast every 1.5 seconds of editing would be noise, not news.
+  const [toast, setToast] = useState<{ id: number; message: string; failed: boolean } | null>(
+    null,
+  );
+  const saveAndNotify = useCallback(() => {
+    void save().then((saved) =>
+      setToast({
+        id: Date.now(),
+        message: saved ? "Project saved" : "Save failed",
+        failed: !saved,
+      }),
+    );
+  }, [save]);
+
+  useEffect(() => {
+    if (!toast) return;
+    const timer = window.setTimeout(() => setToast(null), 2200);
+    return () => window.clearTimeout(timer);
+  }, [toast]);
 
   // Autosave, debounced. The edit is the thing people lose; making them
   // remember a keystroke to keep it is a design decision nobody wants.
@@ -297,7 +342,7 @@ function Editor({
     if (!loaded) return;
     const timer = window.setTimeout(() => void save(), 1500);
     return () => clearTimeout(timer);
-  }, [project, loaded, save]);
+  }, [project, frame, loaded, save]);
 
   useEffect(() => {
     engineVersion()
@@ -319,14 +364,32 @@ function Editor({
         setProject((current) => addMedia(current, item));
         setSelectedMediaId(item.id);
         // Fire and forget: the clip draws flat until the artwork lands.
-        requestAssets(assets.current, item);
+        requestAssets(assets.current, item, session.path);
       } catch (cause) {
         // The engine's errors already name the file and quote FFmpeg.
         setError(String(cause));
       }
     }
     setBusy(false);
-  }, []);
+  }, [session.path]);
+
+  // Artwork for everything already in the project: a reopened project should
+  // get its thumbnails and waveforms back without re-importing anything. The
+  // disk cache makes the second launch cheap; requestAssets dedupes the rest.
+  useEffect(() => {
+    if (!loaded) return;
+    // Audio clips cut from a video (detached, or split out) draw a waveform,
+    // so those videos - and only those - need peaks decoded.
+    const wantsPeaks = new Set(
+      project.clips.filter((clip) => clip.kind === "audio").map((clip) => clip.mediaId),
+    );
+    for (const item of project.media) {
+      requestAssets(assets.current, item, session.path);
+      if (item.kind === "video" && wantsPeaks.has(item.id)) {
+        requestVideoPeaks(assets.current, item, session.path);
+      }
+    }
+  }, [loaded, project.media, project.clips, session.path]);
 
   // Files dropped from the OS. Tauri intercepts these before the webview sees
   // them, which is why this is an event subscription and not an HTML5 handler.
@@ -349,47 +412,49 @@ function Editor({
     return () => stop?.();
   }, [importPaths]);
 
-  // ── audio preview ────────────────────────────────────────────────────────
-  const audio = useRef<AudioPreview | null>(null);
-  if (audio.current === null) audio.current = new AudioPreview();
-
-  const [renderingClips, setRenderingClips] = useState<ReadonlySet<string>>(new Set());
-
-  useEffect(() => {
-    const preview = audio.current;
-    if (preview) {
-      preview.onRenderChange = () => setRenderingClips(new Set(preview.pending()));
-    }
-    return () => preview?.dispose();
-  }, []);
-
-  useEffect(() => {
-    const voices = clipsAt(project, playhead)
-      .filter((clip) => clip.kind === "audio")
-      .flatMap((clip) => {
+  // ── audio playback ───────────────────────────────────────────────────────
+  // The engine mixes everything audible - see src-tauri/src/playback.rs. The
+  // UI's whole job is to describe the audible clip set whenever it changes:
+  // audio clips, plus video clips that still own their sound. The engine
+  // decodes what is new (cached across sessions) and remixes the rest.
+  const audibleClips = useMemo(
+    () =>
+      project.clips.flatMap((clip) => {
+        if (clip.kind !== "audio" && clip.kind !== "video") return [];
+        if (clip.kind === "video" && clip.muted) return [];
+        const track = findTrack(project, clip.trackId);
+        if (!track || track.muted) return [];
         const media = findMedia(project, clip.mediaId);
-        if (!media) return [];
+        if (!media || !media.hasAudio) return [];
         return [
           {
-            clipId: clip.id,
             path: media.path,
-            // Source advances at `speed`, so the same playhead maps further
-            // into the file on a sped-up clip.
-            time: clip.sourceStart + (playhead - clip.start) * clip.speed,
+            start: clip.start,
+            duration: clip.duration,
+            sourceStart: clip.sourceStart,
+            volume: clip.volume,
+            fadeIn: clip.fadeIn,
+            fadeOut: clip.fadeOut,
             speed: clip.speed,
             preservePitch: clip.preservePitch,
-            // A filtered clip plays a render of itself, produced by the same
-            // ffmpeg chain the exporter will use.
-            filter: chainFor(clip),
-            // Uncapped: the preview routes through a gain node, so what you
-            // hear matches what the exporter will render.
-            volume: clipGainAt(clip, playhead),
+            chain: buildChain(clip.filters) ?? "",
           },
         ];
-      });
+      }),
+    [project],
+  );
 
-    audio.current?.sync(voices, playing);
-  }, [project, playhead, playing]);
+  useEffect(() => {
+    if (!isTauri()) return;
+    // Debounced so a slider drag settles before its chain re-decodes; gain
+    // and position changes are cheap remixes either way.
+    const timer = window.setTimeout(() => {
+      void invoke("audio_set_clips", { project: session.path, clips: audibleClips }).catch(
+        (cause: unknown) => console.error("WolfCut: could not update the mix", cause),
+      );
+    }, 150);
+    return () => window.clearTimeout(timer);
+  }, [audibleClips, session.path]);
 
   /**
    * Every title live at the playhead, bottom track first.
@@ -435,8 +500,6 @@ function Editor({
       clipId: top.id,
       path: media.path,
       time: top.sourceStart + (playhead - top.start),
-      muted: false,
-      volume: clipGainAt(top, playhead),
       isStill: top.kind === "image",
     };
   }, [project, playhead]);
@@ -536,9 +599,6 @@ function Editor({
 
   const deleteSelected = useCallback(() => {
     if (selectedClipIds.length === 0) return;
-    // Free the audio element first: once the clip is gone the sync pass has
-    // nothing to match it against and it would keep sounding.
-    for (const clipId of selectedClipIds) audio.current?.release(clipId);
     setProject((current) => removeClips(current, selectedClipIds));
     setSelectedClipIds([]);
   }, [selectedClipIds]);
@@ -590,7 +650,7 @@ function Editor({
         switch (event.code) {
           case "KeyS":
             event.preventDefault();
-            void save();
+            saveAndNotify();
             break;
           case "KeyB":
             event.preventDefault();
@@ -653,29 +713,7 @@ function Editor({
 
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [deleteSelected, duration, frameRate, mergeSelected, save, splitAtPlayhead, transport]);
-
-  // Filters are rendered per clip, keyed so that returning a slider to a value
-  // you already heard reuses the render instead of producing it again.
-  const chainFor = useCallback((clip: Clip) => {
-    const chain = buildChain(clip.filters);
-    if (!chain) return undefined;
-
-    // A sped-up clip reads further into the file than it occupies on the
-    // timeline, so the render has to cover `duration * speed` of source - the
-    // same window the exporter trims. Rendering only `duration` left the
-    // preview seeking past the end of a short file, which is heard as the
-    // clip going silent partway through rather than as a filter problem.
-    // The window is part of the key, so changing speed re-renders.
-    const window = clip.duration * Math.min(8, Math.max(0.1, clip.speed));
-
-    return {
-      key: chainKey(clip.mediaId, clip.sourceStart, window, clip.filters),
-      chain,
-      sourceStart: clip.sourceStart,
-      duration: window,
-    };
-  }, []);
+  }, [deleteSelected, duration, frameRate, mergeSelected, saveAndNotify, splitAtPlayhead, transport]);
 
   // The exporter works from a flat list: the engine rebuilds a real timeline
   // from it, so track *order* has to survive the trip even though track
@@ -700,7 +738,7 @@ function Editor({
             sourceStart: clip.sourceStart,
             track: index,
             hidden: !track.visible,
-            muted: track.muted,
+            muted: track.muted || clip.muted === true,
             volume: clip.volume,
             fadeIn: clip.fadeIn,
             fadeOut: clip.fadeOut,
@@ -766,7 +804,7 @@ function Editor({
                   label: "Save",
                   icon: "folder",
                   hint: "Ctrl+S",
-                  onSelect: () => void save(),
+                  onSelect: () => saveAndNotify(),
                 },
                 {
                   label: "Export...",
@@ -889,6 +927,8 @@ function Editor({
               playhead={playhead}
               duration={duration}
               frameRate={frameRate}
+              frame={frame}
+              onFrameChange={(width, height) => setFrame({ width, height })}
               onTogglePlay={transport.toggle}
               onStep={(frames) => transport.step(frames, frameRate)}
               onSeek={transport.seek}
@@ -909,10 +949,13 @@ function Editor({
               clip={selectedClip}
               media={inspectorMedia}
               project={project}
+              projectName={session.name}
+              projectPath={session.path}
+              frame={frame}
+              duration={duration}
               frameRate={frameRate}
               onAddFont={() => void pickFont()}
               onRemoveFont={(family) => setProject((current) => removeFont(current, family))}
-              rendering={selectedClipIds.some((id) => renderingClips.has(id))}
               onChangeClip={(patch) => {
                 if (selectedClipIds.length !== 1) return;
                 setProject((current) => updateClip(current, selectedClipIds[0], patch));
@@ -972,11 +1015,6 @@ function Editor({
             }
             onRemoveTrack={(trackId) =>
               setProject((current) => {
-                // Free the audio for anything about to disappear, or it keeps
-                // sounding with no clip left to match it against.
-                for (const clip of clipsOnTrack(current, trackId)) {
-                  audio.current?.release(clip.id);
-                }
                 setSelectedClipIds((ids) =>
                   ids.filter((id) => findClip(current, id)?.trackId !== trackId),
                 );
@@ -1013,6 +1051,38 @@ function Editor({
                         },
                       ]
                     : []),
+                  // "Detach audio" and its reverse, offered only where they
+                  // mean something: one clip, with a link to make or unmake.
+                  ...(!many &&
+                  clip?.kind === "video" &&
+                  !clip.muted &&
+                  findMedia(project, clip.mediaId)?.hasAudio &&
+                  detachedAudioOf(project, clip.id).length === 0
+                    ? [
+                        {
+                          label: "Detach audio",
+                          icon: "waveform" as const,
+                          onSelect: () => setProject((current) => detachAudio(current, clipId)),
+                        },
+                      ]
+                    : []),
+                  ...(!many &&
+                  clip &&
+                  ((clip.kind === "video" && detachedAudioOf(project, clip.id).length > 0) ||
+                    (clip.kind === "audio" &&
+                      clip.detachedFrom &&
+                      findClip(project, clip.detachedFrom)))
+                    ? [
+                        {
+                          label: "Reattach audio",
+                          icon: "merge" as const,
+                          onSelect: () => {
+                            setProject((current) => reattachAudio(current, clipId));
+                            setSelectedClipIds([]);
+                          },
+                        },
+                      ]
+                    : []),
                   {
                     label: "Move to playhead",
                     icon: "select",
@@ -1030,7 +1100,6 @@ function Editor({
                     hint: "Del",
                     danger: true,
                     onSelect: () => {
-                      for (const id of target) audio.current?.release(id);
                       setProject((current) => removeClips(current, target));
                       setSelectedClipIds([]);
                     },
@@ -1044,12 +1113,28 @@ function Editor({
 
       {context && <ContextMenu target={context} onClose={() => setContext(null)} />}
 
+      {toast && (
+        <div
+          key={toast.id}
+          role="status"
+          className={`surface fixed bottom-4 right-4 z-50 flex items-center gap-2 rounded-xl
+                      px-3 py-2 text-xs ${toast.failed ? "text-danger" : "text-primary"}`}
+        >
+          <Icon
+            name={toast.failed ? "close" : "check"}
+            size={13}
+            className={toast.failed ? "" : "text-success"}
+          />
+          {toast.message}
+        </div>
+      )}
+
       {exporting && (
         <ExportDialog
           projectName={session.name}
           projectPath={session.path}
-          width={session.width}
-          height={session.height}
+          width={frame.width}
+          height={frame.height}
           rateNum={session.rateNum}
           rateDen={session.rateDen}
           duration={duration}

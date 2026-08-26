@@ -61,12 +61,56 @@ pub struct Clip {
     pub duration: Rational,
     /// Blend factor in `0.0..=1.0`, applied over whatever is beneath.
     pub opacity: f32,
+    /// How the picture sits in the frame. Identity is fitted and centred.
+    pub transform: Transform,
+}
+
+/// A clip's placement in the output frame.
+///
+/// Deliberately resolution-independent: `scale` is relative to the fitted
+/// size and the offsets are fractions of the frame, so the same transform
+/// means the same picture on a 720p export and a 4K one.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Transform {
+    /// Multiplier over the fitted size. 1 fills the frame, preserving aspect.
+    pub scale: f64,
+    /// Offset of the picture's centre from frame centre, as a fraction of
+    /// frame width.
+    pub offset_x: f64,
+    /// Offset as a fraction of frame height.
+    pub offset_y: f64,
+    /// Clockwise rotation about the picture's centre, in degrees.
+    pub rotation: f64,
+}
+
+impl Transform {
+    /// Fitted, centred, unrotated.
+    pub const IDENTITY: Transform =
+        Transform { scale: 1.0, offset_x: 0.0, offset_y: 0.0, rotation: 0.0 };
+
+    /// True when applying this transform would change nothing.
+    pub fn is_identity(&self) -> bool {
+        *self == Self::IDENTITY
+    }
+}
+
+impl Default for Transform {
+    fn default() -> Self {
+        Self::IDENTITY
+    }
 }
 
 impl Clip {
     /// A clip that starts at the beginning of its media and is fully opaque.
     pub fn new(media: MediaRef, start: Rational, duration: Rational) -> Self {
-        Self { media, source_start: Rational::ZERO, start, duration, opacity: 1.0 }
+        Self {
+            media,
+            source_start: Rational::ZERO,
+            start,
+            duration,
+            opacity: 1.0,
+            transform: Transform::IDENTITY,
+        }
     }
 
     /// The span of timeline this clip occupies.

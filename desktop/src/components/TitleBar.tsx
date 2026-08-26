@@ -3,6 +3,7 @@ import type { ReactNode } from "react";
 import { isTauri } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 
+import logo from "../assets/wolfcut-logo.png";
 import type { Theme } from "../lib/theme";
 import { Icon } from "./Icon";
 import { Menu, type MenuOption } from "./Menu";
@@ -10,9 +11,15 @@ import { Menu, type MenuOption } from "./Menu";
 /**
  * The custom title bar.
  *
- * The window is undecorated (`decorations: false`), so this strip *is* the
- * title bar: it carries the app menu, the project name and the window
+ * On Windows the window is undecorated (`decorations: false`), so this strip
+ * *is* the title bar: it carries the app menu, the project name and the window
  * controls, and everything not otherwise interactive is a drag region.
+ *
+ * On macOS the native traffic lights are overlaid instead
+ * (`tauri.macos.conf.json` sets `titleBarStyle: "Overlay"`), because
+ * Windows-style controls on a Mac read as "ported, carelessly". The strip
+ * keeps everything else but drops its own window buttons and leaves room on
+ * the left for the traffic lights.
  *
  * `data-tauri-drag-region` is what makes an area draggable, and Tauri also
  * gives it double-click-to-maximise for free. It has to be on the actual
@@ -40,6 +47,7 @@ export function TitleBar({
 }) {
   const [maximized, setMaximized] = useState(false);
   const native = isTauri();
+  const macOS = navigator.userAgent.includes("Mac");
 
   useEffect(() => {
     if (!native) return;
@@ -69,12 +77,12 @@ export function TitleBar({
   return (
     <header
       data-tauri-drag-region
-      className="flex h-8 shrink-0 items-center gap-1 border-b border-hairline bg-panel pl-2"
+      className={`flex h-8 shrink-0 items-center gap-1 border-b border-hairline bg-panel ${
+        macOS ? "pl-20 pr-1" : "pl-2"
+      }`}
     >
       <span className="flex items-center gap-1.5 pr-1" data-tauri-drag-region>
-        <span className="flex h-4 w-4 items-center justify-center rounded bg-accent text-on-accent">
-          <Icon name="film" size={11} strokeWidth={2.5} />
-        </span>
+        <img src={logo} alt="" className="pointer-events-none h-4 w-4" draggable={false} />
         <span className="font-display text-[13px] font-bold tracking-tight text-primary">WolfCut</span>
       </span>
 
@@ -121,7 +129,7 @@ export function TitleBar({
 
       {actions && <div className="flex items-center gap-1 pr-2">{actions}</div>}
 
-      {native && (
+      {native && !macOS && (
         <div className="flex h-full items-stretch">
           <WindowButton label="Minimise" onClick={() => void control("minimize")}>
             <Icon name="winMinimize" size={14} strokeWidth={1.5} />

@@ -1,5 +1,12 @@
 # 0004 - Audio and video preview run in the webview, for now
 
+> **Superseded in part by [0005](0005-audio-playback-in-the-engine.md):**
+> audio playback now lives in the engine - decoded, mixed and clocked in
+> `src-tauri/src/playback.rs`, with the UI following the engine's position
+> events. What remains true here is the *video* half: the monitor picture is
+> still the webview's `<video>` element, muted, until the engine can present
+> frames.
+
 ## Decision
 Playback preview - both the picture in the monitor and the sound - uses the
 webview's own `<video>` and `<audio>` elements, fed through Tauri's asset
