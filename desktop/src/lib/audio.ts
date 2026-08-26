@@ -244,7 +244,12 @@ export class AudioPreview {
   /** Queues a re-render, restarting the clock on every further change. */
   private schedule(voice: Voice): void {
     const key = voice.filter?.key;
-    if (this.scheduled.get(voice.clipId) === key) return;
+
+    // `has` rather than a value comparison: removing the last filter makes the
+    // wanted key `undefined`, and a missing entry also reads as `undefined`.
+    // Comparing values there comes out equal, so the swap was never scheduled
+    // and the clip kept playing its filtered render for good.
+    if (this.timers.has(voice.clipId) && this.scheduled.get(voice.clipId) === key) return;
 
     const timer = this.timers.get(voice.clipId);
     if (timer !== undefined) clearTimeout(timer);
@@ -295,6 +300,17 @@ export class AudioPreview {
     // Source arrives asynchronously; until then the element is silent and the
     // sync pass simply has nothing to play, which is correct.
     void source
+      // A filter chain that FFmpeg rejects would otherwise leave this element
+      // with no source at all - permanently silent, and never retried because
+      // its key already matches. Falling back to the unfiltered file keeps the
+      // clip audible; the filters are simply not heard, which is a far better
+      // failure than a clip that has gone quiet for no visible reason.
+      .catch((cause) => {
+        if (!voice.filter) throw cause;
+        console.error(`Relay: filter render failed for ${voice.path}; playing it dry`, cause);
+        loaded.offset = 0;
+        return readMediaBytes(voice.path);
+      })
       .then((bytes) => {
         const url = URL.createObjectURL(new Blob([bytes]));
 

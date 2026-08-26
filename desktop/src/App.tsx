@@ -535,11 +535,20 @@ function Editor({
   const chainFor = useCallback((clip: Clip) => {
     const chain = buildChain(clip.filters);
     if (!chain) return undefined;
+
+    // A sped-up clip reads further into the file than it occupies on the
+    // timeline, so the render has to cover `duration * speed` of source - the
+    // same window the exporter trims. Rendering only `duration` left the
+    // preview seeking past the end of a short file, which is heard as the
+    // clip going silent partway through rather than as a filter problem.
+    // The window is part of the key, so changing speed re-renders.
+    const window = clip.duration * Math.min(8, Math.max(0.1, clip.speed));
+
     return {
-      key: chainKey(clip.mediaId, clip.sourceStart, clip.duration, clip.filters),
+      key: chainKey(clip.mediaId, clip.sourceStart, window, clip.filters),
       chain,
       sourceStart: clip.sourceStart,
-      duration: clip.duration,
+      duration: window,
     };
   }, []);
 

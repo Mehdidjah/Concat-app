@@ -61,8 +61,22 @@ jobs:
           # If you add a format to the app, add it here too - the failure mode
           # is "could not open", not a crash.
           #
+          # `--extra-ldflags=-static` is what makes the result portable. Without
+          # it the exes link against the MSYS2 libx264/zlib/winpthread DLLs and
+          # run only on the machine that built them.
+          #
+          # `--enable-zlib` is not optional under --disable-autodetect: that
+          # flag turns off every external library that was not named, and PNG
+          # silently stops working without zlib.
+          #
+          # `rawvideo` (decoder *and* encoder) is what the exporter pipes: see
+          # relay-media/src/encode.rs, which feeds frames in as
+          # `-f rawvideo -pix_fmt rgba -i -`. Enabling only the demuxer of that
+          # name is not enough, and the failure reads as "no decoder found".
           ./configure \
             --prefix=../out \
+            --pkg-config-flags=--static \
+            --extra-ldflags=-static \
             --disable-everything \
             --disable-doc \
             --disable-debug \
@@ -74,9 +88,10 @@ jobs:
             --enable-small \
             --enable-gpl \
             --enable-libx264 \
-            --enable-decoder=h264,hevc,vp8,vp9,av1,mpeg4,mjpeg,prores,dnxhd,png,webp,bmp,tiff,gif,aac,mp3,flac,opus,vorbis,alac,pcm_s16le,pcm_s24le,pcm_s32le,pcm_f32le \
-            --enable-encoder=libx264,aac,mjpeg,png,pcm_s16le \
-            --enable-demuxer=mov,matroska,avi,mp3,wav,flac,ogg,aac,image2,gif,rawvideo,concat,lavfi \
+            --enable-zlib \
+            --enable-decoder=rawvideo,h264,hevc,vp8,vp9,av1,mpeg4,mjpeg,prores,dnxhd,png,webp,bmp,tiff,gif,aac,mp3,flac,opus,vorbis,alac,pcm_s16le,pcm_s24le,pcm_s32le,pcm_f32le \
+            --enable-encoder=rawvideo,libx264,aac,mjpeg,png,pcm_s16le \
+            --enable-demuxer=mov,matroska,avi,mp3,wav,flac,ogg,aac,image2,gif,rawvideo,pcm_s16le,concat \
             --enable-muxer=mp4,mov,mp3,wav,ipod,mjpeg,image2,rawvideo,null \
             --enable-parser=h264,hevc,vp8,vp9,av1,aac,mpegaudio,flac,vorbis,png,mjpeg \
             --enable-bsf=h264_mp4toannexb,hevc_mp4toannexb,aac_adtstoasc \
@@ -84,7 +99,7 @@ jobs:
             --enable-filter=scale,tile,fps,format,null,copy,setpts,trim,transpose,crop,overlay \
             --enable-filter=aresample,asetrate,atempo,aformat,anull,atrim,asetpts,adelay,amix,apad,afade,volume \
             --enable-filter=highpass,lowpass,equalizer,bass,treble,compand,deesser,aecho,alimiter,aphaser,flanger \
-            --enable-filter=abuffer,abuffersink,buffer,buffersink,anullsrc,aevalsrc,testsrc2,sine
+            --enable-filter=abuffer,abuffersink,buffer,buffersink
 
       - name: Build
         run: cd ffmpeg && make -j"$(nproc)" && make install
@@ -98,19 +113,48 @@ jobs:
 
           # Not a smoke test of the binary - a check that the *feature list*
           # above is sufficient. Each of these mirrors something the app does.
+          #
+          # Fixtures are raw bytes rather than `-f lavfi -i testsrc2=...`,
+          # because lavfi lives in libavdevice and --disable-everything removes
+          # it. A verify step built on lavfi fails at its first line on a build
+          # that is in fact perfectly good - which reads as "the build is
+          # broken" and hides whatever the real gaps were.
+          head -c 9216000 /dev/zero > frames.raw   # 30 frames of 320x240 rgba
+          head -c 384000  /dev/zero > tone.pcm     # 2s of 48k stereo s16
+
+          # Picture: exactly how relay-media/src/encode.rs drives the exporter.
           "$BIN/ffmpeg.exe" -hide_banner -loglevel error -y \
-            -f lavfi -i testsrc2=size=320x240:rate=30 -t 1 \
-            -c:v libx264 -pix_fmt yuv420p probe.mp4
-          "$BIN/ffprobe.exe" -v error -show_streams -of json probe.mp4 > /dev/null
+            -f rawvideo -pix_fmt rgba -s 320x240 -r 30 -i frames.raw \
+            -c:v libx264 -preset veryfast -crf 20 -pix_fmt yuv420p \
+            -movflags +faststart probe.mp4
+          "$BIN/ffprobe.exe" -v error -show_streams -show_format -of json probe.mp4 > /dev/null
           "$BIN/ffmpeg.exe" -hide_banner -loglevel error -y -i probe.mp4 \
             -vf "fps=4,scale=-2:72,tile=4x1" -frames:v 1 -f mjpeg strip.jpg
           "$BIN/ffmpeg.exe" -hide_banner -loglevel error -y -i probe.mp4 \
             -f rawvideo -pix_fmt rgba - > /dev/null
+
+          # Stills - this is the path that silently died without zlib.
+          "$BIN/ffmpeg.exe" -hide_banner -loglevel error -y -i probe.mp4 -frames:v 1 still.png
+          "$BIN/ffmpeg.exe" -hide_banner -loglevel error -y -i still.png \
+            -frames:v 1 -f rawvideo -pix_fmt rgba - > /dev/null
+
+          # Sound: the preview render, then the full export mix and mux.
           "$BIN/ffmpeg.exe" -hide_banner -loglevel error -y \
-            -f lavfi -i sine=frequency=220:duration=1 \
-            -af "aresample=48000,asetrate=52000,aresample=48000,atempo=0.92,highpass=f=85,equalizer=f=4200:t=q:w=0.8:g=3,compand=attacks=0.01:decays=0.18:points=-80/-80|0/-1.5,deesser=i=0.3,aecho=0.8:0.82:38:0.02,alimiter=limit=0.94" \
-            -f wav filtered.wav
-          echo "every path the app uses is present"
+            -f s16le -ar 48000 -ac 2 -i tone.pcm -c:a aac tone.m4a
+          "$BIN/ffmpeg.exe" -hide_banner -loglevel error -y -i tone.m4a -vn \
+            -af "aresample=48000,asetrate=52000,aresample=48000,atempo=0.92,highpass=f=85,equalizer=f=4200:t=q:w=0.8:g=3,compand=attacks=0.01:decays=0.18:points=-80/-80|0/-1.5,deesser=i=0.3,aecho=0.8:0.82:38:0.02,alimiter=limit=0.94,aphaser=type=t:speed=1.2,flanger=delay=2:depth=4,bass=g=5,treble=g=4" \
+            -ac 2 -ar 48000 -c:a pcm_s16le -f wav filtered.wav
+          "$BIN/ffmpeg.exe" -hide_banner -loglevel error -y -i tone.m4a -i tone.m4a \
+            -filter_complex "[0:a]atrim=start=0:duration=1,asetpts=PTS-STARTPTS,volume=1.5,afade=t=in:st=0:d=0.2,adelay=100:all=1[a0];[1:a]atrim=start=0:duration=1,asetpts=PTS-STARTPTS[a1];[a0][a1]amix=inputs=2:normalize=0,apad,atrim=duration=2[out]" \
+            -map "[out]" -c:a aac -b:a 192k mix.m4a
+          "$BIN/ffmpeg.exe" -hide_banner -loglevel error -y -i probe.mp4 -i mix.m4a \
+            -c:v copy -c:a copy -shortest -movflags +faststart final.mp4
+
+          # Portable, or it only runs on the machine that built it.
+          if ldd "$BIN/ffmpeg.exe" | grep -iv '/c/windows' | grep -q '=>'; then
+            echo "not self-contained:"; ldd "$BIN/ffmpeg.exe" | grep -iv '/c/windows'; exit 1
+          fi
+          echo "every path the app uses is present, and the build is self-contained"
 
       - name: Report size
         run: |
