@@ -3,7 +3,7 @@ import { useCallback, useLayoutEffect, useState } from "react";
 /**
  * Light or dark, chosen explicitly.
  *
- * Relay defaults to light whatever the OS is set to. A creative tool that
+ * WolfCut defaults to light whatever the OS is set to. A creative tool that
  * inverts itself because of a system setting the user was not thinking about
  * is disorienting, and judging an image against a surround that changed on its
  * own is worse than disorienting.

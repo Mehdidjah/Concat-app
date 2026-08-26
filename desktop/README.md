@@ -2,7 +2,7 @@
   <img src="../assets/wolfcut_logo_512.png" alt="Wolfcut logo" width="160" />
 </p>
 
-# Relay Desktop
+# WolfCut Desktop
 
 The editor front end. Tauri v2 + React 19 + Tailwind v4, talking to the Rust
 engine in [`../engine`](../engine).

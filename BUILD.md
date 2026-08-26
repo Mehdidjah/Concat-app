@@ -1,4 +1,4 @@
-# Building Relay
+# Building WolfCut
 
 Two independent pieces:
 
@@ -17,7 +17,7 @@ You can work on the engine without ever touching the desktop app.
 | **FFmpeg** | 7+ | Runtime dependency — the engine shells out to it | `ffmpeg -version` |
 | **MSVC Build Tools** | 2022 | Windows only; Rust's default toolchain links with it | — |
 
-FFmpeg must be on `PATH` as both `ffmpeg` **and** `ffprobe`. Relay does not
+FFmpeg must be on `PATH` as both `ffmpeg` **and** `ffprobe`. WolfCut does not
 bundle it. Without it the app starts fine and then fails on first import with
 "could not run `ffprobe` - is FFmpeg installed and on PATH?".
 
@@ -60,8 +60,8 @@ under `src/` hot-reloads without a Rust rebuild at all.
 
 ```
 relay-desktop.exe                       standalone, no install needed
-bundle/nsis/Relay_0.1.0_x64-setup.exe   installer
-bundle/msi/Relay_0.1.0_x64_en-US.msi    installer
+bundle/nsis/WolfCut_0.1.0_x64-setup.exe   installer
+bundle/msi/WolfCut_0.1.0_x64_en-US.msi    installer
 ```
 
 Release builds use `lto = true` and `codegen-units = 1`, so expect them to be
@@ -83,7 +83,7 @@ timestamps and cannot seek to an exact frame, so there is a second decoder that
 links FFmpeg directly, behind the `ffi` feature.
 
 Nothing in the app enables it yet. **You do not need any of this to build or
-run Relay.**
+run WolfCut.**
 
 ### Setup, exactly as verified
 

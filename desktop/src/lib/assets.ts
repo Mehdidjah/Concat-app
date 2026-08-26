@@ -155,7 +155,7 @@ async function loadPeaks(path: string): Promise<Peaks | null> {
 
     return { min, max, bucketsPerSecond: buffer.sampleRate / bucketSize };
   } catch (cause) {
-    console.warn(`Relay: no waveform for ${path}`, cause);
+    console.warn(`WolfCut: no waveform for ${path}`, cause);
     return null;
   }
 }
@@ -166,7 +166,7 @@ async function loadImage(path: string): Promise<ImageBitmap | null> {
     const bytes = await readMediaBytes(path);
     return await createImageBitmap(new Blob([bytes]));
   } catch (cause) {
-    console.warn(`Relay: could not decode ${path}`, cause);
+    console.warn(`WolfCut: could not decode ${path}`, cause);
     return null;
   }
 }
@@ -185,7 +185,7 @@ async function loadStrip(path: string, duration: number | null): Promise<ImageBi
     // stall the timeline.
     return await createImageBitmap(new Blob([bytes], { type: "image/jpeg" }));
   } catch (cause) {
-    console.warn(`Relay: no filmstrip for ${path}`, cause);
+    console.warn(`WolfCut: no filmstrip for ${path}`, cause);
     return null;
   }
 }

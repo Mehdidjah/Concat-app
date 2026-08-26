@@ -1,0 +1,75 @@
+name: Build App
+
+# Compiles the WolfCut desktop app for macOS and Windows and uploads the
+# bundles as artifacts. Runs on pushes to main and on demand.
+#
+# The bundled FFmpeg (desktop/src-tauri/ffmpeg/) is not staged here - these
+# builds fall back to FFmpeg on PATH at runtime, which is the dev behaviour.
+# Drop platform binaries into that directory before building to ship them.
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  engine-tests:
+    name: Engine tests (ubuntu)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: engine
+      - run: cargo test --workspace
+        working-directory: engine
+
+  app:
+    name: App (${{ matrix.platform }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos
+            os: macos-latest
+          - platform: windows
+            os: windows-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop/src-tauri
+
+      - run: npm ci
+        working-directory: desktop
+
+      - run: npm run typecheck
+        working-directory: desktop
+
+      # Full release build - LTO and codegen-units=1 make this the slow step.
+      - run: npm run app:build
+        working-directory: desktop
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: WolfCut-${{ matrix.platform }}
+          path: |
+            desktop/src-tauri/target/release/bundle/macos/*.app/**
+            desktop/src-tauri/target/release/bundle/dmg/*.dmg
+            desktop/src-tauri/target/release/bundle/msi/*.msi
+            desktop/src-tauri/target/release/bundle/nsis/*.exe
+          if-no-files-found: error

@@ -64,11 +64,11 @@ export function StartScreen({ onCreate }: { onCreate: (session: ProjectSession) 
   const [error, setError] = useState<string | null>(null);
   const [recents, setRecents] = useState<ProjectInfo[]>([]);
 
-  // Default to Desktop/Relay. Failing to resolve it is not worth surfacing;
+  // Default to Desktop/WolfCut. Failing to resolve it is not worth surfacing;
   // the field simply starts empty and Choose still works.
   useEffect(() => {
     void desktopDir()
-      .then((desktop) => join(desktop, "Relay"))
+      .then((desktop) => join(desktop, "WolfCut"))
       .then(setLocation)
       .catch(() => undefined);
   }, []);

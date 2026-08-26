@@ -1,4 +1,4 @@
-# How Relay works
+# How WolfCut works
 
 A map of the whole system. For *why* particular choices were made, see the
 decision logs in `engine/docs/decisions/` and `desktop/docs/decisions/`.
