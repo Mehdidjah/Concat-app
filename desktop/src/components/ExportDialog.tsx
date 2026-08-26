@@ -5,6 +5,7 @@ import { save } from "@tauri-apps/plugin-dialog";
 import type { ExportClip, ExportProgress } from "../lib/engine";
 import { exportProject, onExportProgress } from "../lib/engine";
 import { shortDuration } from "../lib/time";
+import { ErrorNotice } from "./ErrorNotice";
 import { Icon } from "./Icon";
 
 /** Quality presets, in the terms a person picking one actually thinks in. */
@@ -169,10 +170,7 @@ export function ExportDialog({
             </div>
 
             {phase.kind === "failed" && (
-              <p className="mb-4 rounded-lg border border-danger bg-danger-soft px-3 py-2
-                            font-technical text-[11px] leading-snug text-danger">
-                {phase.message}
-              </p>
+              <ErrorNotice message={phase.message} className="mb-4" />
             )}
 
             <button

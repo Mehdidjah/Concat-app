@@ -10,6 +10,7 @@ import {
   recentProjects,
   type ProjectInfo,
 } from "../lib/engine";
+import { ErrorNotice } from "./ErrorNotice";
 import { relativeTime } from "../lib/time";
 import { Icon } from "./Icon";
 
@@ -208,9 +209,7 @@ export function StartScreen({ onCreate }: { onCreate: (session: ProjectSession) 
           </p>
         </Field>
 
-        {error && (
-          <p className="mt-6 text-[12px] leading-relaxed text-danger">{error}</p>
-        )}
+        {error && <ErrorNotice message={error} onDismiss={() => setError(null)} className="mt-6" />}
 
         <div className="mt-10 flex items-center gap-4">
           <button

@@ -7,6 +7,7 @@ import { subscribeAssets } from "../lib/assets";
 import type { MediaItem } from "../lib/project";
 import { themeColor } from "../lib/theme";
 import { shortDuration } from "../lib/time";
+import { ErrorNotice } from "./ErrorNotice";
 import { Icon } from "./Icon";
 import { Menu } from "./Menu";
 import { Empty, Panel } from "./Panel";
@@ -197,21 +198,7 @@ export function MediaBin({
         </button>
       </div>
 
-      {error && (
-        <div className="mx-2 mb-2 flex items-start gap-2 rounded-lg border border-danger bg-danger-soft px-2 py-1.5">
-          <p className="min-w-0 flex-1 wrap-break-word font-technical text-[10px] leading-snug text-danger">
-            {error}
-          </p>
-          <button
-            type="button"
-            aria-label="Dismiss"
-            onClick={onDismissError}
-            className="shrink-0 cursor-pointer text-danger hover:text-danger"
-          >
-            <Icon name="close" size={12} />
-          </button>
-        </div>
-      )}
+      {error && <ErrorNotice message={error} onDismiss={onDismissError} className="mx-2 mb-2" />}
 
       {visible.length === 0 ? (
         <Empty

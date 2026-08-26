@@ -17,9 +17,17 @@ You can work on the engine without ever touching the desktop app.
 | **FFmpeg** | 7+ | Runtime dependency — the engine shells out to it | `ffmpeg -version` |
 | **MSVC Build Tools** | 2022 | Windows only; Rust's default toolchain links with it | — |
 
-FFmpeg must be on `PATH` as both `ffmpeg` **and** `ffprobe`. WolfCut does not
-bundle it. Without it the app starts fine and then fails on first import with
+For **development**, FFmpeg must be on `PATH` as both `ffmpeg` **and**
+`ffprobe`. Without it the app starts fine and then fails on first import with
 "could not run `ffprobe` - is FFmpeg installed and on PATH?".
+
+**Packaged builds ship their own FFmpeg** and never touch `PATH` - a `.app`
+launched from Finder does not see a shell's `PATH` at all, so relying on it
+there is a guaranteed failure. Stage the pair in `desktop/src-tauri/ffmpeg/`
+before `npm run app:build`: on Windows, download the artifact from
+`.github/workflows/ffmpeg.yml`; on macOS, build the same cut-down FFmpeg
+locally with that workflow's configure line (static x264, system frameworks
+only - verify with `otool -L`).
 
 ```
 winget install Gyan.FFmpeg          # Windows
