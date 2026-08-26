@@ -307,7 +307,7 @@ export class AudioPreview {
       // failure than a clip that has gone quiet for no visible reason.
       .catch((cause) => {
         if (!voice.filter) throw cause;
-        console.error(`Relay: filter render failed for ${voice.path}; playing it dry`, cause);
+        console.error(`WolfCut: filter render failed for ${voice.path}; playing it dry`, cause);
         loaded.offset = 0;
         return readMediaBytes(voice.path);
       })
@@ -326,7 +326,7 @@ export class AudioPreview {
         loaded.element.src = url;
         loaded.element.load();
       })
-      .catch((cause) => console.error(`Relay: could not load audio for ${voice.path}`, cause))
+      .catch((cause) => console.error(`WolfCut: could not load audio for ${voice.path}`, cause))
       .finally(() => {
         loaded.loading = false;
         if (this.rendering.delete(voice.clipId)) this.onRenderChange?.();

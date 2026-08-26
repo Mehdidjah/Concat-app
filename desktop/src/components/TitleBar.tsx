@@ -75,7 +75,7 @@ export function TitleBar({
         <span className="flex h-4 w-4 items-center justify-center rounded bg-accent text-on-accent">
           <Icon name="film" size={11} strokeWidth={2.5} />
         </span>
-        <span className="font-display text-[13px] font-bold tracking-tight text-primary">Relay</span>
+        <span className="font-display text-[13px] font-bold tracking-tight text-primary">WolfCut</span>
       </span>
 
       <nav className="flex items-center">
