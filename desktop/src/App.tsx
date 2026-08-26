@@ -5,7 +5,7 @@ import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 
 import { ContextMenu, type ContextTarget } from "./components/ContextMenu";
-import { ExportDialog } from "./components/ExportDialog";
+import { ExportDialog, type ExportTitle } from "./components/ExportDialog";
 import { Icon } from "./components/Icon";
 import { ALL_MEDIA, MediaBin, type BinFilter } from "./components/MediaBin";
 import { Preview, type PreviewSource, type TextOverlay } from "./components/Preview";
@@ -763,6 +763,32 @@ function Editor({
     [project],
   );
 
+  // Titles for the exporter. They have no file to hand over - the dialog
+  // rasterises them into full-frame PNGs at export time - so all it needs is
+  // the style and where the clip sits. Hidden tracks drop out here, the same
+  // cut `exportClips` makes with `hidden`.
+  const exportTitles = useMemo<ExportTitle[]>(
+    () =>
+      project.clips.flatMap((clip) => {
+        if (clip.kind !== "text" || !clip.text) return [];
+        const track = findTrack(project, clip.trackId);
+        const index = project.tracks.findIndex((candidate) => candidate.id === clip.trackId);
+        if (!track || !track.visible || index < 0) return [];
+        return [
+          {
+            clipId: clip.id,
+            style: clip.text,
+            offsetX: clip.offsetX,
+            offsetY: clip.offsetY,
+            start: clip.start,
+            duration: clip.duration,
+            track: index,
+          },
+        ];
+      }),
+    [project],
+  );
+
   // The inspector shows one clip's properties; with several selected there is
   // no single set of values to show, so it falls back to the bin item.
   const selectedClip =
@@ -1191,6 +1217,7 @@ function Editor({
           rateDen={session.rateDen}
           duration={duration}
           clips={exportClips}
+          titles={exportTitles}
           onClose={() => setExporting(false)}
         />
       )}

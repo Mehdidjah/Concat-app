@@ -171,6 +171,21 @@ export async function exportProject(request: ExportRequest): Promise<string> {
   return invoke<string>("export_project", { request });
 }
 
+/**
+ * Writes one file into the project's cache folder and returns its path.
+ *
+ * The same store the artwork cache uses, so it travels with the project and
+ * vanishes with it. Keys are flat filenames; the host refuses anything else.
+ */
+export async function writeCacheFile(
+  project: string,
+  key: string,
+  bytes: Uint8Array,
+): Promise<string> {
+  await invoke<void>("write_artwork", { project, key, bytes: Array.from(bytes) });
+  return `${project}/cache/${key}`;
+}
+
 /** Subscribes to export progress. Resolves to an unsubscribe function. */
 export async function onExportProgress(
   handler: (progress: ExportProgress) => void,
