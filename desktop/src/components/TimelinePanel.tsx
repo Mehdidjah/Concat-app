@@ -1094,6 +1094,13 @@ const PALETTE = {
     header: "#7b53c4",
     edge: "#7b53c4",
   },
+  // Amber, distinct from the three media kinds: a title is the one thing on
+  // the timeline that is not a file, and it should not be mistaken for one.
+  text: {
+    body: "#3a2a11",
+    header: "#c08a2e",
+    edge: "#c08a2e",
+  },
 };
 
 function drawClip(
@@ -1114,7 +1121,9 @@ function drawClip(
       ? PALETTE.video
       : clip.kind === "image"
         ? PALETTE.image
-        : PALETTE.audio;
+        : clip.kind === "text"
+          ? PALETTE.text
+          : PALETTE.audio;
   const bodyY = y + CLIP_HEADER;
   const bodyHeight = height - CLIP_HEADER;
 
@@ -1133,6 +1142,22 @@ function drawClip(
       const peaks = assets.peaks.get(clip.mediaId);
       if (peaks) {
         drawWaveform(context, peaks, clip, x, bodyY, drawWidth, bodyHeight, secondsPerPixel);
+      }
+    } else if (clip.kind === "text") {
+      // A title has no media to draw, so the body shows the words themselves -
+      // which is also the fastest way to tell two titles apart at a glance.
+      const words = clip.text?.content.replace(/\s+/g, " ").trim() ?? "";
+      if (words && drawWidth > 24) {
+        context.save();
+        context.font = LABEL_FONT;
+        context.fillStyle = "rgba(255,228,178,0.72)";
+        context.textBaseline = "middle";
+        context.fillText(
+          ellipsize(context, words, drawWidth - 14),
+          x + 7,
+          bodyY + bodyHeight / 2,
+        );
+        context.restore();
       }
     } else {
       // Video and stills share this path: a still is cached as a one-frame
