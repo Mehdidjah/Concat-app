@@ -4,7 +4,7 @@
 
 # WolfCut
 
-**A fast, lightweight desktop video editor.**
+**The free, open-source CapCut replacement.**
 
 [![Build](https://github.com/jub0t/WolfCut/actions/workflows/build.yml/badge.svg)](https://github.com/jub0t/WolfCut/actions/workflows/build.yml)
 [![Platforms](https://img.shields.io/badge/platform-macOS%20%7C%20Windows-8A2BE2)](https://github.com/jub0t/WolfCut/releases)
@@ -12,20 +12,23 @@
 [![UI](https://img.shields.io/badge/ui-React%20%2B%20Tauri-24C8DB?logo=tauri&logoColor=white)](desktop)
 [![Version](https://img.shields.io/badge/version-0.1.0-blue)](https://github.com/jub0t/WolfCut)
 
+<img src="assets/editor-preview.png" alt="WolfCut editor — dark and light themes" width="100%" />
+
 </div>
 
 ---
 
-WolfCut is a desktop video editor that opens instantly and stays out of your
-way. A native Rust engine does the heavy lifting, a clean React interface does
-the editing, and FFmpeg ships inside the app — install it and start cutting,
-no extra downloads, no setup.
+WolfCut is everything you use CapCut for — without the watermarks, paywalls,
+or subscriptions. A native Rust engine does the heavy lifting, a clean React
+interface does the editing, and it all runs on your machine: install it and
+start cutting, no account, no extra downloads, no setup.
 
 ## ✨ Highlights
 
 - 🎬 **Multi-track timeline** — cut, trim, split, and arrange video, audio, and text
+- 🎙️ **Free voice filters** — the effects CapCut puts behind Pro, included for everyone
+- 🚫 **No watermarks, ever** — your exports are yours, at full quality
 - ⚡ **Native performance** — a Rust engine under the hood, not a browser pretending
-- 📦 **Batteries included** — bundles its own FFmpeg, works on a fresh machine
 - 🪶 **Lightweight** — a few megabytes, opens in a blink
 - 🖥️ **macOS & Windows** — one editor, both platforms
 
