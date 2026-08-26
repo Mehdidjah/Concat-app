@@ -56,6 +56,71 @@ export const FONTS: { label: string; value: string; bundled: boolean }[] = [
   { label: "Comic Sans", value: '"Comic Sans MS", cursive', bundled: false },
 ];
 
+/**
+ * A font the user added from disk.
+ *
+ * The path is what gets saved, not the bytes: a project file that embedded
+ * every face would grow without limit, and the same font on the same machine
+ * is the overwhelmingly common case. Reopening a project on a machine that
+ * lacks the file falls back to the default face rather than failing to open,
+ * which is why `missing` is tracked rather than thrown.
+ */
+export interface CustomFont {
+  /** The CSS family name, derived from the file name and made unique. */
+  family: string;
+  path: string;
+  /** True once a load attempt has failed - shown in the picker, not fatal. */
+  missing?: boolean;
+}
+
+/** Families already handed to the document, so reopening does not re-register. */
+const registered = new Set<string>();
+
+/**
+ * Turns a font file into a usable CSS family.
+ *
+ * `FontFace` accepts the raw bytes, so this works for any face the webview can
+ * parse - ttf, otf, woff, woff2 - without installing anything system-wide.
+ * Registration is idempotent: the same family loaded twice is a no-op, which
+ * matters because opening a project re-runs this for every font it names.
+ */
+export async function registerFont(
+  font: CustomFont,
+  read: (path: string) => Promise<ArrayBuffer>,
+): Promise<boolean> {
+  if (registered.has(font.family)) return true;
+
+  try {
+    const face = new FontFace(font.family, await read(font.path));
+    await face.load();
+    document.fonts.add(face);
+    registered.add(font.family);
+    return true;
+  } catch {
+    // A missing or unparseable file must not stop a project opening. The
+    // picker shows the face as unavailable and text falls back to the default.
+    return false;
+  }
+}
+
+/**
+ * A family name for a font file: its own name, made unique against what is
+ * already loaded.
+ *
+ * Two different files called `Regular.otf` in different folders would
+ * otherwise collide, and the second would silently render as the first.
+ */
+export function familyForPath(path: string, taken: readonly string[]): string {
+  const base = (path.split(/[\\/]/).pop() ?? path).replace(/\.[a-z0-9]+$/i, "");
+  const cleaned = base.replace(/[^\w\s-]/g, "").trim() || "Custom font";
+
+  if (!taken.includes(cleaned)) return cleaned;
+  for (let n = 2; ; n += 1) {
+    const candidate = `${cleaned} ${n}`;
+    if (!taken.includes(candidate)) return candidate;
+  }
+}
+
 export const WEIGHTS: { label: string; value: number }[] = [
   { label: "Light", value: 300 },
   { label: "Regular", value: 400 },

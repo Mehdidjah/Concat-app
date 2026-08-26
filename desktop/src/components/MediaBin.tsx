@@ -35,6 +35,7 @@ export function MediaBin({
   busy,
   error,
   onFilter,
+  onAddText,
   onSelect,
   onImport,
   onRemove,
@@ -54,6 +55,8 @@ export function MediaBin({
   busy: boolean;
   error: string | null;
   onFilter: (filter: BinFilter) => void;
+  /** Puts a new title on the timeline at the playhead. */
+  onAddText: () => void;
   onSelect: (id: string) => void;
   onImport: (paths: string[]) => void;
   onRemove: (id: string) => void;
@@ -130,6 +133,26 @@ export function MediaBin({
         </span>
       }
     >
+      {/*
+        Above the filter, because it is an action rather than a view setting -
+        and because "add something" belongs at the top of a panel whose job is
+        supplying things to the timeline. Text is the one kind of content that
+        needs no file, so this is the only way to create it.
+      */}
+      <div className="px-2 pt-2">
+        <button
+          type="button"
+          onClick={onAddText}
+          title="Add a title to the timeline"
+          className="flex w-full cursor-pointer items-center justify-center gap-2 rounded-lg
+                     bg-accent px-3 py-2 text-xs font-medium text-on-accent transition-opacity
+                     hover:opacity-90"
+        >
+          <Icon name="type" size={13} />
+          Add text
+        </button>
+      </div>
+
       <div className="px-2 pb-2 pt-2">
         <Menu
           groups={[

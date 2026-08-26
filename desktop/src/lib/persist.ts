@@ -11,7 +11,8 @@
  */
 
 import type { ProjectSession } from "../components/StartScreen";
-import type { Clip, MediaItem, Project, Track } from "./project";
+import type { Clip, ClipKind, MediaItem, Project, Track } from "./project";
+import { defaultTextStyle, type CustomFont, type TextStyle } from "./text";
 
 /** Bumped only when a change cannot be absorbed by defaulting. */
 const DOCUMENT_VERSION = 1;
@@ -24,6 +25,7 @@ export interface ProjectDocument {
   media: MediaItem[];
   tracks: Track[];
   clips: Clip[];
+  fonts: CustomFont[];
 }
 
 export function toDocument(session: ProjectSession, project: Project): ProjectDocument {
@@ -40,6 +42,7 @@ export function toDocument(session: ProjectSession, project: Project): ProjectDo
     media: project.media,
     tracks: project.tracks,
     clips: project.clips,
+    fonts: project.fonts,
   };
 }
 
@@ -121,14 +124,26 @@ export function fromDocument(raw: unknown): Project | null {
         // to play. Dropping it beats keeping a reference that resolves to
         // nothing everywhere it is used.
         if (typeof clip.trackId !== "string" || !known.has(clip.trackId)) return [];
-        if (typeof clip.mediaId !== "string" || !mediaIds.has(clip.mediaId)) return [];
 
-        const kind = clip.kind === "audio" || clip.kind === "image" ? clip.kind : "video";
+        // A text clip is its own content, so it has no media to resolve. Only
+        // the kinds that come from the bin are dropped when their source is
+        // gone - applying that rule to titles would delete every one of them
+        // on reload, because an empty id is never in the media set.
+        const isText = clip.kind === "text";
+        if (!isText && (typeof clip.mediaId !== "string" || !mediaIds.has(clip.mediaId))) {
+          return [];
+        }
+
+        const kind: ClipKind = isText
+          ? "text"
+          : clip.kind === "audio" || clip.kind === "image"
+            ? clip.kind
+            : "video";
         return [
           {
             id: clip.id,
             trackId: clip.trackId,
-            mediaId: clip.mediaId,
+            mediaId: isText ? "" : (clip.mediaId as string),
             name: text(clip.name, "clip"),
             kind,
             start: Math.max(0, number(clip.start, 0)),
@@ -158,13 +173,56 @@ export function fromDocument(raw: unknown): Project | null {
                   ];
                 })
               : [],
+            ...(isText ? { text: readTextStyle(clip.text) } : {}),
           },
         ];
+      })
+    : [];
+
+  const fonts: CustomFont[] = Array.isArray(document.fonts)
+    ? document.fonts.flatMap((entry) => {
+        if (typeof entry !== "object" || entry === null) return [];
+        const font = entry as Record<string, unknown>;
+        if (typeof font.family !== "string" || typeof font.path !== "string") return [];
+        return [{ family: font.family, path: font.path }];
       })
     : [];
 
   // A file with no tracks at all is not something to open silently as empty.
   if (tracks.length === 0) return null;
 
-  return { media, tracks, clips };
+  return { media, tracks, clips, fonts };
+}
+
+/**
+ * Rebuilds a text style, defaulting every field.
+ *
+ * Same tolerance as the rest of this module: a title saved before a styling
+ * option existed opens with that option at its default rather than
+ * `undefined`, which would otherwise reach the CSS and render as nothing.
+ */
+function readTextStyle(raw: unknown): TextStyle {
+  const base = defaultTextStyle();
+  if (typeof raw !== "object" || raw === null) return base;
+  const style = raw as Record<string, unknown>;
+
+  const align = style.align;
+  return {
+    content: text(style.content, base.content),
+    fontFamily: text(style.fontFamily, base.fontFamily),
+    // Clamped, not just defaulted: a hand-edited 0 would render an invisible
+    // title, and a 10 would be one letter filling the frame.
+    fontSize: Math.min(1, Math.max(0.01, number(style.fontSize, base.fontSize))),
+    fontWeight: Math.min(900, Math.max(100, number(style.fontWeight, base.fontWeight))),
+    italic: flag(style.italic, base.italic),
+    color: text(style.color, base.color),
+    align: align === "left" || align === "center" || align === "right" ? align : base.align,
+    opacity: Math.min(1, Math.max(0, number(style.opacity, base.opacity))),
+    strokeWidth: Math.max(0, number(style.strokeWidth, base.strokeWidth)),
+    strokeColor: text(style.strokeColor, base.strokeColor),
+    shadow: flag(style.shadow, base.shadow),
+    background: text(style.background, base.background),
+    lineHeight: Math.max(0.5, number(style.lineHeight, base.lineHeight)),
+    tracking: number(style.tracking, base.tracking),
+  };
 }

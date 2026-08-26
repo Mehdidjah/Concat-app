@@ -1,8 +1,9 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 
 import { connectElement } from "../lib/audio";
 import { timecode } from "../lib/time";
+import { textCss, type TextStyle } from "../lib/text";
 import { Icon, IconButton } from "./Icon";
 import { PANEL_SHELL } from "./Panel";
 
@@ -17,6 +18,15 @@ export interface PreviewSource {
   volume: number;
   /** A still is shown as an image; there is nothing to seek or play. */
   isStill: boolean;
+}
+
+/** A title to draw over the picture, already positioned. */
+export interface TextOverlay {
+  clipId: string;
+  style: TextStyle;
+  /** Offset from centred, as a fraction of the frame. */
+  offsetX: number;
+  offsetY: number;
 }
 
 /**
@@ -34,6 +44,7 @@ export interface PreviewSource {
  */
 export function Preview({
   source,
+  overlays,
   playing,
   playhead,
   duration,
@@ -43,6 +54,8 @@ export function Preview({
   onSeek,
 }: {
   source: PreviewSource | null;
+  /** Text clips live at the playhead, bottom-most first. */
+  overlays: TextOverlay[];
   playing: boolean;
   playhead: number;
   duration: number;
@@ -53,6 +66,28 @@ export function Preview({
 }) {
   const video = useRef<HTMLVideoElement>(null);
   const loadedClip = useRef<string | null>(null);
+
+  // Text is sized as a fraction of the frame, so drawing it needs the pixel
+  // height of the surface it lands on. That is a layout fact, not a prop, and
+  // it changes whenever the panel is resized - hence an observer rather than a
+  // one-off measurement.
+  const stage = useRef<HTMLDivElement>(null);
+  const [surface, setSurface] = useState({ width: 0, height: 0 });
+
+  useLayoutEffect(() => {
+    const element = stage.current;
+    if (!element) return;
+
+    const measure = () => {
+      const bounds = element.getBoundingClientRect();
+      setSurface({ width: bounds.width, height: bounds.height });
+    };
+
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
 
   // Swap the source only when the clip under the playhead actually changes.
   // Reassigning `src` every frame would restart the decoder continuously.
@@ -126,7 +161,7 @@ export function Preview({
         that box, so it can never exceed the panel whatever its resolution.
       */}
       <div className="min-h-0 min-w-0 flex-1 overflow-hidden bg-stage p-4">
-        <div data-preview-surface className="relative h-full w-full">
+        <div ref={stage} data-preview-surface className="relative h-full w-full">
           <video
             ref={video}
             playsInline
@@ -145,7 +180,37 @@ export function Preview({
               className="absolute inset-0 h-full w-full object-contain"
             />
           )}
-          {!source && (
+          {/*
+            Titles sit above the picture and below the empty-state message.
+            `pointer-events-none` matters: the overlay covers the whole stage,
+            and without it the transport underneath would still be clickable
+            but the video would not.
+          */}
+          {surface.height > 0 &&
+            overlays.map((overlay) => (
+              <div
+                key={overlay.clipId}
+                className="pointer-events-none absolute inset-0 flex items-center justify-center"
+              >
+                <div
+                  style={{
+                    ...textCss(overlay.style, surface.height),
+                    // Percentages here would resolve against the text block's
+                    // own width, which varies with the words. The frame is the
+                    // thing offsets are relative to, so they are converted
+                    // against the measured surface instead.
+                    transform: `translate(${overlay.offsetX * surface.width}px, ${
+                      overlay.offsetY * surface.height
+                    }px)`,
+                    maxWidth: "92%",
+                  }}
+                >
+                  {overlay.style.content}
+                </div>
+              </div>
+            ))}
+
+          {!source && overlays.length === 0 && (
             // No surface of its own: an empty monitor *is* black, and drawing
             // a bordered card on top of it invents an edge that means nothing.
             // Just the words, sitting on the stage.

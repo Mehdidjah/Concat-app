@@ -119,6 +119,14 @@ const GLYPHS = {
       <path d="m3 17 5-4 4 3 3-2 6 5" />
     </>
   ),
+  // a serif capital T: the universal mark for type
+  type: (
+    <>
+      <path d="M4 6.5V5h16v1.5" />
+      <path d="M12 5v14" />
+      <path d="M8.5 19h7" />
+    </>
+  ),
   // waveform bars
   waveform: (
     <>

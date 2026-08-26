@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { isTauri } from "@tauri-apps/api/core";
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 
@@ -7,7 +8,7 @@ import { ContextMenu, type ContextTarget } from "./components/ContextMenu";
 import { ExportDialog } from "./components/ExportDialog";
 import { Icon } from "./components/Icon";
 import { ALL_MEDIA, MediaBin, type BinFilter } from "./components/MediaBin";
-import { Preview, type PreviewSource } from "./components/Preview";
+import { Preview, type PreviewSource, type TextOverlay } from "./components/Preview";
 import { Resizer } from "./components/Resizer";
 import { RightPanel, type RightTab } from "./components/RightPanel";
 import { StartScreen, type ProjectSession } from "./components/StartScreen";
@@ -19,6 +20,7 @@ import {
   engineVersion,
   loadProject,
   probeMedia,
+  readMediaBytes,
   saveProject,
   type ExportClip,
 } from "./lib/engine";
@@ -34,11 +36,14 @@ import {
   firstFreeTrack,
   findMedia,
   findTrack,
+  addFont,
+  addTextClip,
   mergeClips,
   moveClip,
   moveClips,
   projectDuration,
   removeClips,
+  removeFont,
   removeTrack,
   renameTrack,
   setClipSpeed,
@@ -54,6 +59,7 @@ import {
   type Project,
 } from "./lib/project";
 import { buildChain, chainKey } from "./lib/filters";
+import { familyForPath, registerFont } from "./lib/text";
 import { fromDocument, toDocument } from "./lib/persist";
 import { useTheme, type Theme } from "./lib/theme";
 import { useTransport } from "./lib/transport";
@@ -181,6 +187,99 @@ function Editor({
     };
   }, [session.path]);
 
+  // Bring back every font the project names, once, when it opens.
+  //
+  // Without this a reopened project renders its titles in the fallback face
+  // while still *claiming* the custom family, which looks like the styling was
+  // lost. A font whose file has moved is marked rather than dropped: the entry
+  // stays visible in the picker so it is obvious what is missing.
+  useEffect(() => {
+    if (!loaded || project.fonts.length === 0) return;
+
+    let cancelled = false;
+    void Promise.all(
+      project.fonts.map(async (font) => ({
+        family: font.family,
+        ok: await registerFont(font, readMediaBytes),
+      })),
+    ).then((results) => {
+      const failed = results.filter((result) => !result.ok).map((result) => result.family);
+      if (cancelled || failed.length === 0) return;
+
+      setProject((current) => ({
+        ...current,
+        fonts: current.fonts.map((font) =>
+          failed.includes(font.family) ? { ...font, missing: true } : font,
+        ),
+      }));
+    });
+
+    return () => {
+      cancelled = true;
+    };
+    // Deliberately keyed on `loaded` alone. Depending on `project.fonts` would
+    // re-run this on the very state update it performs.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loaded]);
+
+  /**
+   * Puts a title on the timeline at the playhead.
+   *
+   * It lands on the first track with room, the same rule dropped media
+   * follows, and is selected immediately with the Text tab open - the words
+   * are the first thing anyone wants to change, so putting the panel in front
+   * of them saves a click every single time.
+   */
+  const addText = useCallback(() => {
+    setProject((current) => {
+      const at = latest.current.playhead;
+      const track = firstFreeTrack(current, at, 4);
+      if (!track) return current;
+
+      const { project: next, clipId } = addTextClip(current, { trackId: track.id, start: at });
+      if (clipId) {
+        setSelectedClipIds([clipId]);
+        setSelectedMediaId(null);
+        setRightTab("text");
+      }
+      return next;
+    });
+  }, []);
+
+  /** Adds a font file to the project and makes it available immediately. */
+  const pickFont = useCallback(async () => {
+    try {
+      const picked = await openDialog({
+        multiple: false,
+        title: "Add a font",
+        filters: [{ name: "Fonts", extensions: ["ttf", "otf", "woff", "woff2", "ttc"] }],
+      });
+      if (typeof picked !== "string") return;
+
+      const current = latest.current.project;
+      if (current.fonts.some((font) => font.path === picked)) return;
+
+      const font = {
+        family: familyForPath(
+          picked,
+          current.fonts.map((existing) => existing.family),
+        ),
+        path: picked,
+      };
+
+      // Registered before it is stored, so a file the webview cannot parse is
+      // reported now rather than becoming a broken entry in the picker.
+      if (!(await registerFont(font, readMediaBytes))) {
+        setError(`Could not read ${picked.split(/[\/]/).pop() ?? picked} as a font.`);
+        return;
+      }
+
+      setProject((project) => addFont(project, font));
+    } catch (cause) {
+      setError(String(cause));
+    }
+  }, []);
+
   const save = useCallback(async () => {
     setSaveState("saving");
     try {
@@ -292,10 +391,36 @@ function Editor({
     audio.current?.sync(voices, playing);
   }, [project, playhead, playing]);
 
+  /**
+   * Every title live at the playhead, bottom track first.
+   *
+   * All of them, not just the top one: titles stack, and a lower third plus a
+   * name card is a normal thing to want on screen at once. Order follows track
+   * order so the compositing matches what the timeline shows.
+   */
+  const textOverlays = useMemo<TextOverlay[]>(() => {
+    const depth = (trackId: string) => project.tracks.findIndex((track) => track.id === trackId);
+
+    return clipsAt(project, playhead)
+      .filter((clip) => clip.kind === "text" && clip.text !== undefined)
+      .filter((clip) => findTrack(project, clip.trackId)?.visible !== false)
+      .sort((a, b) => depth(a.trackId) - depth(b.trackId))
+      .map((clip) => ({
+        clipId: clip.id,
+        style: clip.text!,
+        offsetX: clip.offsetX,
+        offsetY: clip.offsetY,
+      }));
+  }, [project, playhead]);
+
   // The top-most video clip under the playhead is what the monitor shows.
   const previewSource = useMemo<PreviewSource | null>(() => {
     // Stills are picture too, so they compete for the monitor with footage.
-    const active = clipsAt(project, playhead).filter((clip) => clip.kind !== "audio");
+    // Titles do not: they are drawn *over* whatever is showing, so they are
+    // handled as overlays below rather than as a source.
+    const active = clipsAt(project, playhead).filter(
+      (clip) => clip.kind !== "audio" && clip.kind !== "text",
+    );
     if (active.length === 0) return null;
 
     const depth = (trackId: string) => project.tracks.findIndex((track) => track.id === trackId);
@@ -726,6 +851,7 @@ function Editor({
               busy={busy}
               error={error}
               onFilter={setBinFilter}
+              onAddText={addText}
               onSelect={(id) => {
                 setSelectedMediaId(id);
                 setSelectedClipIds([]);
@@ -754,6 +880,7 @@ function Editor({
           <div className="min-w-0 flex-1">
             <Preview
               source={previewSource}
+              overlays={textOverlays}
               playing={playing}
               playhead={playhead}
               duration={duration}
@@ -777,7 +904,10 @@ function Editor({
               onTab={setRightTab}
               clip={selectedClip}
               media={inspectorMedia}
+              project={project}
               frameRate={frameRate}
+              onAddFont={() => void pickFont()}
+              onRemoveFont={(family) => setProject((current) => removeFont(current, family))}
               rendering={selectedClipIds.some((id) => renderingClips.has(id))}
               onChangeClip={(patch) => {
                 if (selectedClipIds.length !== 1) return;

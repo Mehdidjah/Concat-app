@@ -22,6 +22,7 @@
 
 import type { MediaSummary } from "./engine";
 import type { ClipFilter } from "./filters";
+import { defaultTextStyle, type CustomFont, type TextStyle } from "./text";
 
 /**
  * What a piece of media is.
@@ -36,6 +37,16 @@ export type MediaKind = "video" | "audio" | "image";
 
 /** Kept as an alias so existing call sites read naturally. */
 export type TrackKind = MediaKind;
+
+/**
+ * What a clip can be.
+ *
+ * Wider than `MediaKind` because a text clip has no file behind it - it *is*
+ * its own content. That is the whole reason for the distinction: everything in
+ * the bin is a `MediaKind`, but not everything on the timeline came from the
+ * bin. A text clip carries `mediaId: ""` and a `text` style instead.
+ */
+export type ClipKind = MediaKind | "text";
 
 export interface MediaItem {
   id: string;
@@ -77,8 +88,9 @@ export interface Clip {
   id: string;
   trackId: string;
   mediaId: string;
+  /** Empty for a text clip, which has no file behind it. */
   name: string;
-  kind: TrackKind;
+  kind: ClipKind;
   /** Seconds from the start of the timeline. */
   start: number;
   duration: number;
@@ -134,12 +146,29 @@ export interface Clip {
    * limiter is a different sound from the reverse.
    */
   filters: ClipFilter[];
+
+  /**
+   * The overlay, when this is a text clip. Absent on every other kind.
+   *
+   * On the clip rather than in the bin because two titles are two different
+   * pieces of content even when they share a face - there is no shared source
+   * to point at, so there is nothing to put in the bin.
+   */
+  text?: TextStyle;
 }
 
 export interface Project {
   media: MediaItem[];
   tracks: Track[];
   clips: Clip[];
+  /**
+   * Font files the user added, by path.
+   *
+   * On the project rather than in app settings because a title's face is part
+   * of the edit: opening the project has to bring the font back with it, or
+   * the composition silently changes.
+   */
+  fonts: CustomFont[];
 }
 
 /** Fallback length for media whose container reports no duration. */
@@ -155,6 +184,7 @@ const nextId = (prefix: string) => `${prefix}${(counter += 1)}`;
 export function createProject(): Project {
   return {
     media: [],
+    fonts: [],
     // Bottom-most first, matching the engine's compositing order, so track 1
     // sits at the bottom of the screen the way it does in every other editor.
     tracks: [1, 2, 3, 4].map((number) => ({
@@ -256,6 +286,78 @@ export function addClip(
   };
 
   return { project: { ...project, clips: [...project.clips, clip] }, clipId: clip.id };
+}
+
+/** How long a title lasts when first placed. Editorial default, not a fact. */
+export const DEFAULT_TEXT_DURATION = 4;
+
+/**
+ * Puts a title on the timeline.
+ *
+ * Unlike `addClip` this needs no media, which is the entire point: a text clip
+ * carries its own content, so there is nothing to import first. It still takes
+ * a track and a start so it behaves like any other clip once placed - it can
+ * be moved, trimmed, split and stacked with no special cases downstream.
+ */
+export function addTextClip(
+  project: Project,
+  { trackId, start, style }: { trackId: string; start: number; style?: Partial<TextStyle> },
+): { project: Project; clipId: string | null } {
+  const track = findTrack(project, trackId);
+  if (!track) return { project, clipId: null };
+
+  const text: TextStyle = { ...defaultTextStyle(), ...style };
+
+  const clip: Clip = {
+    id: nextId("c"),
+    trackId,
+    // No media to point at. Every consumer keys off `kind` rather than
+    // probing this, so an empty id is never dereferenced.
+    mediaId: "",
+    // The name follows the words, so the timeline reads like the title looks.
+    // It is snapshotted rather than derived so that renaming the clip and
+    // editing the text stay independent.
+    name: firstLine(text.content),
+    kind: "text",
+    start: Math.max(0, start),
+    duration: DEFAULT_TEXT_DURATION,
+    sourceStart: 0,
+    volume: 1,
+    fadeIn: 0,
+    fadeOut: 0,
+    scale: 1,
+    offsetX: 0,
+    offsetY: 0,
+    speed: 1,
+    preservePitch: true,
+    filters: [],
+    text,
+  };
+
+  return { project: { ...project, clips: [...project.clips, clip] }, clipId: clip.id };
+}
+
+/** A one-line label for a block of text, for the timeline and the bin. */
+export function firstLine(content: string): string {
+  const line = content.split("\n").find((candidate) => candidate.trim() !== "");
+  return (line ?? "Text").trim().slice(0, 40) || "Text";
+}
+
+/** Registers a font file against the project, ignoring one already added. */
+export function addFont(project: Project, font: CustomFont): Project {
+  if (project.fonts.some((existing) => existing.path === font.path)) return project;
+  return { ...project, fonts: [...project.fonts, font] };
+}
+
+/**
+ * Forgets a font.
+ *
+ * Clips already using it keep the family name: the face may come back when the
+ * file does, and silently rewriting a title's styling because a list entry was
+ * removed would be a worse surprise than a temporary fallback.
+ */
+export function removeFont(project: Project, family: string): Project {
+  return { ...project, fonts: project.fonts.filter((font) => font.family !== family) };
 }
 
 /** Moves a clip in time, and optionally to another track of the same kind. */
