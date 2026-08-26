@@ -368,7 +368,31 @@ fn mix_audio(clips: &[&ExportClip], duration: f64, destination: &Path) -> Result
     } else {
         format!("{inputs}amix=inputs={}:normalize=0[mixed]", clips.len())
     };
-    chains.push(format!("{mix};[mixed]apad,atrim=duration={duration:.6}[out]"));
+
+    // The `aresample` is load-bearing, and not about sample rates.
+    //
+    // `atempo` emits a fractional number of samples per frame, and the leftover
+    // rides along in the timestamps it produces. Mixing such a branch with an
+    // untouched one gave `amix` an output whose timestamps eventually came out
+    // as AV_NOPTS_VALUE, and the muxer rejected the packet:
+    //
+    //     non monotonically increasing dts to muxer: 9223372036854775807
+    //
+    // The effect was a two-second mix written as a ~40 ms file - so any export
+    // of more than one clip, where any clip had a speed other than 1 with
+    // "preserve pitch" on, produced a silently truncated soundtrack. The
+    // exporter reported success either way, which is how it went unnoticed.
+    //
+    // Passing the mix through the resampler regenerates one continuous
+    // timestamp series from the sample count and absorbs the drift. Verified
+    // against every shape this function emits: both speed directions, the
+    // multi-stage `atempo` used beyond 2x, the `asetrate` path, several clips
+    // at once, and the single-clip `anull` path.
+    //
+    // Do not "simplify" this away because the rate on both sides is 48000.
+    chains.push(format!(
+        "{mix};[mixed]aresample=48000,apad,atrim=duration={duration:.6}[out]"
+    ));
 
     command
         .args(["-filter_complex", &chains.join(";")])
