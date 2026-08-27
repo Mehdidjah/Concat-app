@@ -13,27 +13,30 @@
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-static FFMPEG: OnceLock<PathBuf> = OnceLock::new();
-static FFPROBE: OnceLock<PathBuf> = OnceLock::new();
+/// One cell for the pair, so two racing first-callers can never produce a
+/// mixed set - the decoder from one install, the prober from another.
+static BINARIES: OnceLock<(PathBuf, PathBuf)> = OnceLock::new();
 
 /// Points the crate at a specific pair of binaries.
 ///
 /// Returns `false` if they were already resolved, in which case nothing
 /// changed. Call this before opening any media.
 pub fn set_binaries(ffmpeg: impl Into<PathBuf>, ffprobe: impl Into<PathBuf>) -> bool {
-    let first = FFMPEG.set(ffmpeg.into()).is_ok();
-    let second = FFPROBE.set(ffprobe.into()).is_ok();
-    first && second
+    BINARIES.set((ffmpeg.into(), ffprobe.into())).is_ok()
+}
+
+fn resolved() -> &'static (PathBuf, PathBuf) {
+    BINARIES.get_or_init(|| (PathBuf::from("ffmpeg"), PathBuf::from("ffprobe")))
 }
 
 /// The `ffmpeg` binary to run. Defaults to whatever `PATH` finds.
 pub fn ffmpeg() -> &'static Path {
-    FFMPEG.get_or_init(|| PathBuf::from("ffmpeg"))
+    &resolved().0
 }
 
 /// The `ffprobe` binary to run. Defaults to whatever `PATH` finds.
 pub fn ffprobe() -> &'static Path {
-    FFPROBE.get_or_init(|| PathBuf::from("ffprobe"))
+    &resolved().1
 }
 
 #[cfg(test)]

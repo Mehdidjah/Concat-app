@@ -2,13 +2,14 @@
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdout, Command, Stdio};
+use std::process::{Child, ChildStdout, Stdio};
 
 use relay_core::frame::Frame;
 use relay_core::time::{FrameRate, Rational};
 
 use crate::error::{Error, Result};
 use crate::probe;
+use crate::process::{StderrTail, base_command};
 
 /// Name used in error messages. The binary actually run comes from
 /// [`crate::binaries::ffmpeg`], which may be a bundled copy.
@@ -109,13 +110,14 @@ impl DecodeOptions {
 
 /// Decodes a file by piping raw RGBA out of an `ffmpeg` child process.
 ///
-/// The child's stderr is inherited rather than captured: reading two pipes from
-/// one process without deadlocking needs a second thread, and at `-loglevel
-/// error` the only thing it ever prints is the message you want to see anyway.
+/// The child's stderr is drained on its own thread and its tail is folded into
+/// [`Error::Exited`] - a packaged app has no terminal, so an inherited stderr
+/// would send the one useful line FFmpeg prints into the void.
 pub struct FfmpegDecoder {
     path: PathBuf,
     child: Child,
     stdout: ChildStdout,
+    stderr: StderrTail,
     width: u32,
     height: u32,
     /// Reused between frames so decoding does not allocate per frame.
@@ -142,8 +144,7 @@ impl FfmpegDecoder {
             }
         };
 
-        let mut command = Command::new(crate::binaries::ffmpeg());
-        command.args(["-hide_banner", "-nostdin", "-loglevel", "error"]);
+        let mut command = base_command(crate::binaries::ffmpeg());
 
         // Both of these are *input* options and have to precede -i.
         if options.looping {
@@ -168,19 +169,23 @@ impl FfmpegDecoder {
         }
 
         command
-            .args(["-f", "rawvideo", "-pix_fmt", "rgba", "-"])
+            // `pipe:1`, not `-`: the bare dash resolves to the `fd:` protocol
+            // on modern FFmpeg, which a trimmed bundled build may not include.
+            .args(["-f", "rawvideo", "-pix_fmt", "rgba", "pipe:1"])
             .stdout(Stdio::piped())
             .stdin(Stdio::null())
-            .stderr(Stdio::inherit());
+            .stderr(Stdio::piped());
 
         let mut child =
             command.spawn().map_err(|source| Error::Spawn { program: FFMPEG, source })?;
         let stdout = child.stdout.take().expect("stdout was piped");
+        let stderr = StderrTail::drain(&mut child);
 
         Ok(Self {
             path: path.to_path_buf(),
             child,
             stdout,
+            stderr,
             width,
             height,
             buffer: vec![0u8; Frame::byte_len(width, height)],
@@ -205,7 +210,12 @@ impl FfmpegDecoder {
         if status.success() {
             Ok(())
         } else {
-            Err(Error::Exited { program: FFMPEG, path: self.path.clone(), status })
+            Err(Error::Exited {
+                program: FFMPEG,
+                path: self.path.clone(),
+                status,
+                stderr: self.stderr.summary(),
+            })
         }
     }
 }

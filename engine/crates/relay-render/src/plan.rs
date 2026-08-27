@@ -22,6 +22,10 @@ pub struct PlannedLayer {
     pub media: PathBuf,
     /// The timestamp *within that file* to pull.
     pub source_time: Rational,
+    /// Source seconds consumed per timeline second. A decoder that pulls one
+    /// frame per output frame must decode at `output_rate / speed` to stay in
+    /// step with `source_time`.
+    pub speed: Rational,
     /// Blend strength over everything beneath, in `0.0..=1.0`.
     pub opacity: f32,
     /// The clip's placement in the frame, resolution-independent.
@@ -74,6 +78,7 @@ pub fn plan_frame(timeline: &Timeline, time: Rational) -> FramePlan {
             clip: clip_id,
             media: clip.media.path.clone(),
             source_time,
+            speed: clip.speed,
             opacity: clip.opacity.clamp(0.0, 1.0),
             transform: clip.transform,
         });
@@ -121,6 +126,19 @@ mod tests {
 
         let plan = plan_frame(&timeline, seconds(7));
         assert_eq!(plan.layers[0].source_time, seconds(32), "2s into a clip that starts at 30s");
+    }
+
+    #[test]
+    fn a_retimed_clip_plans_scaled_source_times() {
+        let mut timeline = Timeline::new(640, 360, FrameRate::THIRTY);
+        let track = timeline.add_track(Track::new("V1", TrackKind::Video));
+        let mut clip = Clip::new(MediaRef::new("a.mp4"), seconds(0), seconds(4));
+        clip.speed = Rational::from_int(2);
+        timeline.add_clip(track, clip).expect("track exists");
+
+        let plan = plan_frame(&timeline, seconds(3));
+        assert_eq!(plan.layers[0].source_time, seconds(6), "3s in at 2x is 6s of source");
+        assert_eq!(plan.layers[0].speed, Rational::from_int(2));
     }
 
     #[test]

@@ -1,27 +1,28 @@
 //! Rendering a timeline to a file.
 //!
-//! This is the first thing in the app that uses the engine for what it is for:
-//! `relay-render` decides what is on screen at each instant, `relay-media`
-//! decodes and encodes, and `relay-core` holds the timeline. The UI's own
-//! model is converted into the engine's on the way in, which is a useful
-//! rehearsal for the day the engine owns the model outright.
+//! This is the seam where the UI's model becomes the engine's: clips arrive as
+//! flat JSON, are converted into a `relay_core::Timeline`, and from there the
+//! engine decides everything - what is on screen (`relay-render`), what the
+//! sound means (`relay_media::audio`), and how bytes move (`relay-media`).
+//! Editing semantics deliberately do not live here; this file converts,
+//! orchestrates and reports.
 //!
-//! Picture and sound take different routes. Picture is composited frame by
-//! frame here, because that is the part that needs a compositor. Sound is
-//! handed to FFmpeg as one `filter_complex`, because mixing delayed, trimmed
-//! audio streams is exactly what it is good at and writing a mixer to do it
-//! twice would be silly.
+//! Picture is composited frame by frame - on the GPU when the machine has one,
+//! with the CPU compositor as the always-correct fallback. Sound is planned by
+//! the engine as one FFmpeg filtergraph and mixed in a single pass.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use relay_core::frame::Frame;
 use relay_core::time::{FrameRate, Rational};
 use relay_core::timeline::{Clip, ClipId, MediaRef, Timeline, Track, TrackKind, Transform};
+use relay_media::audio::{self, AudioClip};
 use relay_media::{
     DecodeOptions, EncodeOptions, FfmpegDecoder, FfmpegEncoder, FrameSink, FrameSource,
 };
-use relay_render::{Compositor, CpuCompositor, Layer, Placement, plan_frame};
+use relay_render::{Compositor, CpuCompositor, Layer, Placement, WgpuCompositor, plan_frame};
 use serde::{Deserialize, Serialize};
 use tauri::Emitter;
 
@@ -109,8 +110,44 @@ struct Progress {
     stage: &'static str,
 }
 
+/// What the export loop calls to report and to ask "should I stop?".
+pub struct Reporter<'a> {
+    /// Called with (frame, total, stage).
+    pub progress: &'a mut dyn FnMut(i64, i64, &'static str),
+    /// Checked between frames and stages; true aborts cleanly.
+    pub cancel: &'a AtomicBool,
+}
+
+impl Reporter<'_> {
+    fn emit(&mut self, frame: i64, total: i64, stage: &'static str) {
+        (self.progress)(frame, total, stage);
+    }
+
+    fn cancelled(&self) -> Result<(), String> {
+        if self.cancel.load(Ordering::Relaxed) {
+            Err("export cancelled".to_owned())
+        } else {
+            Ok(())
+        }
+    }
+}
+
+/// Renders `request` and returns the path written. Tauri-facing wrapper that
+/// reports through the `export://progress` event; the logic is in [`render`].
+pub fn run(
+    app: &tauri::AppHandle,
+    request: ExportRequest,
+    cancel: &AtomicBool,
+) -> Result<String, String> {
+    let mut progress = |frame: i64, total: i64, stage: &'static str| {
+        // A dropped progress event is not worth failing an export over.
+        let _ = app.emit("export://progress", Progress { frame, total, stage });
+    };
+    render(&request, Reporter { progress: &mut progress, cancel })
+}
+
 /// Renders `request` and returns the path written.
-pub fn run(app: &tauri::AppHandle, request: ExportRequest) -> Result<String, String> {
+pub fn render(request: &ExportRequest, mut reporter: Reporter<'_>) -> Result<String, String> {
     if request.clips.is_empty() {
         return Err("there is nothing on the timeline to export".to_owned());
     }
@@ -141,12 +178,23 @@ pub fn run(app: &tauri::AppHandle, request: ExportRequest) -> Result<String, Str
             .filter(|clip| clip.kind == "video" && !clip.muted),
     );
 
-    let duration = request
+    // An unmuted clip can still have no audio stream - a screen recording, a
+    // silent render. FFmpeg refuses a filtergraph that names `[N:a]` on such
+    // an input rather than treating it as silence, so membership in the mix
+    // is decided by probing the file, not by the clip's kind.
+    let mut has_audio: HashMap<&str, bool> = HashMap::new();
+    sound.retain(|clip| {
+        *has_audio.entry(clip.path.as_str()).or_insert_with(|| {
+            relay_media::probe(&clip.path).is_ok_and(|info| info.audio.is_some())
+        })
+    });
+
+    let timeline_end = request
         .clips
         .iter()
         .map(|clip| clip.start + clip.duration)
         .fold(0.0f64, f64::max);
-    let total_frames = (duration * rate.fps().as_f64()).round() as i64;
+    let total_frames = (timeline_end * rate.fps().as_f64()).round() as i64;
     if total_frames <= 0 {
         return Err("the timeline is empty".to_owned());
     }
@@ -159,7 +207,7 @@ pub fn run(app: &tauri::AppHandle, request: ExportRequest) -> Result<String, Str
     let mixed = directory.join(format!(".{stem}.relay-audio.m4a"));
 
     let result = (|| -> Result<(), String> {
-        render_picture(app, &request, rate, total_frames, &visible, &silent)?;
+        render_picture(request, rate, total_frames, &visible, &silent, &mut reporter)?;
 
         if sound.is_empty() {
             std::fs::rename(&silent, &output)
@@ -167,11 +215,14 @@ pub fn run(app: &tauri::AppHandle, request: ExportRequest) -> Result<String, Str
             return Ok(());
         }
 
-        emit(app, 0, total_frames, "mixing audio");
-        mix_audio(&sound, duration, &mixed)?;
+        reporter.cancelled()?;
+        reporter.emit(0, total_frames, "mixing audio");
+        let mix: Vec<AudioClip> = sound.iter().map(|clip| audio_clip(clip)).collect();
+        audio::mix_to_file(&mix, timeline_end, &mixed).map_err(|error| error.to_string())?;
 
-        emit(app, total_frames, total_frames, "muxing");
-        mux(&silent, &mixed, &output)
+        reporter.cancelled()?;
+        reporter.emit(total_frames, total_frames, "muxing");
+        audio::mux(&silent, &mixed, &output).map_err(|error| error.to_string())
     })();
 
     let _ = std::fs::remove_file(&silent);
@@ -180,14 +231,40 @@ pub fn run(app: &tauri::AppHandle, request: ExportRequest) -> Result<String, Str
     result.map(|()| output.to_string_lossy().into_owned())
 }
 
+/// The engine's view of one audible clip.
+fn audio_clip(clip: &ExportClip) -> AudioClip {
+    AudioClip {
+        path: PathBuf::from(&clip.path),
+        start: clip.start,
+        duration: clip.duration,
+        source_start: clip.source_start,
+        speed: audio::clamp_speed(clip.speed),
+        preserve_pitch: clip.preserve_pitch,
+        volume: clip.volume,
+        fade_in: clip.fade_in,
+        fade_out: clip.fade_out,
+        filter_chain: clip.filter_chain.clone(),
+    }
+}
+
+/// The best compositor this machine offers: the GPU when it has one, the CPU
+/// reference otherwise. Never an error - a machine with no adapter renders
+/// slower, not not-at-all.
+fn best_compositor() -> Box<dyn Compositor> {
+    match WgpuCompositor::new() {
+        Some(gpu) => Box::new(gpu),
+        None => Box::new(CpuCompositor),
+    }
+}
+
 /// Composites every frame of the timeline into a soundless video file.
 fn render_picture(
-    app: &tauri::AppHandle,
     request: &ExportRequest,
     rate: FrameRate,
     total_frames: i64,
     visible: &[&ExportClip],
     destination: &Path,
+    reporter: &mut Reporter<'_>,
 ) -> Result<(), String> {
     let (timeline, stills, decode_sizes) = build_timeline(request, rate, visible);
 
@@ -204,15 +281,18 @@ fn render_picture(
     )
     .map_err(|error| error.to_string())?;
 
-    let mut compositor = CpuCompositor;
+    let mut compositor = best_compositor();
 
     // One decoder per clip, opened at its in-point the first time the clip is
-    // needed and dropped the moment it leaves the playhead. Because every
-    // decoder is opened at the output frame rate, pulling exactly one frame
-    // per output frame keeps each of them in step without any seeking.
+    // needed and dropped the moment it leaves the playhead. Every decoder is
+    // opened at `output rate / clip speed`, so pulling exactly one frame per
+    // output frame keeps each of them in step with the plan's source times
+    // without any seeking - including retimed clips.
     let mut decoders: HashMap<ClipId, FfmpegDecoder> = HashMap::new();
 
     for index in 0..total_frames {
+        reporter.cancelled()?;
+
         let time = rate.time_of_frame(index);
         let plan = plan_frame(&timeline, time);
 
@@ -228,10 +308,22 @@ fn render_picture(
                         .get(&layer.clip)
                         .copied()
                         .unwrap_or((request.width, request.height));
+
+                    // A retimed clip advances the source by `speed / fps`
+                    // seconds per output frame, so the decoder must emit
+                    // frames exactly that far apart: a rate of `fps / speed`.
+                    // (At 2x, 300 output frames cover 20s of source - the
+                    // decoder emits 15 frames per source second, not 60.)
+                    let decode_rate = if layer.speed == Rational::ONE {
+                        rate
+                    } else {
+                        FrameRate::new(rate.fps() / layer.speed)
+                    };
+
                     let mut options = DecodeOptions::default()
                         .starting_at(layer.source_time)
                         .scaled_to(decode_width, decode_height)
-                        .at_rate(rate);
+                        .at_rate(decode_rate);
 
                     // A still is a one-frame stream. Without looping it would
                     // contribute a single frame and then disappear.
@@ -288,7 +380,7 @@ fn render_picture(
         decoders.retain(|clip, _| live.contains(clip));
 
         if index % 15 == 0 {
-            emit(app, index, total_frames, "rendering");
+            reporter.emit(index, total_frames, "rendering");
         }
     }
 
@@ -329,6 +421,12 @@ fn build_timeline(
 
         let mut engine_clip = Clip::new(MediaRef::new(&clip.path), start, duration);
         engine_clip.source_start = quantise(clip.source_start, rate);
+        // The same clamp the audio path applies, so a 2x clip means the same
+        // thing to picture and sound. A still has no meaningful rate.
+        if clip.kind != "image" {
+            engine_clip.speed = Rational::approximate(audio::clamp_speed(clip.speed))
+                .unwrap_or(Rational::ONE);
+        }
         engine_clip.transform = Transform {
             scale: clip.scale,
             offset_x: clip.offset_x,
@@ -366,199 +464,4 @@ fn fitted_size(request: &ExportRequest, clip: &ExportClip) -> Option<(u32, u32)>
 
 fn quantise(seconds: f64, rate: FrameRate) -> Rational {
     rate.time_of_frame((seconds * rate.fps().as_f64()).round().max(0.0) as i64)
-}
-
-/// Trims, delays and mixes every audible clip into one track.
-fn mix_audio(clips: &[&ExportClip], duration: f64, destination: &Path) -> Result<(), String> {
-    let mut command = std::process::Command::new(relay_media::ffmpeg());
-    command.args(["-hide_banner", "-nostdin", "-loglevel", "error", "-y"]);
-
-    for clip in clips {
-        command.args(["-i", &clip.path]);
-    }
-
-    // Each input is trimmed to its in-point, restamped from zero, then delayed
-    // to where it sits on the timeline. `all=1` applies the delay to every
-    // channel; without it only the left channel moves, which is a memorable
-    // way to discover the flag exists.
-    let mut chains: Vec<String> = Vec::new();
-    for (index, clip) in clips.iter().enumerate() {
-        let delay_ms = (clip.start * 1000.0).round().max(0.0) as i64;
-
-        // Gain and fades sit between the restamp and the delay: after the
-        // restamp so the fade times are measured from the clip's own start,
-        // and before the delay so they are not pushed along with it.
-        // A sped-up clip covers more source than its timeline length, so the
-        // trim has to take `duration * speed` before the rate is applied.
-        let speed = clip.speed.clamp(0.1, 8.0);
-        let mut stage = format!(
-            "[{index}:a]atrim=start={:.6}:duration={:.6},asetpts=PTS-STARTPTS",
-            clip.source_start,
-            clip.duration * speed
-        );
-
-        if (speed - 1.0).abs() > f64::EPSILON {
-            if clip.preserve_pitch {
-                // atempo time-stretches, leaving pitch alone. Its per-instance
-                // range is limited, so a large change is split into stages
-                // that multiply out to the requested rate.
-                for factor in tempo_stages(speed) {
-                    stage.push_str(&format!(",atempo={factor:.6}"));
-                }
-            } else {
-                // Resampling moves pitch and tempo together - the tape effect.
-                stage.push_str(&format!(
-                    ",asetrate=48000*{speed:.6},aresample=48000"
-                ));
-            }
-        }
-
-        // Filters first: they are what the clip *is* now, and gain and fades
-        // are adjustments applied to that result. Reversing the order would
-        // let a compressor inside a filter chain undo the fade.
-        if !clip.filter_chain.is_empty() {
-            stage.push(',');
-            stage.push_str(&clip.filter_chain);
-        }
-
-        if (clip.volume - 1.0).abs() > f64::EPSILON {
-            stage.push_str(&format!(",volume={:.4}", clip.volume.max(0.0)));
-        }
-        if clip.fade_in > 0.0 {
-            stage.push_str(&format!(",afade=t=in:st=0:d={:.4}", clip.fade_in));
-        }
-        if clip.fade_out > 0.0 {
-            let start = (clip.duration - clip.fade_out).max(0.0);
-            stage.push_str(&format!(",afade=t=out:st={start:.4}:d={:.4}", clip.fade_out));
-        }
-
-        stage.push_str(&format!(",adelay={delay_ms}:all=1[a{index}]"));
-        chains.push(stage);
-    }
-
-    let inputs: String = (0..clips.len()).map(|index| format!("[a{index}]")).collect();
-    let mix = if clips.len() == 1 {
-        // amix with one input would still apply its normalisation curve.
-        format!("{inputs}anull[mixed]")
-    } else {
-        format!("{inputs}amix=inputs={}:normalize=0[mixed]", clips.len())
-    };
-
-    // The `aresample` is load-bearing, and not about sample rates.
-    //
-    // `atempo` emits a fractional number of samples per frame, and the leftover
-    // rides along in the timestamps it produces. Mixing such a branch with an
-    // untouched one gave `amix` an output whose timestamps eventually came out
-    // as AV_NOPTS_VALUE, and the muxer rejected the packet:
-    //
-    //     non monotonically increasing dts to muxer: 9223372036854775807
-    //
-    // The effect was a two-second mix written as a ~40 ms file - so any export
-    // of more than one clip, where any clip had a speed other than 1 with
-    // "preserve pitch" on, produced a silently truncated soundtrack. The
-    // exporter reported success either way, which is how it went unnoticed.
-    //
-    // Passing the mix through the resampler regenerates one continuous
-    // timestamp series from the sample count and absorbs the drift. Verified
-    // against every shape this function emits: both speed directions, the
-    // multi-stage `atempo` used beyond 2x, the `asetrate` path, several clips
-    // at once, and the single-clip `anull` path.
-    //
-    // Do not "simplify" this away because the rate on both sides is 48000.
-    chains.push(format!(
-        "{mix};[mixed]aresample=48000,apad,atrim=duration={duration:.6}[out]"
-    ));
-
-    command
-        .args(["-filter_complex", &chains.join(";")])
-        .args(["-map", "[out]"])
-        .args(["-c:a", "aac", "-b:a", "192k"])
-        .arg(destination);
-
-    run_ffmpeg(command, "mixing audio")
-}
-
-/// Splits a rate into `atempo` stages that each stay inside its valid range.
-///
-/// One filter instance is limited, so 4x has to become 2x then 2x. Multiplying
-/// the stages back together is what keeps the result exact.
-fn tempo_stages(speed: f64) -> Vec<f64> {
-    let mut stages = Vec::new();
-    let mut remaining = speed;
-
-    while remaining > 2.0 {
-        stages.push(2.0);
-        remaining /= 2.0;
-    }
-    while remaining < 0.5 {
-        stages.push(0.5);
-        remaining /= 0.5;
-    }
-
-    stages.push(remaining);
-    stages
-}
-
-fn mux(video: &Path, audio: &Path, output: &Path) -> Result<(), String> {
-    let mut command = std::process::Command::new(relay_media::ffmpeg());
-    command
-        .args(["-hide_banner", "-nostdin", "-loglevel", "error", "-y"])
-        .arg("-i")
-        .arg(video)
-        .arg("-i")
-        .arg(audio)
-        // The picture is already encoded exactly as asked; re-encoding it here
-        // would cost a second full pass and a generation of quality.
-        .args(["-c:v", "copy", "-c:a", "copy", "-shortest"])
-        .args(["-movflags", "+faststart"])
-        .arg(output);
-
-    run_ffmpeg(command, "muxing")
-}
-
-fn run_ffmpeg(mut command: std::process::Command, stage: &str) -> Result<(), String> {
-    let output = command
-        .output()
-        .map_err(|error| format!("could not run ffmpeg while {stage}: {error}"))?;
-
-    if output.status.success() {
-        return Ok(());
-    }
-
-    let detail = String::from_utf8_lossy(&output.stderr);
-    let tail = detail.lines().rev().take(3).collect::<Vec<_>>().join(" / ");
-    Err(format!("ffmpeg failed while {stage}: {tail}"))
-}
-
-fn emit(app: &tauri::AppHandle, frame: i64, total: i64, stage: &'static str) {
-    // A dropped progress event is not worth failing an export over.
-    let _ = app.emit("export://progress", Progress { frame, total, stage });
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn tempo_stages_multiply_back_to_the_requested_rate() {
-        for speed in [0.25, 0.5, 0.9, 1.0, 1.5, 2.0, 3.0, 4.0, 8.0] {
-            let product: f64 = tempo_stages(speed).iter().product();
-            assert!(
-                (product - speed).abs() < 1e-9,
-                "stages for {speed} multiplied to {product}",
-            );
-        }
-    }
-
-    #[test]
-    fn every_stage_is_within_the_filter_range() {
-        for speed in [0.25, 0.5, 1.0, 4.0, 8.0] {
-            for factor in tempo_stages(speed) {
-                assert!(
-                    (0.5..=2.0).contains(&factor),
-                    "{factor} is outside atempo's range, from speed {speed}",
-                );
-            }
-        }
-    }
 }

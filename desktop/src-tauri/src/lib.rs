@@ -6,7 +6,8 @@
 //! making decisions about the edit, that logic belongs in `relay-core` or
 //! `relay-render` where it can be unit-tested without a window.
 
-mod export;
+// Public so the integration tests can drive a real export; see tests/.
+pub mod export;
 mod playback;
 mod projects;
 
@@ -228,7 +229,7 @@ fn filmstrip(path: &str, count: u32, height: u32) -> Result<Vec<u8>, String> {
                 f64::from(count) / duration
             ),
         ])
-        .args(["-frames:v", "1", "-q:v", "3", "-f", "mjpeg", "-"])
+        .args(["-frames:v", "1", "-q:v", "3", "-f", "mjpeg", "pipe:1"])
         .output()
         .map_err(|error| format!("could not run ffmpeg: {error}"))?;
 
@@ -346,6 +347,9 @@ fn config_dir(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
         .map_err(|error| format!("could not locate the config directory: {error}"))
 }
 
+/// The stop flag for the one export that can run at a time.
+struct ExportState(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
 /// Renders the timeline to a file.
 ///
 /// Runs on a blocking thread and reports progress through the
@@ -354,11 +358,20 @@ fn config_dir(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
 #[tauri::command]
 async fn export_project(
     app: tauri::AppHandle,
+    state: tauri::State<'_, ExportState>,
     request: export::ExportRequest,
 ) -> Result<String, String> {
-    tauri::async_runtime::spawn_blocking(move || export::run(&app, request))
+    let cancel = std::sync::Arc::clone(&state.0);
+    cancel.store(false, std::sync::atomic::Ordering::Relaxed);
+    tauri::async_runtime::spawn_blocking(move || export::run(&app, request, &cancel))
         .await
         .map_err(|error| format!("export task failed: {error}"))?
+}
+
+/// Asks the running export to stop at the next frame. Idle is a harmless no-op.
+#[tauri::command]
+fn cancel_export(state: tauri::State<'_, ExportState>) {
+    state.0.store(true, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// Flattens an error and its causes into one line.
@@ -428,6 +441,9 @@ pub fn run() {
             use tauri::Manager;
             use_bundled_ffmpeg(app);
             app.manage(playback::Playback::start(app.handle().clone()));
+            app.manage(ExportState(std::sync::Arc::new(
+                std::sync::atomic::AtomicBool::new(false),
+            )));
             Ok(())
         })
         .plugin(tauri_plugin_opener::init())
@@ -449,7 +465,8 @@ pub fn run() {
             load_project,
             recent_projects,
             forget_project,
-            export_project
+            export_project,
+            cancel_export
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

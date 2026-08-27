@@ -11,7 +11,11 @@
 //! `docs/decisions/0004-cpu-compositor-first.md`.
 
 pub mod compositor;
+#[cfg(feature = "gpu")]
+pub mod gpu;
 pub mod plan;
 
 pub use compositor::{Compositor, CpuCompositor, Layer, Placement};
+#[cfg(feature = "gpu")]
+pub use gpu::WgpuCompositor;
 pub use plan::{FramePlan, PlannedLayer, plan_frame};

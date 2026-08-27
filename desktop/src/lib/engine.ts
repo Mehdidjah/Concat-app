@@ -172,6 +172,14 @@ export async function exportProject(request: ExportRequest): Promise<string> {
 }
 
 /**
+ * Asks the running export to stop at the next frame. The pending
+ * `exportProject` call then rejects with "export cancelled".
+ */
+export async function cancelExport(): Promise<void> {
+  return invoke<void>("cancel_export");
+}
+
+/**
  * Writes one file into the project's cache folder and returns its path.
  *
  * The same store the artwork cache uses, so it travels with the project and

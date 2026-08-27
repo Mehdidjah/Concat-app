@@ -94,13 +94,28 @@ impl Rational {
 
     fn reduce(num: i128, den: i128) -> Self {
         assert!(den != 0, "Rational denominator must not be zero");
+        Self::checked_reduce(num, den).expect("rational overflowed i64")
+    }
+
+    /// Builds `num / den` in lowest terms, or `None` when the value cannot be
+    /// represented. The non-panicking path for numbers that come from a file
+    /// rather than from our own arithmetic - a hostile container must produce
+    /// an error, never a crash.
+    pub fn checked_new(num: i128, den: i128) -> Option<Self> {
+        if den == 0 {
+            return None;
+        }
+        Self::checked_reduce(num, den)
+    }
+
+    fn checked_reduce(num: i128, den: i128) -> Option<Self> {
         let (num, den) = if den < 0 { (-num, -den) } else { (num, den) };
         let divisor = gcd(num, den).max(1);
         let (num, den) = (num / divisor, den / divisor);
-        Self {
-            num: i64::try_from(num).expect("rational numerator overflowed i64"),
-            den: i64::try_from(den).expect("rational denominator overflowed i64"),
-        }
+        Some(Self {
+            num: i64::try_from(num).ok()?,
+            den: i64::try_from(den).ok()?,
+        })
     }
 
     /// The numerator, in lowest terms.
@@ -151,6 +166,23 @@ impl Rational {
         } else {
             self
         }
+    }
+
+    /// The nearest rational with denominator 1,000,000 - the seam where a
+    /// UI's `f64` becomes exact. Returns `None` for NaN or infinite values and
+    /// for magnitudes an `i64` of microseconds cannot hold.
+    ///
+    /// This is for values *entering* the engine. Values that are already
+    /// `Rational` must never round-trip through here.
+    pub fn approximate(value: f64) -> Option<Self> {
+        if !value.is_finite() {
+            return None;
+        }
+        let scaled = (value * 1_000_000.0).round();
+        if scaled.abs() >= i64::MAX as f64 {
+            return None;
+        }
+        Some(Self::new(scaled as i64, 1_000_000))
     }
 
     /// Lossy conversion, for display and for arguments handed to FFmpeg.

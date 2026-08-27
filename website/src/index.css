@@ -1,0 +1,25 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text",
+    "Helvetica Neue", "Segoe UI", Roboto, Arial, sans-serif;
+
+  /* Core palette — light, restrained */
+  --color-ink: #1d1d1f;
+  --color-ink-secondary: #6e6e73;
+  --color-ink-tertiary: #86868b;
+  --color-surface: #ffffff;
+  --color-surface-alt: #f5f5f7;
+  --color-accent: #0071e3;
+  --color-accent-hover: #0077ed;
+  --color-hairline: #d2d2d7;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  @apply bg-surface text-ink font-sans antialiased;
+  text-rendering: optimizeLegibility;
+}

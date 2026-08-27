@@ -26,7 +26,6 @@
 //! clip set is re-sent to the callback as each one lands.
 
 use std::collections::{HashMap, HashSet};
-use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
@@ -255,15 +254,26 @@ impl Playback {
 /// Identity of one decoded span: everything that changes the samples.
 /// Volume, fades and timeline position are deliberately absent - they apply
 /// at mix time.
+///
+/// FNV-1a rather than the standard library's hasher, because these keys name
+/// files that outlive the process: `DefaultHasher` is free to change between
+/// Rust releases, and a changed hash would silently orphan every project's
+/// audio cache on a toolchain upgrade.
 fn decode_key(spec: &ClipSpec) -> String {
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    spec.path.hash(&mut hasher);
-    spec.source_start.to_bits().hash(&mut hasher);
-    spec.duration.to_bits().hash(&mut hasher);
-    spec.speed.to_bits().hash(&mut hasher);
-    spec.preserve_pitch.hash(&mut hasher);
-    spec.chain.hash(&mut hasher);
-    format!("{:016x}", hasher.finish())
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut eat = |bytes: &[u8]| {
+        for &byte in bytes {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    };
+    eat(spec.path.as_bytes());
+    eat(&spec.source_start.to_bits().to_le_bytes());
+    eat(&spec.duration.to_bits().to_le_bytes());
+    eat(&spec.speed.to_bits().to_le_bytes());
+    eat(&[u8::from(spec.preserve_pitch)]);
+    eat(spec.chain.as_bytes());
+    format!("{hash:016x}")
 }
 
 /// Decodes one clip span to the cache and maps it.
@@ -272,9 +282,7 @@ fn decode_key(spec: &ClipSpec) -> String {
 /// speed, so what the preview mixes is what the export renders. A file
 /// already in the cache is reused as is - that is the point of the cache.
 fn decode(spec: &ClipSpec, project: &Path, key: &str) -> Result<Pcm, String> {
-    if spec.chain.contains('\n') || spec.chain.contains('\r') {
-        return Err("filter chain contains a line break".to_owned());
-    }
+    relay_media::audio::validate_chain(&spec.chain).map_err(|error| error.to_string())?;
 
     let directory = project.join("cache").join("audio");
     let destination = directory.join(format!("{key}.pcm"));
@@ -284,31 +292,13 @@ fn decode(spec: &ClipSpec, project: &Path, key: &str) -> Result<Pcm, String> {
     std::fs::create_dir_all(&directory)
         .map_err(|error| format!("could not create {}: {error}", directory.display()))?;
 
-    let mut filters: Vec<String> = Vec::new();
+    // Speed first, then the clip's own filters - the same order the export
+    // graph applies, because these are one definition, not two. The engine
+    // owns what speed *means*; this function only decodes.
+    let mut filters: Vec<String> =
+        relay_media::audio::speed_filters(spec.speed, spec.preserve_pitch);
     if !spec.chain.is_empty() {
         filters.push(spec.chain.clone());
-    }
-    if (spec.speed - 1.0).abs() > 1e-9 {
-        if spec.preserve_pitch {
-            // atempo only accepts [0.5, 2]; factors outside compose.
-            let mut factor = spec.speed.clamp(0.0625, 16.0);
-            while factor > 2.0 {
-                filters.push("atempo=2.0".to_owned());
-                factor /= 2.0;
-            }
-            while factor < 0.5 {
-                filters.push("atempo=0.5".to_owned());
-                factor /= 0.5;
-            }
-            filters.push(format!("atempo={factor:.6}"));
-        } else {
-            // Tape behaviour: resample to the common rate, shift it, and land
-            // back on the common rate. Pitch rides the speed.
-            filters.push(format!(
-                "aresample={PCM_RATE},asetrate={:.0},aresample={PCM_RATE}",
-                f64::from(PCM_RATE) * spec.speed
-            ));
-        }
     }
     filters.push(format!("aresample={PCM_RATE}"));
     filters.push("aformat=sample_fmts=s16:channel_layouts=stereo".to_owned());
@@ -316,7 +306,7 @@ fn decode(spec: &ClipSpec, project: &Path, key: &str) -> Result<Pcm, String> {
     // A sped-up clip reads further into the file than it occupies on the
     // timeline: the source window is `duration * speed`, exactly the window
     // the exporter trims.
-    let window = spec.duration * spec.speed.clamp(0.0625, 16.0);
+    let window = spec.duration * relay_media::audio::clamp_speed(spec.speed);
 
     let temporary = directory.join(format!("{key}.pcm.decoding"));
     let file = std::fs::File::create(&temporary)
@@ -328,7 +318,7 @@ fn decode(spec: &ClipSpec, project: &Path, key: &str) -> Result<Pcm, String> {
         .args(["-t", &format!("{window:.6}")])
         .args(["-i", &spec.path])
         .args(["-vn", "-af", &filters.join(",")])
-        .args(["-f", "s16le", "-"])
+        .args(["-f", "s16le", "pipe:1"])
         .stdout(file)
         .status()
         .map_err(|error| format!("could not run ffmpeg: {error}"))?;

@@ -223,8 +223,19 @@ impl FfiDecoder {
     /// rational, the timestamp is an integer count of those ticks, and
     /// `relay-core` speaks rationals - so the value survives with no rounding
     /// anywhere along the way.
-    fn to_seconds(&self, ticks: i64) -> Rational {
-        Rational::new(ticks, 1) * Rational::new(self.time_base.num as i64, self.time_base.den as i64)
+    ///
+    /// `None` when the container's numbers cannot form a representable value -
+    /// a degenerate time base, or a product that overflows. Both come straight
+    /// from an arbitrary file, so they must degrade to "position unknown"
+    /// rather than panic the process.
+    fn to_seconds(&self, ticks: i64) -> Option<Rational> {
+        if self.time_base.den == 0 {
+            return None;
+        }
+        Rational::checked_new(
+            i128::from(ticks) * i128::from(self.time_base.num),
+            i128::from(self.time_base.den),
+        )
     }
 
     /// Scales the decoded frame into a fresh RGBA buffer.
@@ -280,7 +291,8 @@ impl FrameSource for FfiDecoder {
             if code == 0 {
                 // SAFETY: receive_frame succeeded, so the frame is populated.
                 let ticks = unsafe { (*self.decoded).best_effort_timestamp };
-                self.position = (ticks != ffi::AV_NOPTS_VALUE).then(|| self.to_seconds(ticks));
+                self.position =
+                    (ticks != ffi::AV_NOPTS_VALUE).then(|| self.to_seconds(ticks)).flatten();
                 return Ok(Some(self.convert()));
             }
 
@@ -347,7 +359,18 @@ impl FrameSource for FfiDecoder {
 
 impl SeekableSource for FfiDecoder {
     fn seek(&mut self, to: Rational) -> Result<()> {
-        // Convert seconds back into this stream's tick count.
+        // Convert seconds back into this stream's tick count. The time base
+        // comes from the file, so a degenerate one is an error, not a panic.
+        if self.time_base.num == 0 || self.time_base.den == 0 {
+            return Err(Error::Ffi {
+                operation: "seek time base",
+                path: self.path.clone(),
+                detail: format!(
+                    "stream has a degenerate time base {}/{}",
+                    self.time_base.num, self.time_base.den
+                ),
+            });
+        }
         let ticks_per_second = Rational::new(self.time_base.den as i64, self.time_base.num as i64);
         let target = (to * ticks_per_second).floor();
 

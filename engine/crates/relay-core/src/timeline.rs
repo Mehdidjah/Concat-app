@@ -59,6 +59,13 @@ pub struct Clip {
     pub start: Rational,
     /// How long the clip runs on the timeline.
     pub duration: Rational,
+    /// Playback rate: source seconds consumed per timeline second. One is
+    /// normal speed. Always positive - enforce at the boundary that sets it.
+    ///
+    /// This is the *only* definition of retiming. Everything downstream - the
+    /// frame plan, the export decoder rate, the audio graph - derives from it,
+    /// so picture and sound cannot disagree about what a sped-up clip means.
+    pub speed: Rational,
     /// Blend factor in `0.0..=1.0`, applied over whatever is beneath.
     pub opacity: f32,
     /// How the picture sits in the frame. Identity is fitted and centred.
@@ -108,6 +115,7 @@ impl Clip {
             source_start: Rational::ZERO,
             start,
             duration,
+            speed: Rational::ONE,
             opacity: 1.0,
             transform: Transform::IDENTITY,
         }
@@ -126,10 +134,17 @@ impl Clip {
     /// Converts a timeline timestamp into a timestamp within the source media,
     /// or `None` if the clip is not on screen then.
     ///
-    /// This is the one piece of arithmetic that every trim, ripple and slip
-    /// operation ultimately has to agree with, so it lives in exactly one place.
+    /// An affine map: `source_start + (time - start) * speed`. This is the one
+    /// piece of arithmetic that every trim, ripple, slip and retime operation
+    /// ultimately has to agree with, so it lives in exactly one place.
     pub fn source_time_at(&self, time: Rational) -> Option<Rational> {
-        self.contains(time).then(|| self.source_start + (time - self.start))
+        self.contains(time)
+            .then(|| self.source_start + (time - self.start) * self.speed)
+    }
+
+    /// How much of the source this clip consumes: `duration * speed`.
+    pub fn source_duration(&self) -> Rational {
+        self.duration * self.speed
     }
 }
 
@@ -327,6 +342,28 @@ mod tests {
         assert_eq!(clip.source_time_at(seconds(4)), Some(seconds(2)));
         assert_eq!(clip.source_time_at(seconds(1)), None, "before the clip");
         assert_eq!(clip.source_time_at(seconds(5)), None, "the end is exclusive");
+    }
+
+    #[test]
+    fn speed_scales_the_source_time_map() {
+        let (mut timeline, _, id) = fixture();
+        {
+            let clip = timeline.clip_mut(id).expect("clip exists");
+            clip.speed = Rational::from_int(2);
+            clip.source_start = seconds(10);
+        }
+        let clip = timeline.clip(id).expect("clip exists");
+
+        // The clip covers timeline [2, 5) at 2x, so it consumes source [10, 16).
+        assert_eq!(clip.source_time_at(seconds(2)), Some(seconds(10)));
+        assert_eq!(clip.source_time_at(seconds(4)), Some(seconds(14)));
+        assert_eq!(clip.source_duration(), seconds(6));
+
+        // Half speed consumes half the source.
+        timeline.clip_mut(id).expect("clip exists").speed = Rational::new(1, 2);
+        let clip = timeline.clip(id).expect("clip exists");
+        assert_eq!(clip.source_time_at(seconds(4)), Some(seconds(11)));
+        assert_eq!(clip.source_duration(), Rational::new(3, 2));
     }
 
     #[test]

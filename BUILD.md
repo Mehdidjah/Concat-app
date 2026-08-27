@@ -27,7 +27,15 @@ there is a guaranteed failure. Stage the pair in `desktop/src-tauri/ffmpeg/`
 before `npm run app:build`: on Windows, download the artifact from
 `.github/workflows/ffmpeg.yml`; on macOS, build the same cut-down FFmpeg
 locally with that workflow's configure line (static x264, system frameworks
-only - verify with `otool -L`).
+only - verify with `otool -L`). A release build **fails** if the pair is not
+staged - `src-tauri/build.rs` checks, because an app once shipped without it
+and every media operation failed at runtime.
+
+Two lessons that trimmed build has already taught, encoded in the code and
+the `export_integration` test: modern FFmpeg resolves a bare `-` to the `fd:`
+protocol, which the trimmed build does not include, so every pipe is spelled
+`pipe:0`/`pipe:1`; and any filter used anywhere in the app must be in the
+build's `--enable-filter` list, which the integration test is there to catch.
 
 ```
 winget install Gyan.FFmpeg          # Windows
@@ -39,7 +47,8 @@ sudo apt install ffmpeg             # Debian/Ubuntu
 
 ```sh
 cd engine
-cargo test --workspace     # ~60 tests, none of them need FFmpeg
+cargo test --workspace     # pure tests; none need FFmpeg
+cargo test --workspace --features relay-render/gpu   # adds the wgpu compositor
 cargo clippy --workspace --all-targets
 cargo run -p relay-cli -- probe some-video.mp4
 cargo run -p relay-cli -- render in.mp4 out.mp4 --frames 120 --fade 30
@@ -48,6 +57,22 @@ cargo run -p relay-cli -- render in.mp4 out.mp4 --frames 120 --fade 30
 The tests are pure — they exercise the timeline model, rational time and the
 compositor, and pass on a machine with no FFmpeg at all. The CLI is how you
 exercise the parts that do need it.
+
+The `gpu` feature of `relay-render` builds `WgpuCompositor`, a second
+implementation of the same `Compositor` trait. The desktop app enables it and
+uses it for export when the machine has an adapter, with `CpuCompositor` as
+the always-correct fallback and reference (its tests diff the two). The
+feature is off by default so engine-only work never pays for the wgpu tree.
+
+There is also an end-to-end suite that runs a real export — decoders,
+compositor, encoder, audio graph, mux — against the **bundled** FFmpeg pair
+when it is staged, so a component missing from the trimmed build fails in CI
+rather than in a user's export:
+
+```sh
+cd desktop/src-tauri
+cargo test --test export_integration    # needs a system ffmpeg for fixtures
+```
 
 ## Desktop app
 

@@ -25,7 +25,7 @@ serde_json = "1"
 # depend on there being a desktop app.
 relay-core = { path = "../../engine/crates/relay-core" }
 relay-media = { path = "../../engine/crates/relay-media" }
-relay-render = { path = "../../engine/crates/relay-render" }
+relay-render = { path = "../../engine/crates/relay-render", features = ["gpu"] }
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 
 # Engine-owned audio playback: cpal talks to the output device, memmap2 keeps

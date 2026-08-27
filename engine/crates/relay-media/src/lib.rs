@@ -9,6 +9,7 @@
 //! [`FrameSink`]. A future GPU-decode or FFI backend implements those two and
 //! nothing else in the workspace changes.
 
+pub mod audio;
 pub mod binaries;
 pub mod decode;
 pub mod encode;
@@ -16,6 +17,8 @@ pub mod encode;
 pub mod ffi;
 pub mod error;
 pub mod probe;
+
+mod process;
 
 pub use binaries::{ffmpeg, ffprobe, set_binaries};
 pub use decode::{DecodeOptions, FfmpegDecoder, FrameSource, SeekableSource};

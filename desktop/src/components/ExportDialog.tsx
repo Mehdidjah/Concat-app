@@ -4,7 +4,7 @@ import { save } from "@tauri-apps/plugin-dialog";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 
 import type { ExportClip, ExportProgress } from "../lib/engine";
-import { exportProject, onExportProgress, writeCacheFile } from "../lib/engine";
+import { cancelExport, exportProject, onExportProgress, writeCacheFile } from "../lib/engine";
 import { rasterizeTitle } from "../lib/rasterize";
 import type { TextStyle } from "../lib/text";
 import { shortDuration } from "../lib/time";
@@ -168,7 +168,13 @@ export function ExportDialog({
       });
       setPhase({ kind: "done", path });
     } catch (cause) {
-      setPhase({ kind: "failed", message: String(cause) });
+      const message = String(cause);
+      // A cancel is the user's own decision, not a failure to report.
+      if (message.includes("export cancelled")) {
+        setPhase({ kind: "idle" });
+      } else {
+        setPhase({ kind: "failed", message });
+      }
     } finally {
       unlisten.current?.();
       unlisten.current = null;
@@ -317,6 +323,14 @@ export function ExportDialog({
                 <p className="font-technical text-[10px] tabular-nums text-tertiary">{remaining}</p>
               )}
             </div>
+            <button
+              type="button"
+              onClick={() => void cancelExport().catch(() => undefined)}
+              className="mt-4 w-full cursor-pointer rounded-lg bg-hover px-4 py-2 text-xs
+                         text-secondary transition-colors hover:bg-active hover:text-primary"
+            >
+              Cancel
+            </button>
           </div>
         ) : (
           <div className="py-1">

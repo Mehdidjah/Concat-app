@@ -19,8 +19,9 @@ pub struct Placement {
     pub scale: f32,
     /// Clockwise rotation about the layer's centre, in radians.
     pub rotation: f32,
-    /// Offset of the layer's centre from its base position, in pixels.
+    /// Horizontal offset of the layer's centre from its base position, pixels.
     pub translate_x: f32,
+    /// Vertical offset of the layer's centre from its base position, pixels.
     pub translate_y: f32,
 }
 

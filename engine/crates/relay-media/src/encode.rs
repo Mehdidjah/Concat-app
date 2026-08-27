@@ -2,12 +2,13 @@
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, Command, Stdio};
+use std::process::{Child, ChildStdin, Stdio};
 
 use relay_core::frame::Frame;
 use relay_core::time::FrameRate;
 
 use crate::error::{Error, Result};
+use crate::process::{StderrTail, base_command};
 
 /// Name used in error messages. The binary actually run comes from
 /// [`crate::binaries::ffmpeg`], which may be a bundled copy.
@@ -57,6 +58,7 @@ pub struct FfmpegEncoder {
     child: Child,
     /// Taken in `finish` - closing the pipe is what tells FFmpeg to stop.
     stdin: Option<ChildStdin>,
+    stderr: StderrTail,
     width: u32,
     height: u32,
     written: u64,
@@ -74,14 +76,17 @@ impl FfmpegEncoder {
         let path = path.as_ref();
         let fps = frame_rate.fps();
 
-        let mut command = Command::new(crate::binaries::ffmpeg());
+        let mut command = base_command(crate::binaries::ffmpeg());
         command
-            .args(["-hide_banner", "-nostdin", "-loglevel", "error", "-y"])
+            .arg("-y")
             // Input: what is coming down the pipe.
             .args(["-f", "rawvideo", "-pix_fmt", "rgba"])
             .args(["-s", &format!("{width}x{height}")])
             .args(["-r", &format!("{}/{}", fps.numerator(), fps.denominator())])
-            .args(["-i", "-"])
+            // `pipe:0`, not `-`: since FFmpeg 6 the bare dash resolves to the
+            // `fd:` protocol, which a trimmed build (like the one we bundle)
+            // may not include. The pipe protocol is what we actually mean.
+            .args(["-i", "pipe:0"])
             // Output.
             .args(["-c:v", &options.codec])
             .args(["-preset", &options.preset])
@@ -91,13 +96,22 @@ impl FfmpegEncoder {
             .arg(path)
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
-            .stderr(Stdio::inherit());
+            .stderr(Stdio::piped());
 
         let mut child =
             command.spawn().map_err(|source| Error::Spawn { program: FFMPEG, source })?;
         let stdin = child.stdin.take().expect("stdin was piped");
+        let stderr = StderrTail::drain(&mut child);
 
-        Ok(Self { path: path.to_path_buf(), child, stdin: Some(stdin), width, height, written: 0 })
+        Ok(Self {
+            path: path.to_path_buf(),
+            child,
+            stdin: Some(stdin),
+            stderr,
+            width,
+            height,
+            written: 0,
+        })
     }
 
     /// How many frames have been accepted so far.
@@ -126,9 +140,24 @@ impl FrameSink for FfmpegEncoder {
             });
         };
 
-        stdin
-            .write_all(frame.pixels())
-            .map_err(|source| Error::Io { program: FFMPEG, source })?;
+        if let Err(source) = stdin.write_all(frame.pixels()) {
+            // A broken pipe means the encoder died; what it printed on the way
+            // out is the informative error, not the EPIPE it left behind.
+            if source.kind() == std::io::ErrorKind::BrokenPipe {
+                drop(self.stdin.take());
+                if let Ok(status) = self.child.wait()
+                    && !status.success()
+                {
+                    return Err(Error::Exited {
+                        program: FFMPEG,
+                        path: self.path.clone(),
+                        status,
+                        stderr: self.stderr.summary(),
+                    });
+                }
+            }
+            return Err(Error::Io { program: FFMPEG, source });
+        }
         self.written += 1;
         Ok(())
     }
@@ -141,7 +170,12 @@ impl FrameSink for FfmpegEncoder {
         if status.success() {
             Ok(())
         } else {
-            Err(Error::Exited { program: FFMPEG, path: self.path.clone(), status })
+            Err(Error::Exited {
+                program: FFMPEG,
+                path: self.path.clone(),
+                status,
+                stderr: self.stderr.summary(),
+            })
         }
     }
 }

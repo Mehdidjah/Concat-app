@@ -23,7 +23,7 @@ pub enum Error {
     },
 
     /// The child process ran and exited unhappily.
-    #[error("`{program}` exited with {status} while handling {path}")]
+    #[error("`{program}` exited with {status} while handling {path}: {stderr}")]
     Exited {
         /// Which binary failed.
         program: &'static str,
@@ -31,6 +31,8 @@ pub enum Error {
         path: PathBuf,
         /// Its exit status.
         status: ExitStatus,
+        /// The tail of what it printed - the actual reason, when there is one.
+        stderr: String,
     },
 
     /// An IO error moving bytes over the pipe.
@@ -41,6 +43,16 @@ pub enum Error {
         /// The underlying OS error.
         #[source]
         source: std::io::Error,
+    },
+
+    /// A user-supplied filter chain would break out of its slot in a
+    /// filtergraph.
+    #[error("invalid filter chain {chain:?}: {detail}")]
+    InvalidFilterChain {
+        /// The chain as supplied.
+        chain: String,
+        /// What made it unacceptable.
+        detail: String,
     },
 
     /// `ffprobe` returned something we could not make sense of.

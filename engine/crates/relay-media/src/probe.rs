@@ -77,6 +77,7 @@ pub fn probe(path: impl AsRef<Path>) -> Result<MediaInfo> {
             program: FFPROBE,
             path: path.to_path_buf(),
             status: output.status,
+            stderr: crate::process::summarize(&output.stderr),
         });
     }
 
