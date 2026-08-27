@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 
-import type { Clip, MediaItem, Project } from "../lib/project";
+import { activeTimeline, type Clip, type EditorProject, type MediaItem } from "../lib/editor";
 import { shortDuration, timecode } from "../lib/time";
 
 /**
@@ -24,7 +24,7 @@ export function Inspector({
   clip: Clip | null;
   media: MediaItem | null;
   frameRate: number;
-  project: Project;
+  project: EditorProject;
   projectName: string;
   projectPath: string;
   /** The output size, as currently set in the preview footer. */
@@ -45,8 +45,8 @@ export function Inspector({
           </Section>
           <Section title="Contents">
             <Row label="Media" value={`${project.media.length}`} mono />
-            <Row label="Tracks" value={`${project.tracks.length}`} mono />
-            <Row label="Clips" value={`${project.clips.length}`} mono />
+            <Row label="Tracks" value={`${activeTimeline(project).tracks.length}`} mono />
+            <Row label="Clips" value={`${activeTimeline(project).clips.length}`} mono />
           </Section>
         </div>
       ) : (

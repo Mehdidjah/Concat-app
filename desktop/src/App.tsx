@@ -9,6 +9,7 @@ import { ContextMenu, type ContextTarget } from "./components/ContextMenu";
 import { ExportDialog, type ExportTitle } from "./components/ExportDialog";
 import { Icon } from "./components/Icon";
 import { ALL_MEDIA, MediaBin, type BinFilter } from "./components/MediaBin";
+import type { MenuOption } from "./components/Menu";
 import { Preview, type PreviewSource, type TextOverlay } from "./components/Preview";
 import { Resizer } from "./components/Resizer";
 import { RightPanel, type RightTab } from "./components/RightPanel";
@@ -18,79 +19,81 @@ import { TitleBar } from "./components/TitleBar";
 import { TimelinePanel, resolveDrop, type Tool } from "./components/TimelinePanel";
 import { createAssets, requestAssets, requestVideoPeaks } from "./lib/assets";
 import {
+  activeTimeline,
+  clipsAt,
+  commandsForEcho,
+  detachedAudioOf,
+  findClip,
+  findMedia,
+  findTrack,
+  precedingClip,
+  projectDuration,
+  snapTime,
+  speedPatch,
+  timelineClipCount,
+  transformPatch,
+  trimPatch,
+  whyNotMerge,
+  withEcho,
+  type Clip,
+  type Echo,
+  type EditorCommand,
+  type EditorProject,
+  type EditorView,
+  type MediaItem,
+  type TimelineMeta,
+} from "./lib/editor";
+import {
+  editorApply,
+  editorClose,
+  editorOpen,
+  editorRedo,
+  editorSave,
+  editorUndo,
   engineVersion,
-  loadProject,
   probeMedia,
   readMediaBytes,
-  saveProject,
   transcribeClip,
   type ExportClip,
 } from "./lib/engine";
 import { getTranscriberLanguage, getTranscriberModel } from "./lib/settings";
-import {
-  addClip,
-  addMedia,
-  addTimeline,
-  addTrack,
-  clipsAt,
-  createProject,
-  detachAudio,
-  detachedAudioOf,
-  findClip,
-  firstFreeTrack,
-  findMedia,
-  findTrack,
-  addFont,
-  addTextClip,
-  mergeClips,
-  moveClip,
-  moveClips,
-  projectDuration,
-  reattachAudio,
-  removeClips,
-  removeFont,
-  removeMediaEverywhere,
-  removeTimeline,
-  removeTrack,
-  renameTimeline,
-  renameTrack,
-  setClipSpeed,
-  setClipTransform,
-  setTrackFlag,
-  snapTime,
-  splitClip,
-  switchTimeline,
-  timelineClipCount,
-  toMediaItem,
-  updateClip,
-  trimClip,
-  whyNotMerge,
-  type Clip,
-  type MediaItem,
-  type Project,
-  type TimelineMeta,
-} from "./lib/project";
 import { buildChain } from "./lib/filters";
-import {
-  buildEffectChain,
-  findTransition,
-} from "./lib/effects";
-import { precedingClip } from "./lib/project";
-import { familyForPath, registerFont } from "./lib/text";
-import { fromDocument, toDocument } from "./lib/persist";
+import { buildEffectChain, findTransition } from "./lib/effects";
+import { defaultTextStyle, familyForPath, registerFont } from "./lib/text";
 import { useTheme, type Theme } from "./lib/theme";
 import { useTransport } from "./lib/transport";
 
 const MIN_SECONDS_PER_PIXEL = 0.0005;
 const MAX_SECONDS_PER_PIXEL = 2;
+/** Matches the engine's default title length, for caption timing math. */
+const DEFAULT_TEXT_DURATION = 4;
+
+/** What the editor renders for the frame or two before the session opens. */
+const EMPTY_PROJECT: EditorProject = {
+  media: [],
+  fonts: [],
+  timelines: [
+    {
+      id: "TL1",
+      name: "Timeline 1",
+      tracks: [1, 2, 3, 4].map((number) => ({
+        id: `T${number}`,
+        name: `Track ${number}`,
+        visible: true,
+        muted: false,
+      })),
+      clips: [],
+    },
+  ],
+  activeTimelineId: "TL1",
+};
 
 /**
  * The window: either the launch screen or an open editor.
  *
  * The editor is a separate component rather than a branch inside one, so that
- * every hook it owns - transport, asset cache - mounts when a project
- * opens and unmounts when it closes. Closing a project therefore cannot leave
- * a stale audio element or a half-finished waveform behind.
+ * every hook it owns - transport, asset cache, the engine session - mounts
+ * when a project opens and unmounts when it closes.
  */
 export function App() {
   const [session, setSession] = useState<ProjectSession | null>(null);
@@ -122,14 +125,12 @@ export function App() {
 /**
  * The editor shell.
  *
- * Layout follows CapCut's shape: a thin custom title bar, a three-up top row
- * (bin, preview, details) and a full-width timeline beneath, every divider
- * draggable. Panels are docked and flush - in an editor, gutters are wasted
- * timeline.
- *
- * State here is window state (what is selected, where the playhead is, how
- * panels are sized) plus, for now, the edit itself. See lib/project.ts for why
- * the edit lives here temporarily and what makes moving it to the engine cheap.
+ * The engine owns the edit (see engine decision 0007). This component holds
+ * *window* state - selection, playhead, panel sizes - plus the latest
+ * `EditorView` the engine returned, and a transient gesture echo: during a
+ * drag the change previews locally with the engine's own arithmetic, and one
+ * command commits on release. Every mutation is a command; every render draws
+ * the state that came back.
  */
 function Editor({
   session,
@@ -142,7 +143,8 @@ function Editor({
   onToggleTheme: () => void;
   onCloseProject: () => void;
 }) {
-  const [project, setProject] = useState<Project>(createProject);
+  const [view, setView] = useState<EditorView | null>(null);
+  const [echo, setEcho] = useState<Echo | null>(null);
   const [selectedClipIds, setSelectedClipIds] = useState<string[]>([]);
   const [selectedMediaId, setSelectedMediaId] = useState<string | null>(null);
   const [tool, setTool] = useState<Tool>("select");
@@ -159,11 +161,11 @@ function Editor({
   const [exporting, setExporting] = useState(false);
   const [rightTab, setRightTab] = useState<RightTab>("details");
   const [saveState, setSaveState] = useState<"idle" | "saving" | "saved" | "failed">("idle");
-  /** Blocks autosave until the project on disk has been read in. */
-  const [loaded, setLoaded] = useState(false);
+  /** Families whose font files failed to load - shown in the picker. */
+  const [missingFonts, setMissingFonts] = useState<Set<string>>(new Set());
   /**
    * The output frame. Starts from the project settings but is editable from
-   * the preview footer, and the edited value is what the document keeps.
+   * the preview footer; the engine persists whatever this holds on save.
    */
   const [frame, setFrame] = useState({ width: session.width, height: session.height });
 
@@ -180,6 +182,14 @@ function Editor({
   const zoomRef = useRef(secondsPerPixel);
   zoomRef.current = secondsPerPixel;
 
+  const loaded = view !== null;
+  // What the window draws: the engine's state with the gesture echo on top.
+  const project = useMemo(
+    () => withEcho(view?.project ?? EMPTY_PROJECT, echo),
+    [view, echo],
+  );
+  const timeline = activeTimeline(project);
+
   const duration = projectDuration(project);
   const transport = useTransport({ duration });
   const { playhead, playing } = transport;
@@ -187,293 +197,167 @@ function Editor({
   // Read by event listeners that outlive the render that installed them.
   const latest = useRef({ project, secondsPerPixel, scrollLeft, trackScroll, snap, playhead, frame });
   latest.current = { project, secondsPerPixel, scrollLeft, trackScroll, snap, playhead, frame };
+  const viewRef = useRef(view);
+  viewRef.current = view;
+  const echoRef = useRef(echo);
+  echoRef.current = echo;
 
-  // The project's rate is authoritative, not the first clip's. Timecode that
-  // changes meaning when you import a 25fps file is worse than useless.
+  // The project's rate is authoritative, not the first clip's.
   const frameRate = session.frameRate;
 
-  // Load the saved timeline before anything can autosave over it.
-  useEffect(() => {
-    let cancelled = false;
-    void loadProject(session.path)
-      .then((document) => {
-        const restored = fromDocument(document);
-        if (!cancelled && restored) setProject(restored);
-        // The document's frame wins over the manifest: it is where an edited
-        // output size was saved.
-        const video = (document as { video?: { width?: unknown; height?: unknown } }).video;
-        if (
-          !cancelled &&
-          typeof video?.width === "number" &&
-          typeof video?.height === "number" &&
-          video.width > 0 &&
-          video.height > 0
-        ) {
-          setFrame({ width: Math.round(video.width), height: Math.round(video.height) });
-        }
-      })
-      .catch(() => undefined)
-      .finally(() => {
-        if (!cancelled) setLoaded(true);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [session.path]);
-
-  // Bring back every font the project names, once, when it opens.
-  //
-  // Without this a reopened project renders its titles in the fallback face
-  // while still *claiming* the custom family, which looks like the styling was
-  // lost. A font whose file has moved is marked rather than dropped: the entry
-  // stays visible in the picker so it is obvious what is missing.
-  useEffect(() => {
-    if (!loaded || project.fonts.length === 0) return;
-
-    let cancelled = false;
-    void Promise.all(
-      project.fonts.map(async (font) => ({
-        family: font.family,
-        ok: await registerFont(font, readMediaBytes),
-      })),
-    ).then((results) => {
-      const failed = results.filter((result) => !result.ok).map((result) => result.family);
-      if (cancelled || failed.length === 0) return;
-
-      setProject((current) => ({
-        ...current,
-        fonts: current.fonts.map((font) =>
-          failed.includes(font.family) ? { ...font, missing: true } : font,
-        ),
-      }));
+  // ── the command queue ────────────────────────────────────────────────────
+  // Commands are serialised so responses can never land out of order and
+  // overwrite newer state with older. Errors surface as the toast - they are
+  // user-meaningful sentences from the engine ("Merged clips must touch...").
+  const queue = useRef<Promise<unknown>>(Promise.resolve());
+  const dispatch = useCallback((command: EditorCommand): Promise<string | undefined> => {
+    const run = queue.current.then(async () => {
+      const next = await editorApply(command);
+      viewRef.current = next;
+      setView(next);
+      return next.createdId;
     });
-
-    return () => {
-      cancelled = true;
-    };
-    // Deliberately keyed on `loaded` alone. Depending on `project.fonts` would
-    // re-run this on the very state update it performs.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [loaded]);
-
-  /**
-   * Puts a title on the timeline at the playhead.
-   *
-   * It lands on the first track with room, the same rule dropped media
-   * follows, and is selected immediately with the Text tab open - the words
-   * are the first thing anyone wants to change, so putting the panel in front
-   * of them saves a click every single time.
-   */
-  const addText = useCallback(() => {
-    setProject((current) => {
-      const at = latest.current.playhead;
-      const track = firstFreeTrack(current, at, 4);
-      if (!track) return current;
-
-      const { project: next, clipId } = addTextClip(current, { trackId: track.id, start: at });
-      if (clipId) {
-        setSelectedClipIds([clipId]);
-        setSelectedMediaId(null);
-        setRightTab("text");
-      }
-      return next;
+    queue.current = run.catch(() => undefined);
+    return run.catch((cause: unknown) => {
+      setToast({ id: Date.now(), message: String(cause), failed: true });
+      return undefined;
     });
   }, []);
 
-  // ── effects and transitions ──────────────────────────────────────────────
+  const undoAction = useCallback(() => {
+    queue.current = queue.current
+      .then(async () => {
+        const next = await editorUndo();
+        viewRef.current = next;
+        setView(next);
+        setEcho(null);
+      })
+      .catch(() => undefined);
+  }, []);
+
+  const redoAction = useCallback(() => {
+    queue.current = queue.current
+      .then(async () => {
+        const next = await editorRedo();
+        viewRef.current = next;
+        setView(next);
+        setEcho(null);
+      })
+      .catch(() => undefined);
+  }, []);
+
+  // ── the gesture echo ─────────────────────────────────────────────────────
+
+  /** Live: merges a patch into the echo for one clip. */
+  const liveClip = useCallback((clipId: string, patch: Partial<Clip>) => {
+    setEcho((current) => ({
+      ...(current ?? {}),
+      [clipId]: { ...(current?.[clipId] ?? {}), ...patch },
+    }));
+  }, []);
 
   /**
-   * Applies one effect from the bin's Effects page to the selected clip.
-   *
-   * The card is clickable whatever is selected, so the misses have to explain
-   * themselves: no selection, or a selection that has no picture, each get a
-   * toast saying what to do instead of nothing happening.
+   * Commit: everything echoed becomes engine commands - one per gesture is
+   * the point, so undo undoes the drag rather than a pixel of it. Multi-clip
+   * moves collapse into a single MoveClips. The echo clears only after the
+   * engine's state arrives, so nothing flashes back mid-flight.
    */
-  const applyEffect = useCallback((effectId: string) => {
-    const current = latest.current.project;
-    const selected = selectedClipIds.length === 1 ? findClip(current, selectedClipIds[0]) : null;
-    if (!selected || (selected.kind !== "video" && selected.kind !== "image")) {
-      setToast({
-        id: Date.now(),
-        message: "Select a video or image clip on the timeline first",
-        failed: true,
-      });
+  const commitEcho = useCallback(() => {
+    const pending = echoRef.current;
+    const engineProject = viewRef.current?.project;
+    if (!pending || !engineProject) return;
+
+    const active = activeTimeline(engineProject);
+    const commands: EditorCommand[] = [];
+    const moves: { clipId: string; start: number; trackId: string }[] = [];
+
+    for (const [clipId, patch] of Object.entries(pending)) {
+      const base = active.clips.find((clip) => clip.id === clipId);
+      if (!base) continue;
+      for (const command of commandsForEcho(base, patch)) {
+        if (command.op === "moveClips") moves.push(...command.moves);
+        else commands.push(command);
+      }
+    }
+    if (moves.length > 0) commands.push({ op: "moveClips", moves });
+
+    if (commands.length === 0) {
+      setEcho(null);
       return;
     }
-    setProject((project) =>
-      updateClip(project, selected.id, {
-        videoEffects: [...selected.videoEffects, { id: effectId, params: {} }],
-      }),
-    );
-    setRightTab("effects");
-  }, [selectedClipIds]);
+    void (async () => {
+      for (const command of commands) await dispatch(command);
+      setEcho(null);
+    })();
+  }, [dispatch]);
 
-  /**
-   * Puts a transition on the selected clip's cut.
-   *
-   * A transition needs a cut: a clip ending exactly where the selected one
-   * starts. Without one there is nothing to dissolve across, and saying so
-   * beats silently attaching a transition that renders as nothing.
-   */
-  const applyTransition = useCallback(
-    (transitionId: string) => {
-      const definition = findTransition(transitionId);
-      if (!definition?.implemented) return;
-
-      const current = latest.current.project;
-      const selected = selectedClipIds.length === 1 ? findClip(current, selectedClipIds[0]) : null;
-      if (!selected || (selected.kind !== "video" && selected.kind !== "image")) {
-        setToast({
-          id: Date.now(),
-          message: "Select the incoming clip - the one after the cut - first",
-          failed: true,
-        });
-        return;
-      }
-      if (!precedingClip(current, selected.id)) {
-        setToast({
-          id: Date.now(),
-          message: "No clip ends where this one starts - transitions need a cut",
-          failed: true,
-        });
-        return;
-      }
-      setProject((project) =>
-        updateClip(project, selected.id, {
-          transitionIn: { id: transitionId, duration: definition.defaultDuration },
-        }),
-      );
-      setRightTab("effects");
-      setToast({
-        id: Date.now(),
-        message: `${definition.label} added to the cut`,
-        failed: false,
+  // ── the session ──────────────────────────────────────────────────────────
+  useEffect(() => {
+    let cancelled = false;
+    editorOpen({
+      path: session.path,
+      name: session.name,
+      width: session.width,
+      height: session.height,
+      rateNum: session.rateNum,
+      rateDen: session.rateDen,
+    })
+      .then((opened) => {
+        if (cancelled) return;
+        viewRef.current = opened;
+        setView(opened);
+        setFrame({ width: opened.settings.width, height: opened.settings.height });
+      })
+      .catch((cause: unknown) => {
+        if (!cancelled) setError(String(cause));
       });
-    },
-    [selectedClipIds],
-  );
-
-  // ── timelines ────────────────────────────────────────────────────────────
-  // The timeline awaiting delete confirmation, if any. Deleting throws away
-  // every clip on it and there is no undo, hence the prompt.
-  const [timelineToDelete, setTimelineToDelete] = useState<TimelineMeta | null>(null);
-  // Where the playhead was parked on each timeline, so switching back lands
-  // where you left off. Window state, deliberately not saved in the document.
-  const playheadByTimeline = useRef(new Map<string, number>());
-
-  const selectTimeline = useCallback(
-    (timelineId: string) => {
-      const current = latest.current.project;
-      if (timelineId === current.activeTimelineId) return;
-      const next = switchTimeline(current, timelineId);
-      if (next === current) return;
-
-      playheadByTimeline.current.set(current.activeTimelineId, latest.current.playhead);
-      setProject(next);
-      // The selection names clips on the timeline being left; keeping it
-      // would aim every clip operation at things no longer on screen.
-      setSelectedClipIds([]);
-      transport.pause();
-      transport.seek(playheadByTimeline.current.get(timelineId) ?? 0);
-    },
-    [transport],
-  );
-
-  const createTimeline = useCallback(() => {
-    const current = latest.current.project;
-    playheadByTimeline.current.set(current.activeTimelineId, latest.current.playhead);
-    setProject(addTimeline(current).project);
-    setSelectedClipIds([]);
-    transport.pause();
-    transport.seek(0);
-  }, [transport]);
-
-  /** Runs after the ConfirmDialog's Delete button; never called directly. */
-  const deleteTimelineNow = useCallback(
-    (timelineId: string) => {
-      const current = latest.current.project;
-      const wasActive = timelineId === current.activeTimelineId;
-      const next = removeTimeline(current, timelineId);
-      if (next === current) return;
-
-      playheadByTimeline.current.delete(timelineId);
-      setProject(next);
-      if (wasActive) {
-        setSelectedClipIds([]);
-        transport.pause();
-        transport.seek(playheadByTimeline.current.get(next.activeTimelineId) ?? 0);
-      }
-    },
-    [transport],
-  );
-
-  /** Adds a font file to the project and makes it available immediately. */
-  const pickFont = useCallback(async () => {
-    try {
-      const picked = await openDialog({
-        multiple: false,
-        title: "Add a font",
-        filters: [{ name: "Fonts", extensions: ["ttf", "otf", "woff", "woff2", "ttc"] }],
-      });
-      if (typeof picked !== "string") return;
-
-      const current = latest.current.project;
-      if (current.fonts.some((font) => font.path === picked)) return;
-
-      const font = {
-        family: familyForPath(
-          picked,
-          current.fonts.map((existing) => existing.family),
-        ),
-        path: picked,
-      };
-
-      // Registered before it is stored, so a file the webview cannot parse is
-      // reported now rather than becoming a broken entry in the picker.
-      if (!(await registerFont(font, readMediaBytes))) {
-        setError(`Could not read ${picked.split(/[\/]/).pop() ?? picked} as a font.`);
-        return;
-      }
-
-      setProject((project) => addFont(project, font));
-    } catch (cause) {
-      setError(String(cause));
-    }
-  }, []);
-
-  const save = useCallback(async () => {
-    setSaveState("saving");
-    try {
-      await saveProject(
-        session.path,
-        toDocument(
-          { ...session, width: latest.current.frame.width, height: latest.current.frame.height },
-          latest.current.project,
-        ),
-      );
-      setSaveState("saved");
-      return true;
-    } catch (cause) {
-      setSaveState("failed");
-      setError(String(cause));
-      return false;
-    }
+    return () => {
+      cancelled = true;
+      void editorClose().catch(() => undefined);
+    };
   }, [session]);
 
-  // A deliberate save deserves an acknowledgement; the autosave stays silent
-  // because a toast every 1.5 seconds of editing would be noise, not news.
+  // A selection can name clips an undo or a command just removed.
+  useEffect(() => {
+    setSelectedClipIds((ids) => {
+      const kept = ids.filter((id) => timeline.clips.some((clip) => clip.id === id));
+      return kept.length === ids.length ? ids : kept;
+    });
+    setSelectedMediaId((id) =>
+      id && project.media.some((item) => item.id === id) ? id : null,
+    );
+    // Keyed on the engine state, not the echo - the echo never removes clips.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [view]);
+
+  // Autosave, debounced. The engine writes the document; the UI only says
+  // when, and carries the output frame the preview footer can edit.
+  useEffect(() => {
+    if (!loaded) return;
+    const timer = window.setTimeout(() => {
+      setSaveState("saving");
+      editorSave(latest.current.frame)
+        .then(() => setSaveState("saved"))
+        .catch(() => setSaveState("failed"));
+    }, 1500);
+    return () => clearTimeout(timer);
+  }, [view, frame, loaded]);
+
   const [toast, setToast] = useState<{ id: number; message: string; failed: boolean } | null>(
     null,
   );
   const saveAndNotify = useCallback(() => {
-    void save().then((saved) =>
-      setToast({
-        id: Date.now(),
-        message: saved ? "Project saved" : "Save failed",
-        failed: !saved,
-      }),
-    );
-  }, [save]);
+    setSaveState("saving");
+    editorSave(latest.current.frame)
+      .then(() => {
+        setSaveState("saved");
+        setToast({ id: Date.now(), message: "Project saved", failed: false });
+      })
+      .catch((cause: unknown) => {
+        setSaveState("failed");
+        setToast({ id: Date.now(), message: `Save failed: ${cause}`, failed: true });
+      });
+  }, []);
 
   useEffect(() => {
     if (!toast) return;
@@ -481,150 +365,38 @@ function Editor({
     return () => window.clearTimeout(timer);
   }, [toast]);
 
-  const [settingsOpen, setSettingsOpen] = useState(false);
-  const [transcribing, setTranscribing] = useState(false);
+  // Bring back every font the project names, once, when it opens. A font
+  // whose file has moved is marked rather than dropped.
+  useEffect(() => {
+    if (!loaded || !view || view.project.fonts.length === 0) return;
+    let cancelled = false;
+    void Promise.all(
+      view.project.fonts.map(async (font) => ({
+        family: font.family,
+        ok: await registerFont(font, readMediaBytes),
+      })),
+    ).then((results) => {
+      if (cancelled) return;
+      const failed = results.filter((result) => !result.ok).map((result) => result.family);
+      if (failed.length > 0) setMissingFonts(new Set(failed));
+    });
+    return () => {
+      cancelled = true;
+    };
+    // Deliberately keyed on `loaded` alone: fonts are registered once per open.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loaded]);
 
-  /**
-   * Transcribes one clip's audio and lays the result out as text clips on a
-   * "Captions" track (created on first use, reused after).
-   *
-   * The clip's identity is captured when the menu item is built, so the
-   * timestamps map is computed against exactly the clip that was clicked -
-   * even if the selection has moved on by the time whisper finishes. Segment
-   * times come back relative to the source window; dividing by speed and
-   * adding the clip's start is the same affine map the preview and exporter
-   * use, run in reverse.
-   */
-  const autoCaption = useCallback(
-    async (clip: Clip, media: MediaItem) => {
-      setTranscribing(true);
-      setToast({ id: Date.now(), message: "Transcribing...", failed: false });
-      try {
-        const segments = await transcribeClip({
-          path: media.path,
-          sourceStart: clip.sourceStart,
-          window: clip.duration * clip.speed,
-          language: getTranscriberLanguage(),
-          modelId: getTranscriberModel(),
-        });
-
-        if (segments.length === 0) {
-          setToast({ id: Date.now(), message: "No speech found", failed: false });
-          return;
-        }
-
-        setProject((current) => {
-          let next = current;
-          let trackId = next.tracks.find((track) => track.name === "Captions")?.id ?? "";
-          if (!trackId) {
-            const grown = addTrack(next);
-            next = renameTrack(grown.project, grown.trackId, "Captions");
-            trackId = grown.trackId;
-          }
-
-          for (const segment of segments) {
-            const start = clip.start + segment.start / clip.speed;
-            const duration = Math.max(0.4, (segment.end - segment.start) / clip.speed);
-            const made = addTextClip(next, {
-              trackId,
-              start,
-              // Caption-sized and lower-third, not title-sized and centred.
-              style: { content: segment.text, fontSize: 0.045 },
-            });
-            next = made.clipId
-              ? updateClip(made.project, made.clipId, { duration, offsetY: 0.38 })
-              : made.project;
-          }
-          return next;
-        });
-        setToast({
-          id: Date.now(),
-          message: `Added ${segments.length} caption${segments.length === 1 ? "" : "s"}`,
-          failed: false,
-        });
-      } catch (cause) {
-        setToast({ id: Date.now(), message: String(cause), failed: true });
-      } finally {
-        setTranscribing(false);
-      }
-    },
-    [],
+  const fontsForUi = useMemo(
+    () =>
+      project.fonts.map((font) =>
+        missingFonts.has(font.family) ? { ...font, missing: true } : font,
+      ),
+    [project.fonts, missingFonts],
   );
 
-  /**
-   * The audio/video tools dropdown in the timeline tray.
-   *
-   * Shown only while a clip that can carry sound is selected - a title has no
-   * audio to detach or transcribe, and offering the menu anyway would be a
-   * drawer of permanently grey items. Within an eligible selection, items are
-   * still disabled rather than hidden, so what the tool *could* do stays
-   * visible.
-   */
-  const clipTools = useMemo(() => {
-    const clip = selectedClipIds.length === 1 ? findClip(project, selectedClipIds[0]) : null;
-    const media = clip ? findMedia(project, clip.mediaId) : null;
-
-    // No sound-capable clip, no menu: the panel hides the whole dropdown.
-    if (!clip || (clip.kind !== "video" && clip.kind !== "audio")) return [];
-
-    const hasSound = Boolean(
-      clip && (clip.kind === "video" || clip.kind === "audio") && media?.hasAudio,
-    );
-    const canDetach = Boolean(
-      clip &&
-        clip.kind === "video" &&
-        !clip.muted &&
-        media?.hasAudio &&
-        detachedAudioOf(project, clip.id).length === 0,
-    );
-    const canReattach = Boolean(
-      clip &&
-        ((clip.kind === "video" && detachedAudioOf(project, clip.id).length > 0) ||
-          (clip.kind === "audio" && clip.detachedFrom && findClip(project, clip.detachedFrom))),
-    );
-
-    return [
-      [
-        {
-          label: transcribing ? "Transcribing..." : "Auto captions",
-          icon: "type" as const,
-          disabled: !hasSound || transcribing,
-          onSelect: () => {
-            if (clip && media) void autoCaption(clip, media);
-          },
-        },
-      ],
-      [
-        {
-          label: "Detach audio",
-          icon: "waveform" as const,
-          disabled: !canDetach,
-          onSelect: () => {
-            if (clip) setProject((current) => detachAudio(current, clip.id));
-          },
-        },
-        {
-          label: "Reattach audio",
-          icon: "merge" as const,
-          disabled: !canReattach,
-          onSelect: () => {
-            if (clip) {
-              setProject((current) => reattachAudio(current, clip.id));
-              setSelectedClipIds([]);
-            }
-          },
-        },
-      ],
-    ];
-  }, [project, selectedClipIds, transcribing, autoCaption]);
-
-  // Autosave, debounced. The edit is the thing people lose; making them
-  // remember a keystroke to keep it is a design decision nobody wants.
-  useEffect(() => {
-    if (!loaded) return;
-    const timer = window.setTimeout(() => void save(), 1500);
-    return () => clearTimeout(timer);
-  }, [project, frame, loaded, save]);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [transcribing, setTranscribing] = useState(false);
 
   useEffect(() => {
     engineVersion()
@@ -636,34 +408,90 @@ function Editor({
   // from inside its draw loop, so artwork arriving needs no re-render.
   const assets = useRef(createAssets());
 
+  // ── clip edits (echo + commit) ───────────────────────────────────────────
+
+  /** Live patch from a panel control; committed by its onCommit. */
+  const changeClip = useCallback(
+    (patch: Partial<Clip>) => {
+      const clipId = selectedClipIds.length === 1 ? selectedClipIds[0] : null;
+      if (!clipId) return;
+      // Transform-family fields get the engine's clamps applied to the echo,
+      // so what previews is what will commit.
+      const { scale, offsetX, offsetY, rotation, ...rest } = patch;
+      const clamped =
+        scale !== undefined || offsetX !== undefined || offsetY !== undefined || rotation !== undefined
+          ? transformPatch({ scale, offsetX, offsetY, rotation })
+          : {};
+      liveClip(clipId, { ...rest, ...clamped });
+    },
+    [selectedClipIds, liveClip],
+  );
+
+  const changeSpeed = useCallback(
+    (speed: number) => {
+      const clipId = selectedClipIds.length === 1 ? selectedClipIds[0] : null;
+      if (!clipId) return;
+      const clip = findClip(latest.current.project, clipId);
+      if (clip) liveClip(clipId, speedPatch(clip, speed));
+    },
+    [selectedClipIds, liveClip],
+  );
+
   // ── media import ─────────────────────────────────────────────────────────
-  const importPaths = useCallback(async (paths: string[]) => {
-    setBusy(true);
-    setError(null);
-    for (const path of paths) {
-      try {
-        const item = toMediaItem(await probeMedia(path));
-        setProject((current) => addMedia(current, item));
-        setSelectedMediaId(item.id);
-        // Fire and forget: the clip draws flat until the artwork lands.
-        requestAssets(assets.current, item, session.path);
-      } catch (cause) {
-        // The engine's errors already name the file and quote FFmpeg.
-        setError(String(cause));
+  const importPaths = useCallback(
+    async (paths: string[]) => {
+      setBusy(true);
+      setError(null);
+      for (const path of paths) {
+        try {
+          const summary = await probeMedia(path);
+          const name = summary.path.split(/[\\/]/).pop() ?? summary.path;
+          const mediaId = await dispatch({
+            op: "addMedia",
+            item: {
+              path: summary.path,
+              name,
+              duration: summary.duration,
+              kind: summary.kind,
+              width: summary.video?.width ?? null,
+              height: summary.video?.height ?? null,
+              frameRate: summary.video?.frameRate ?? null,
+              frameRateFraction: summary.video?.frameRateFraction ?? null,
+              videoCodec: summary.video?.codec ?? null,
+              audioCodec: summary.audio?.codec ?? null,
+              hasAudio: summary.audio !== null,
+            },
+          });
+          if (mediaId) {
+            setSelectedMediaId(mediaId);
+            // Fire and forget: the clip draws flat until the artwork lands.
+            requestAssets(
+              assets.current,
+              {
+                id: mediaId,
+                path: summary.path,
+                kind: summary.kind,
+                duration: summary.duration,
+                hasAudio: summary.audio !== null,
+              },
+              session.path,
+            );
+          }
+        } catch (cause) {
+          setError(String(cause));
+        }
       }
-    }
-    setBusy(false);
-  }, [session.path]);
+      setBusy(false);
+    },
+    [dispatch, session.path],
+  );
 
   // Artwork for everything already in the project: a reopened project should
-  // get its thumbnails and waveforms back without re-importing anything. The
-  // disk cache makes the second launch cheap; requestAssets dedupes the rest.
+  // get its thumbnails and waveforms back without re-importing anything.
   useEffect(() => {
     if (!loaded) return;
-    // Audio clips cut from a video (detached, or split out) draw a waveform,
-    // so those videos - and only those - need peaks decoded.
     const wantsPeaks = new Set(
-      project.clips.filter((clip) => clip.kind === "audio").map((clip) => clip.mediaId),
+      timeline.clips.filter((clip) => clip.kind === "audio").map((clip) => clip.mediaId),
     );
     for (const item of project.media) {
       requestAssets(assets.current, item, session.path);
@@ -671,13 +499,11 @@ function Editor({
         requestVideoPeaks(assets.current, item, session.path);
       }
     }
-  }, [loaded, project.media, project.clips, session.path]);
+  }, [loaded, project.media, timeline.clips, session.path]);
 
-  // Files dropped from the OS. Tauri intercepts these before the webview sees
-  // them, which is why this is an event subscription and not an HTML5 handler.
+  // Files dropped from the OS.
   useEffect(() => {
     if (!isTauri()) return;
-
     let stop: (() => void) | undefined;
     void getCurrentWebview()
       .onDragDropEvent((event) => {
@@ -690,18 +516,13 @@ function Editor({
       .then((unlisten) => {
         stop = unlisten;
       });
-
     return () => stop?.();
   }, [importPaths]);
 
   // ── audio playback ───────────────────────────────────────────────────────
-  // The engine mixes everything audible - see src-tauri/src/playback.rs. The
-  // UI's whole job is to describe the audible clip set whenever it changes:
-  // audio clips, plus video clips that still own their sound. The engine
-  // decodes what is new (cached across sessions) and remixes the rest.
   const audibleClips = useMemo(
     () =>
-      project.clips.flatMap((clip) => {
+      timeline.clips.flatMap((clip) => {
         if (clip.kind !== "audio" && clip.kind !== "video") return [];
         if (clip.kind === "video" && clip.muted) return [];
         const track = findTrack(project, clip.trackId);
@@ -723,13 +544,11 @@ function Editor({
           },
         ];
       }),
-    [project],
+    [project, timeline],
   );
 
   useEffect(() => {
     if (!isTauri()) return;
-    // Debounced so a slider drag settles before its chain re-decodes; gain
-    // and position changes are cheap remixes either way.
     const timer = window.setTimeout(() => {
       void invoke("audio_set_clips", { project: session.path, clips: audibleClips }).catch(
         (cause: unknown) => console.error("WolfCut: could not update the mix", cause),
@@ -738,93 +557,289 @@ function Editor({
     return () => window.clearTimeout(timer);
   }, [audibleClips, session.path]);
 
-  /**
-   * Every title live at the playhead, bottom track first.
-   *
-   * All of them, not just the top one: titles stack, and a lower third plus a
-   * name card is a normal thing to want on screen at once. Order follows track
-   * order so the compositing matches what the timeline shows.
-   */
-  const textOverlays = useMemo<TextOverlay[]>(() => {
-    const depth = (trackId: string) => project.tracks.findIndex((track) => track.id === trackId);
+  // ── text, effects, transitions ───────────────────────────────────────────
 
-    return clipsAt(project, playhead)
-      .filter((clip) => clip.kind === "text" && clip.text !== undefined)
-      .filter((clip) => findTrack(project, clip.trackId)?.visible !== false)
-      .sort((a, b) => depth(a.trackId) - depth(b.trackId))
-      .map((clip) => ({
-        clipId: clip.id,
-        style: clip.text!,
-        offsetX: clip.offsetX,
-        offsetY: clip.offsetY,
-      }));
-  }, [project, playhead]);
-
-  // The top-most video clip under the playhead is what the monitor shows.
-  const previewSource = useMemo<PreviewSource | null>(() => {
-    // Stills are picture too, so they compete for the monitor with footage.
-    // Titles do not: they are drawn *over* whatever is showing, so they are
-    // handled as overlays below rather than as a source.
-    const active = clipsAt(project, playhead).filter(
-      (clip) => clip.kind !== "audio" && clip.kind !== "text",
-    );
-    if (active.length === 0) return null;
-
-    const depth = (trackId: string) => project.tracks.findIndex((track) => track.id === trackId);
-    const top = active.reduce((best, clip) =>
-      depth(clip.trackId) > depth(best.trackId) ? clip : best,
-    );
-
-    const media = findMedia(project, top.mediaId);
-    if (!media) return null;
-
-    return {
-      clipId: top.id,
-      path: media.path,
-      // A timeline second covers `speed` source seconds - the same map the
-      // exporter's frame plan applies.
-      time: top.sourceStart + (playhead - top.start) * top.speed,
-      speed: top.speed,
-      isStill: top.kind === "image",
-    };
-  }, [project, playhead]);
-
-  // What the monitor's transform gizmo works on: the displayed clip's picture
-  // transform, and the source's pixel size so the fitted rect can be computed.
-  const previewClip = previewSource ? findClip(project, previewSource.clipId) : null;
-  const previewMedia = previewClip ? findMedia(project, previewClip.mediaId) : null;
-
-  // ── edit operations ──────────────────────────────────────────────────────
-  const placeMedia = useCallback((mediaId: string, trackId: string, start: number) => {
-    setProject((current) => {
-      const { project: next, clipId } = addClip(current, { mediaId, trackId, start });
-      if (clipId) setSelectedClipIds([clipId]);
-      return next;
+  const addText = useCallback(() => {
+    void dispatch({
+      op: "addTextClip",
+      trackId: null,
+      start: latest.current.playhead,
+      style: null,
+    }).then((clipId) => {
+      if (clipId) {
+        setSelectedClipIds([clipId]);
+        setSelectedMediaId(null);
+        setRightTab("text");
+      }
     });
-  }, []);
+  }, [dispatch]);
 
-  const addToTimeline = useCallback(
-    (mediaId: string) => {
-      const media = findMedia(project, mediaId);
-      if (!media) return;
-      // Stack onto the lowest lane that is free here, rather than piling
-      // everything onto track 1 on top of itself.
-      const track = firstFreeTrack(project, playhead, media.duration ?? 5);
-      if (track) placeMedia(media.id, track.id, playhead);
+  const pickFont = useCallback(async () => {
+    try {
+      const picked = await openDialog({
+        multiple: false,
+        title: "Add a font",
+        filters: [{ name: "Fonts", extensions: ["ttf", "otf", "woff", "woff2", "ttc"] }],
+      });
+      if (typeof picked !== "string") return;
+      const current = latest.current.project;
+      if (current.fonts.some((font) => font.path === picked)) return;
+
+      const font = {
+        family: familyForPath(
+          picked,
+          current.fonts.map((existing) => existing.family),
+        ),
+        path: picked,
+      };
+      // Registered before it is stored, so a file the webview cannot parse is
+      // reported now rather than becoming a broken entry in the picker.
+      if (!(await registerFont(font, readMediaBytes))) {
+        setError(`Could not read ${picked.split(/[\/]/).pop() ?? picked} as a font.`);
+        return;
+      }
+      void dispatch({ op: "addFont", family: font.family, path: font.path });
+    } catch (cause) {
+      setError(String(cause));
+    }
+  }, [dispatch]);
+
+  const applyEffect = useCallback(
+    (effectId: string) => {
+      const current = latest.current.project;
+      const selected = selectedClipIds.length === 1 ? findClip(current, selectedClipIds[0]) : null;
+      if (!selected || (selected.kind !== "video" && selected.kind !== "image")) {
+        setToast({
+          id: Date.now(),
+          message: "Select a video or image clip on the timeline first",
+          failed: true,
+        });
+        return;
+      }
+      void dispatch({
+        op: "updateClip",
+        clipId: selected.id,
+        patch: { videoEffects: [...selected.videoEffects, { id: effectId, params: {} }] },
+      });
+      setRightTab("effects");
     },
-    [placeMedia, playhead, project],
+    [selectedClipIds, dispatch],
+  );
+
+  const applyTransition = useCallback(
+    (transitionId: string) => {
+      const definition = findTransition(transitionId);
+      if (!definition?.implemented) return;
+      const current = latest.current.project;
+      const selected = selectedClipIds.length === 1 ? findClip(current, selectedClipIds[0]) : null;
+      if (!selected || (selected.kind !== "video" && selected.kind !== "image")) {
+        setToast({
+          id: Date.now(),
+          message: "Select the incoming clip - the one after the cut - first",
+          failed: true,
+        });
+        return;
+      }
+      if (!precedingClip(current, selected.id)) {
+        setToast({
+          id: Date.now(),
+          message: "No clip ends where this one starts - transitions need a cut",
+          failed: true,
+        });
+        return;
+      }
+      void dispatch({
+        op: "updateClip",
+        clipId: selected.id,
+        patch: { transitionIn: { id: transitionId, duration: definition.defaultDuration } },
+      });
+      setRightTab("effects");
+      setToast({ id: Date.now(), message: `${definition.label} added to the cut`, failed: false });
+    },
+    [selectedClipIds, dispatch],
   );
 
   /**
-   * Drags a bin item onto the timeline.
-   *
-   * Window-level pointer listeners rather than pointer capture on the source
-   * row: capture would deliver every move to the bin item, and the drop has to
-   * be resolved against the timeline, which is a different element entirely.
-   *
-   * `latest` is read inside the listeners because they are installed once per
-   * drag and would otherwise close over stale zoom and scroll values.
+   * Transcribes one clip's audio and lays the result out as text clips on a
+   * "Captions" track (created on first use, reused after).
    */
+  const autoCaption = useCallback(
+    async (clip: Clip, media: MediaItem) => {
+      setTranscribing(true);
+      setToast({ id: Date.now(), message: "Transcribing...", failed: false });
+      try {
+        const segments = await transcribeClip({
+          path: media.path,
+          sourceStart: clip.sourceStart,
+          window: clip.duration * clip.speed,
+          language: getTranscriberLanguage(),
+          modelId: getTranscriberModel(),
+        });
+        if (segments.length === 0) {
+          setToast({ id: Date.now(), message: "No speech found", failed: false });
+          return;
+        }
+
+        let trackId = activeTimeline(latest.current.project).tracks.find(
+          (track) => track.name === "Captions",
+        )?.id;
+        if (!trackId) {
+          trackId = await dispatch({ op: "addTrack" });
+          if (!trackId) return;
+          await dispatch({ op: "renameTrack", trackId, name: "Captions" });
+        }
+
+        for (const segment of segments) {
+          const start = clip.start + segment.start / clip.speed;
+          const wanted = Math.max(0.4, (segment.end - segment.start) / clip.speed);
+          const clipId = await dispatch({
+            op: "addTextClip",
+            trackId,
+            start,
+            // Caption-sized and lower-third, not title-sized and centred.
+            style: { ...defaultTextStyle(), content: segment.text, fontSize: 0.045 },
+          });
+          if (!clipId) continue;
+          await dispatch({
+            op: "trimClip",
+            clipId,
+            edge: "end",
+            delta: wanted - DEFAULT_TEXT_DURATION,
+          });
+          await dispatch({ op: "setClipTransform", clipId, offsetY: 0.38 });
+        }
+        setToast({
+          id: Date.now(),
+          message: `Added ${segments.length} caption${segments.length === 1 ? "" : "s"}`,
+          failed: false,
+        });
+      } catch (cause) {
+        setToast({ id: Date.now(), message: String(cause), failed: true });
+      } finally {
+        setTranscribing(false);
+      }
+    },
+    [dispatch],
+  );
+
+  /** The audio/video tools dropdown. Hidden entirely for soundless clips. */
+  const clipTools = useMemo<MenuOption[][]>(() => {
+    const clip = selectedClipIds.length === 1 ? findClip(project, selectedClipIds[0]) : null;
+    const media = clip ? findMedia(project, clip.mediaId) : null;
+    if (!clip || (clip.kind !== "video" && clip.kind !== "audio")) return [];
+
+    const hasSound = Boolean(media?.hasAudio);
+    const canDetach = Boolean(
+      clip.kind === "video" &&
+        !clip.muted &&
+        media?.hasAudio &&
+        detachedAudioOf(project, clip.id).length === 0,
+    );
+    const canReattach = Boolean(
+      (clip.kind === "video" && detachedAudioOf(project, clip.id).length > 0) ||
+        (clip.kind === "audio" && clip.detachedFrom && findClip(project, clip.detachedFrom)),
+    );
+
+    return [
+      [
+        {
+          label: transcribing ? "Transcribing..." : "Auto captions",
+          icon: "type" as const,
+          disabled: !hasSound || transcribing,
+          onSelect: () => {
+            if (clip && media) void autoCaption(clip, media);
+          },
+        },
+      ],
+      [
+        {
+          label: "Detach audio",
+          icon: "waveform" as const,
+          disabled: !canDetach,
+          onSelect: () => void dispatch({ op: "detachAudio", clipId: clip.id }),
+        },
+        {
+          label: "Reattach audio",
+          icon: "merge" as const,
+          disabled: !canReattach,
+          onSelect: () => {
+            void dispatch({ op: "reattachAudio", clipId: clip.id });
+            setSelectedClipIds([]);
+          },
+        },
+      ],
+    ];
+  }, [project, selectedClipIds, transcribing, autoCaption, dispatch]);
+
+  // ── timelines ────────────────────────────────────────────────────────────
+  const [timelineToDelete, setTimelineToDelete] = useState<TimelineMeta | null>(null);
+  const playheadByTimeline = useRef(new Map<string, number>());
+
+  const selectTimeline = useCallback(
+    (timelineId: string) => {
+      const current = latest.current.project;
+      if (timelineId === current.activeTimelineId) return;
+      playheadByTimeline.current.set(current.activeTimelineId, latest.current.playhead);
+      void dispatch({ op: "selectTimeline", timelineId }).then(() => {
+        setSelectedClipIds([]);
+        transport.pause();
+        transport.seek(playheadByTimeline.current.get(timelineId) ?? 0);
+      });
+    },
+    [dispatch, transport],
+  );
+
+  const createTimeline = useCallback(() => {
+    playheadByTimeline.current.set(
+      latest.current.project.activeTimelineId,
+      latest.current.playhead,
+    );
+    void dispatch({ op: "addTimeline" }).then(() => {
+      setSelectedClipIds([]);
+      transport.pause();
+      transport.seek(0);
+    });
+  }, [dispatch, transport]);
+
+  const deleteTimelineNow = useCallback(
+    (timelineId: string) => {
+      const wasActive = timelineId === latest.current.project.activeTimelineId;
+      playheadByTimeline.current.delete(timelineId);
+      void dispatch({ op: "removeTimeline", timelineId }).then(() => {
+        if (wasActive) {
+          setSelectedClipIds([]);
+          transport.pause();
+          const nextActive = viewRef.current?.project.activeTimelineId;
+          transport.seek((nextActive && playheadByTimeline.current.get(nextActive)) || 0);
+        }
+      });
+    },
+    [dispatch, transport],
+  );
+
+  // ── edit operations ──────────────────────────────────────────────────────
+  const placeMedia = useCallback(
+    (mediaId: string, trackId: string, start: number) => {
+      void dispatch({ op: "addClip", mediaId, trackId, start }).then((clipId) => {
+        if (clipId) setSelectedClipIds([clipId]);
+      });
+    },
+    [dispatch],
+  );
+
+  const addToTimeline = useCallback(
+    (mediaId: string) => {
+      void dispatch({
+        op: "addClipAtFirstFree",
+        mediaId,
+        start: latest.current.playhead,
+      }).then((clipId) => {
+        if (clipId) setSelectedClipIds([clipId]);
+      });
+    },
+    [dispatch],
+  );
+
   const beginMediaDrag = useCallback(
     (item: MediaItem, clientX: number, clientY: number) => {
       setMediaDrag({ item, x: clientX, y: clientY });
@@ -834,7 +849,6 @@ function Editor({
           current ? { ...current, x: event.clientX, y: event.clientY } : null,
         );
       };
-
       const onUp = (event: PointerEvent) => {
         window.removeEventListener("pointermove", onMove);
         window.removeEventListener("pointerup", onUp);
@@ -842,13 +856,11 @@ function Editor({
 
         const state = latest.current;
         const drop = resolveDrop(event.clientX, event.clientY, {
-          tracks: state.project.tracks,
+          tracks: activeTimeline(state.project).tracks,
           secondsPerPixel: state.secondsPerPixel,
           scrollLeft: state.scrollLeft,
           trackScroll: state.trackScroll,
         });
-        // Null means outside the canvas or over the ruler; both mean "do
-        // nothing". Any lane accepts any media.
         if (!drop) return;
 
         const start = state.snap
@@ -857,7 +869,6 @@ function Editor({
               playhead: state.playhead,
             })
           : drop.start;
-
         placeMedia(item.id, drop.trackId, Math.max(0, start));
       };
 
@@ -868,30 +879,27 @@ function Editor({
   );
 
   const splitAtPlayhead = useCallback(() => {
-    setProject((current) => {
-      // Split whatever is selected, or everything under the playhead if
-      // nothing is - which is what the keyboard shortcut is usually for.
-      const targets =
-        selectedClipIds.length > 0
-          ? selectedClipIds
-          : clipsAt(current, playhead).map((clip) => clip.id);
-      return targets.reduce((next, clipId) => splitClip(next, clipId, playhead), current);
-    });
-  }, [playhead, selectedClipIds]);
+    const current = latest.current.project;
+    const at = latest.current.playhead;
+    const targets =
+      selectedClipIds.length > 0
+        ? selectedClipIds
+        : clipsAt(current, at).map((clip) => clip.id);
+    if (targets.length === 0) return;
+    void dispatch({ op: "splitClips", clipIds: targets, time: at });
+  }, [selectedClipIds, dispatch]);
 
   const mergeSelected = useCallback(() => {
-    setProject((current) => {
-      const { project: next, clipId } = mergeClips(current, selectedClipIds);
+    void dispatch({ op: "mergeClips", clipIds: selectedClipIds }).then((clipId) => {
       if (clipId) setSelectedClipIds([clipId]);
-      return next;
     });
-  }, [selectedClipIds]);
+  }, [selectedClipIds, dispatch]);
 
   const deleteSelected = useCallback(() => {
     if (selectedClipIds.length === 0) return;
-    setProject((current) => removeClips(current, selectedClipIds));
+    void dispatch({ op: "removeClips", clipIds: selectedClipIds });
     setSelectedClipIds([]);
-  }, [selectedClipIds]);
+  }, [selectedClipIds, dispatch]);
 
   const zoom = useCallback((factor: number, anchor?: number) => {
     const previous = zoomRef.current;
@@ -901,8 +909,6 @@ function Editor({
     );
     zoomRef.current = next;
     setSecondsPerPixel(next);
-
-    // Keep the time under the pointer pinned to the same pixel.
     if (anchor !== undefined) {
       setScrollLeft((left) => Math.max(0, anchor - (anchor - left) * (next / previous)));
     }
@@ -926,9 +932,6 @@ function Editor({
   // ── keyboard ─────────────────────────────────────────────────────────────
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
-      // Never steal keys from anywhere text is being written: inputs, the
-      // text panel's textarea, and inline editing (contentEditable). Space
-      // must insert a space there, and Backspace must not delete a clip.
       const target = event.target;
       if (
         target instanceof HTMLInputElement ||
@@ -939,15 +942,17 @@ function Editor({
         return;
       }
 
-      /*
-       * Modified shortcuts are handled separately and then we return.
-       *
-       * Without this the two sets ran together: Ctrl+S matched the bare `S`
-       * case and split the clip instead of saving, which is exactly the sort
-       * of thing that makes an app feel hostile.
-       */
       if (event.ctrlKey || event.metaKey) {
         switch (event.code) {
+          case "KeyZ":
+            event.preventDefault();
+            if (event.shiftKey) redoAction();
+            else undoAction();
+            break;
+          case "KeyY":
+            event.preventDefault();
+            redoAction();
+            break;
           case "KeyS":
             event.preventDefault();
             saveAndNotify();
@@ -966,7 +971,6 @@ function Editor({
         return;
       }
 
-      // Alt is left alone entirely; nothing here claims it.
       if (event.altKey) return;
 
       const step = event.shiftKey ? 10 : 1;
@@ -1013,26 +1017,115 @@ function Editor({
 
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [deleteSelected, duration, frameRate, mergeSelected, saveAndNotify, splitAtPlayhead, transport]);
+  }, [
+    deleteSelected,
+    duration,
+    frameRate,
+    mergeSelected,
+    redoAction,
+    saveAndNotify,
+    splitAtPlayhead,
+    transport,
+    undoAction,
+  ]);
 
-  // The exporter works from a flat list: the engine rebuilds a real timeline
-  // from it, so track *order* has to survive the trip even though track
-  // identity does not.
+  // ── derived views ────────────────────────────────────────────────────────
+
+  const textOverlays = useMemo<TextOverlay[]>(() => {
+    const depth = (trackId: string) =>
+      timeline.tracks.findIndex((track) => track.id === trackId);
+    return clipsAt(project, playhead)
+      .filter((clip) => clip.kind === "text" && clip.text !== undefined)
+      .filter((clip) => findTrack(project, clip.trackId)?.visible !== false)
+      .sort((a, b) => depth(a.trackId) - depth(b.trackId))
+      .map((clip) => ({
+        clipId: clip.id,
+        style: clip.text!,
+        offsetX: clip.offsetX,
+        offsetY: clip.offsetY,
+      }));
+  }, [project, timeline, playhead]);
+
+  const previewSource = useMemo<PreviewSource | null>(() => {
+    const active = clipsAt(project, playhead).filter(
+      (clip) => clip.kind !== "audio" && clip.kind !== "text",
+    );
+    if (active.length === 0) return null;
+    const depth = (trackId: string) =>
+      timeline.tracks.findIndex((track) => track.id === trackId);
+    const top = active.reduce((best, clip) =>
+      depth(clip.trackId) > depth(best.trackId) ? clip : best,
+    );
+    const media = findMedia(project, top.mediaId);
+    if (!media) return null;
+    return {
+      clipId: top.id,
+      path: media.path,
+      time: top.sourceStart + (playhead - top.start) * top.speed,
+      speed: top.speed,
+      isStill: top.kind === "image",
+    };
+  }, [project, timeline, playhead]);
+
+  const previewClip = previewSource ? findClip(project, previewSource.clipId) : null;
+  const previewMedia = previewClip ? findMedia(project, previewClip.mediaId) : null;
+
+  const previewGhost = useMemo(() => {
+    for (const clip of timeline.clips) {
+      const transition = clip.transitionIn;
+      if (!transition || transition.id !== "cross-fade") continue;
+      if (clip.kind !== "video" && clip.kind !== "image") continue;
+      if (!precedingClip(project, clip.id)) continue;
+      const handle =
+        clip.kind === "image" ? Infinity : clip.sourceStart / Math.max(0.0625, clip.speed);
+      const d = Math.min(transition.duration, handle);
+      const cut = clip.start;
+      if (d <= 0 || playhead < cut - d || playhead >= cut) continue;
+      const media = findMedia(project, clip.mediaId);
+      if (!media) continue;
+      return {
+        clipId: clip.id,
+        path: media.path,
+        time: Math.max(0, clip.sourceStart - (cut - playhead) * clip.speed),
+        speed: clip.speed,
+        opacity: 1 - (cut - playhead) / d,
+      };
+    }
+    return null;
+  }, [project, timeline, playhead]);
+
+  const previewVeil = useMemo(() => {
+    for (const clip of timeline.clips) {
+      const transition = clip.transitionIn;
+      if (!transition) continue;
+      if (transition.id !== "fade-black" && transition.id !== "fade-white") continue;
+      if (!precedingClip(project, clip.id)) continue;
+      const half = transition.duration / 2;
+      const cut = clip.start;
+      if (playhead < cut - half || playhead > cut + half) continue;
+      const opacity =
+        playhead <= cut ? (playhead - (cut - half)) / half : (cut + half - playhead) / half;
+      return {
+        color: transition.id === "fade-white" ? "#ffffff" : "#000000",
+        opacity: Math.min(1, Math.max(0, opacity)),
+      };
+    }
+    return null;
+  }, [project, timeline, playhead]);
+
+  // The exporter works from a flat list of the active timeline's clips.
   const exportClips = useMemo<ExportClip[]>(
     () =>
-      project.clips.flatMap((clip) => {
-        // Titles have no file to hand the exporter, so they are rasterised
-        // separately and appended as full-frame overlays - see `textLayers`.
+      timeline.clips.flatMap((clip) => {
         if (clip.kind === "text") return [];
-
         const media = findMedia(project, clip.mediaId);
         const track = findTrack(project, clip.trackId);
-        const index = project.tracks.findIndex((candidate) => candidate.id === clip.trackId);
+        const index = timeline.tracks.findIndex((candidate) => candidate.id === clip.trackId);
         if (!media || !track || index < 0) return [];
         return [
           {
             path: media.path,
-            kind: clip.kind,
+            kind: clip.kind as "video" | "audio" | "image",
             start: clip.start,
             duration: clip.duration,
             sourceStart: clip.sourceStart,
@@ -1051,9 +1144,6 @@ function Editor({
             rotation: clip.rotation,
             opacity: clip.opacity,
             videoFilterChain: buildEffectChain(clip.videoEffects) ?? "",
-            // The transition rides along only while its cut still exists;
-            // the host would orphan it anyway, but not sending it keeps the
-            // request honest about what will render.
             transition:
               clip.transitionIn && precedingClip(project, clip.id)
                 ? { kind: clip.transitionIn.id, duration: clip.transitionIn.duration }
@@ -1063,78 +1153,15 @@ function Editor({
           },
         ];
       }),
-    [project],
+    [project, timeline],
   );
 
-  /**
-   * A cross-fade window the playhead currently sits inside: the incoming
-   * clip's pre-roll, faded in over the outgoing picture. This is the same
-   * overlap the export builds - the ghost plays the handle before the
-   * incoming clip's in-point, ramping from zero to solid at the cut.
-   */
-  const previewGhost = useMemo(() => {
-    for (const clip of project.clips) {
-      const transition = clip.transitionIn;
-      if (!transition || transition.id !== "cross-fade") continue;
-      if (clip.kind !== "video" && clip.kind !== "image") continue;
-      if (!precedingClip(project, clip.id)) continue;
-
-      // The dissolve clamps to the source handle, like the export does.
-      const handle = clip.kind === "image" ? Infinity : clip.sourceStart / Math.max(0.0625, clip.speed);
-      const d = Math.min(transition.duration, handle);
-      const cut = clip.start;
-      if (d <= 0 || playhead < cut - d || playhead >= cut) continue;
-
-      const media = findMedia(project, clip.mediaId);
-      if (!media) continue;
-      return {
-        clipId: clip.id,
-        path: media.path,
-        time: Math.max(0, clip.sourceStart - (cut - playhead) * clip.speed),
-        speed: clip.speed,
-        opacity: 1 - (cut - playhead) / d,
-      };
-    }
-    return null;
-  }, [project, playhead]);
-
-  /**
-   * The fade-to-colour wash over the monitor while the playhead crosses a
-   * fade-black/white transition. Mirrors the exporter's shape exactly: half
-   * the duration out on the old clip, half in on the new one, meeting fully
-   * opaque at the cut.
-   */
-  const previewVeil = useMemo(() => {
-    for (const clip of project.clips) {
-      const transition = clip.transitionIn;
-      if (!transition) continue;
-      if (transition.id !== "fade-black" && transition.id !== "fade-white") continue;
-      if (!precedingClip(project, clip.id)) continue;
-
-      const half = transition.duration / 2;
-      const cut = clip.start;
-      if (playhead < cut - half || playhead > cut + half) continue;
-
-      const opacity =
-        playhead <= cut ? (playhead - (cut - half)) / half : (cut + half - playhead) / half;
-      return {
-        color: transition.id === "fade-white" ? "#ffffff" : "#000000",
-        opacity: Math.min(1, Math.max(0, opacity)),
-      };
-    }
-    return null;
-  }, [project, playhead]);
-
-  // Titles for the exporter. They have no file to hand over - the dialog
-  // rasterises them into full-frame PNGs at export time - so all it needs is
-  // the style and where the clip sits. Hidden tracks drop out here, the same
-  // cut `exportClips` makes with `hidden`.
   const exportTitles = useMemo<ExportTitle[]>(
     () =>
-      project.clips.flatMap((clip) => {
+      timeline.clips.flatMap((clip) => {
         if (clip.kind !== "text" || !clip.text) return [];
         const track = findTrack(project, clip.trackId);
-        const index = project.tracks.findIndex((candidate) => candidate.id === clip.trackId);
+        const index = timeline.tracks.findIndex((candidate) => candidate.id === clip.trackId);
         if (!track || !track.visible || index < 0) return [];
         return [
           {
@@ -1148,11 +1175,9 @@ function Editor({
           },
         ];
       }),
-    [project],
+    [project, timeline],
   );
 
-  // The inspector shows one clip's properties; with several selected there is
-  // no single set of values to show, so it falls back to the bin item.
   const selectedClip =
     selectedClipIds.length === 1 ? findClip(project, selectedClipIds[0]) : null;
   const inspectorMedia = selectedClip
@@ -1239,6 +1264,22 @@ function Editor({
             label: "Edit",
             groups: [
               [
+                {
+                  label: "Undo",
+                  icon: "chevronUp",
+                  hint: "Ctrl+Z",
+                  disabled: !view?.canUndo,
+                  onSelect: undoAction,
+                },
+                {
+                  label: "Redo",
+                  icon: "chevronDown",
+                  hint: "Ctrl+Shift+Z",
+                  disabled: !view?.canRedo,
+                  onSelect: redoAction,
+                },
+              ],
+              [
                 { label: "Split at playhead", icon: "razor", hint: "Ctrl+B", onSelect: splitAtPlayhead },
                 {
                   label:
@@ -1306,7 +1347,7 @@ function Editor({
                 setSelectedClipIds([]);
               }}
               onImport={(paths) => void importPaths(paths)}
-              onRemove={(id) => setProject((current) => removeMediaEverywhere(current, id))}
+              onRemove={(id) => void dispatch({ op: "removeMedia", mediaId: id })}
               onDismissError={() => setError(null)}
               onBeginDrag={beginMediaDrag}
               onAddToTimeline={addToTimeline}
@@ -1353,28 +1394,21 @@ function Editor({
               selectedClipId={selectedClipIds.length === 1 ? selectedClipIds[0] : null}
               onSelectClip={(clipId) => setSelectedClipIds([clipId])}
               onTransformChange={(clipId, transform) =>
-                setProject((current) => setClipTransform(current, clipId, transform))
+                liveClip(clipId, transformPatch(transform))
               }
-              onOverlayChange={(clipId, change) =>
-                setProject((current) => {
-                  let next = current;
-                  if (change.offsetX !== undefined || change.offsetY !== undefined) {
-                    next = setClipTransform(next, clipId, {
-                      offsetX: change.offsetX,
-                      offsetY: change.offsetY,
-                    });
-                  }
-                  if (change.fontSize !== undefined) {
-                    const clip = findClip(next, clipId);
-                    if (clip?.text) {
-                      next = updateClip(next, clipId, {
-                        text: { ...clip.text, fontSize: change.fontSize },
-                      });
-                    }
-                  }
-                  return next;
-                })
-              }
+              onTransformEnd={commitEcho}
+              onOverlayChange={(clipId, change) => {
+                const patch: Partial<Clip> = transformPatch({
+                  offsetX: change.offsetX,
+                  offsetY: change.offsetY,
+                });
+                if (change.fontSize !== undefined) {
+                  const clip = findClip(latest.current.project, clipId);
+                  if (clip?.text) patch.text = { ...clip.text, fontSize: change.fontSize };
+                }
+                liveClip(clipId, patch);
+              }}
+              onOverlayEnd={commitEcho}
               onFrameChange={(width, height) => setFrame({ width, height })}
               onTogglePlay={transport.toggle}
               onStep={(frames) => transport.step(frames, frameRate)}
@@ -1396,21 +1430,17 @@ function Editor({
               clip={selectedClip}
               media={inspectorMedia}
               project={project}
+              fonts={fontsForUi}
               projectName={session.name}
               projectPath={session.path}
               frame={frame}
               duration={duration}
               frameRate={frameRate}
               onAddFont={() => void pickFont()}
-              onRemoveFont={(family) => setProject((current) => removeFont(current, family))}
-              onChangeClip={(patch) => {
-                if (selectedClipIds.length !== 1) return;
-                setProject((current) => updateClip(current, selectedClipIds[0], patch));
-              }}
-              onSpeedChange={(speed) => {
-                if (selectedClipIds.length !== 1) return;
-                setProject((current) => setClipSpeed(current, selectedClipIds[0], speed));
-              }}
+              onRemoveFont={(family) => void dispatch({ op: "removeFont", family })}
+              onChangeClip={changeClip}
+              onCommitClip={commitEcho}
+              onSpeedChange={changeSpeed}
             />
           </div>
         </div>
@@ -1440,10 +1470,16 @@ function Editor({
             onSnapChange={setSnap}
             onScrub={transport.seek}
             onSelectClips={setSelectedClipIds}
-            onMoveClips={(moves) => setProject((current) => moveClips(current, moves))}
-            onTrimClip={(clipId, edge, delta) =>
-              setProject((current) => trimClip(current, clipId, edge, delta))
-            }
+            onMoveClips={(moves) => {
+              for (const move of moves) {
+                liveClip(move.clipId, { start: Math.max(0, move.start), trackId: move.trackId });
+              }
+            }}
+            onTrimClip={(clipId, edge, delta) => {
+              const clip = findClip(latest.current.project, clipId);
+              if (clip) liveClip(clipId, trimPatch(clip, edge, delta));
+            }}
+            onGestureEnd={commitEcho}
             onSplitAtPlayhead={splitAtPlayhead}
             onMergeSelected={mergeSelected}
             mergeBlockedBecause={whyNotMerge(project, selectedClipIds)}
@@ -1454,38 +1490,28 @@ function Editor({
             onTrackScroll={setTrackScroll}
             onFit={fit}
             onTrackFlag={(trackId, flag, value) =>
-              setProject((current) => setTrackFlag(current, trackId, flag, value))
+              void dispatch({ op: "setTrackFlag", trackId, flag, value })
             }
             clipTools={clipTools}
             onSelectTimeline={selectTimeline}
             onAddTimeline={createTimeline}
             onRenameTimeline={(timelineId, name) =>
-              setProject((current) => renameTimeline(current, timelineId, name))
+              void dispatch({ op: "renameTimeline", timelineId, name })
             }
             onRequestRemoveTimeline={(timelineId) => {
               const meta = project.timelines.find((candidate) => candidate.id === timelineId);
-              if (meta) setTimelineToDelete(meta);
+              if (meta) setTimelineToDelete({ id: meta.id, name: meta.name });
             }}
-            onAddTrack={() => setProject((current) => addTrack(current).project)}
+            onAddTrack={() => void dispatch({ op: "addTrack" })}
             onRenameTrack={(trackId, name) =>
-              setProject((current) => renameTrack(current, trackId, name))
+              void dispatch({ op: "renameTrack", trackId, name })
             }
-            onRemoveTrack={(trackId) =>
-              setProject((current) => {
-                setSelectedClipIds((ids) =>
-                  ids.filter((id) => findClip(current, id)?.trackId !== trackId),
-                );
-                return removeTrack(current, trackId);
-              })
-            }
+            onRemoveTrack={(trackId) => void dispatch({ op: "removeTrack", trackId })}
             onClipContextMenu={(clipId, x, y) => {
-              // Right-clicking outside the selection replaces it; inside it,
-              // the menu acts on everything selected.
               const target = selectedClipIds.includes(clipId) ? selectedClipIds : [clipId];
               setSelectedClipIds(target);
 
               const clip = findClip(project, clipId);
-              const track = clip ? findTrack(project, clip.trackId) : null;
               const many = target.length > 1;
 
               setContext({
@@ -1508,11 +1534,6 @@ function Editor({
                         },
                       ]
                     : []),
-                  // "Detach audio" and its reverse, offered only where they
-                  // mean something: one clip, with a link to make or unmake.
-                  // Captions come from the clip's own sound, so the item only
-                  // appears where there is sound to transcribe - and only one
-                  // transcription runs at a time.
                   ...(() => {
                     const media = clip ? findMedia(project, clip.mediaId) : null;
                     return !many &&
@@ -1538,7 +1559,7 @@ function Editor({
                         {
                           label: "Detach audio",
                           icon: "waveform" as const,
-                          onSelect: () => setProject((current) => detachAudio(current, clipId)),
+                          onSelect: () => void dispatch({ op: "detachAudio", clipId }),
                         },
                       ]
                     : []),
@@ -1553,7 +1574,7 @@ function Editor({
                           label: "Reattach audio",
                           icon: "merge" as const,
                           onSelect: () => {
-                            setProject((current) => reattachAudio(current, clipId));
+                            void dispatch({ op: "reattachAudio", clipId });
                             setSelectedClipIds([]);
                           },
                         },
@@ -1562,13 +1583,21 @@ function Editor({
                   {
                     label: "Move to playhead",
                     icon: "select",
-                    onSelect: () =>
-                      setProject((current) =>
-                        moveClip(current, clipId, {
-                          start: playhead,
-                          trackId: track?.id ?? "",
-                        }),
-                      ),
+                    onSelect: () => {
+                      const moving = findClip(latest.current.project, clipId);
+                      if (moving) {
+                        void dispatch({
+                          op: "moveClips",
+                          moves: [
+                            {
+                              clipId,
+                              start: latest.current.playhead,
+                              trackId: moving.trackId,
+                            },
+                          ],
+                        });
+                      }
+                    },
                   },
                   {
                     label: many ? `Delete ${target.length} clips` : "Delete",
@@ -1576,7 +1605,7 @@ function Editor({
                     hint: "Del",
                     danger: true,
                     onSelect: () => {
-                      setProject((current) => removeClips(current, target));
+                      void dispatch({ op: "removeClips", clipIds: target });
                       setSelectedClipIds([]);
                     },
                   },
@@ -1596,8 +1625,7 @@ function Editor({
           message={(() => {
             const count = timelineClipCount(project, timelineToDelete.id);
             return count > 0
-              ? `The ${count} clip${count === 1 ? "" : "s"} on this timeline will be lost. ` +
-                  "There is no undo."
+              ? `The ${count} clip${count === 1 ? "" : "s"} on this timeline will be lost.`
               : "The timeline is empty; nothing else is affected.";
           })()}
           confirmLabel="Delete timeline"
@@ -1640,8 +1668,7 @@ function Editor({
         />
       )}
 
-      {/* The dragged item follows the pointer. Offset down-right so it never
-          sits under the cursor and hides the lane being targeted. */}
+      {/* The dragged item follows the pointer. */}
       {mediaDrag && (
         <div
           style={{ left: mediaDrag.x + 14, top: mediaDrag.y + 14 }}
@@ -1655,7 +1682,6 @@ function Editor({
           <span className="max-w-48 truncate text-xs text-primary">{mediaDrag.item.name}</span>
         </div>
       )}
-
     </div>
   );
 }

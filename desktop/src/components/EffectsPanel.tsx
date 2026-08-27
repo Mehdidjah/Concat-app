@@ -6,7 +6,7 @@ import {
   type AppliedEffect,
   type ClipTransition,
 } from "../lib/effects";
-import type { Clip } from "../lib/project";
+import type { Clip } from "../lib/editor";
 import { HelpTip, Slider } from "./controls";
 import { Icon, IconButton } from "./Icon";
 import { Empty } from "./Panel";
@@ -25,12 +25,15 @@ export function EffectsPanel({
   hasPreceding,
   onChangeEffects,
   onChangeTransition,
+  onCommit,
 }: {
   clip: Clip | null;
   /** Whether a clip ends where this one starts - what a transition needs. */
   hasPreceding: boolean;
   onChangeEffects: (effects: AppliedEffect[]) => void;
   onChangeTransition: (transition: ClipTransition | undefined) => void;
+  /** Ends the gesture: the accumulated change becomes one engine command. */
+  onCommit: () => void;
 }) {
   if (!clip || (clip.kind !== "video" && clip.kind !== "image")) {
     return (
@@ -44,18 +47,27 @@ export function EffectsPanel({
   const transition = clip.transitionIn;
   const transitionDefinition = transition ? findTransition(transition.id) : null;
 
-  const add = (id: string) => onChangeEffects([...applied, { id, params: {} }]);
-  const remove = (index: number) => onChangeEffects(applied.filter((_, at) => at !== index));
+  const commitEffects = (effects: AppliedEffect[]) => {
+    onChangeEffects(effects);
+    onCommit();
+  };
+  const add = (id: string) => commitEffects([...applied, { id, params: {} }]);
+  const remove = (index: number) => commitEffects(applied.filter((_, at) => at !== index));
   const patch = (index: number, change: Partial<AppliedEffect>) =>
-    onChangeEffects(applied.map((effect, at) => (at === index ? { ...effect, ...change } : effect)));
+    commitEffects(applied.map((effect, at) => (at === index ? { ...effect, ...change } : effect)));
+  // Live: parameters echo while the slider moves and commit on release.
   const setParam = (index: number, key: string, value: number) =>
-    patch(index, { params: { ...applied[index].params, [key]: value } });
+    onChangeEffects(
+      applied.map((effect, at) =>
+        at === index ? { ...effect, params: { ...effect.params, [key]: value } } : effect,
+      ),
+    );
   const move = (index: number, by: number) => {
     const target = index + by;
     if (target < 0 || target >= applied.length) return;
     const next = [...applied];
     [next[index], next[target]] = [next[target], next[index]];
-    onChangeEffects(next);
+    commitEffects(next);
   };
 
   return (
@@ -76,7 +88,10 @@ export function EffectsPanel({
                 label={`Remove ${transitionDefinition.label}`}
                 size={7}
                 tone="danger"
-                onClick={() => onChangeTransition(undefined)}
+                onClick={() => {
+                  onChangeTransition(undefined);
+                  onCommit();
+                }}
               />
             </div>
             {!hasPreceding && (
@@ -92,10 +107,12 @@ export function EffectsPanel({
               max={3}
               step={0.1}
               format={(value) => `${value.toFixed(1)}s`}
-              onReset={() =>
-                onChangeTransition({ ...transition, duration: transitionDefinition.defaultDuration })
-              }
+              onReset={() => {
+                onChangeTransition({ ...transition, duration: transitionDefinition.defaultDuration });
+                onCommit();
+              }}
               onChange={(value) => onChangeTransition({ ...transition, duration: value })}
+              onCommit={onCommit}
             />
           </div>
         </section>
@@ -166,8 +183,12 @@ export function EffectsPanel({
                         max={param.max}
                         step={param.step}
                         format={param.format}
-                        onReset={() => setParam(index, param.key, param.default)}
+                        onReset={() => {
+                          setParam(index, param.key, param.default);
+                          onCommit();
+                        }}
                         onChange={(value) => setParam(index, param.key, value)}
+                        onCommit={onCommit}
                       />
                     ))}
                     {definition.params.length === 0 && (

@@ -9,7 +9,7 @@ import {
   type FilterCategory,
   type FilterDefinition,
 } from "../lib/filters";
-import type { Clip } from "../lib/project";
+import type { Clip } from "../lib/editor";
 import { HelpTip, Slider } from "./controls";
 import { Icon, IconButton } from "./Icon";
 import { Empty } from "./Panel";
@@ -29,9 +29,12 @@ import { Empty } from "./Panel";
 export function FiltersPanel({
   clip,
   onChange,
+  onCommit,
 }: {
   clip: Clip | null;
   onChange: (filters: ClipFilter[]) => void;
+  /** Ends the gesture: the accumulated change becomes one engine command. */
+  onCommit: () => void;
 }) {
   const [category, setCategory] = useState<FilterCategory>("voice");
   const [query, setQuery] = useState("");
@@ -54,18 +57,27 @@ export function FiltersPanel({
 
   const applied = clip.filters;
 
-  const add = (id: string) => onChange([...applied, { id, params: {} }]);
-  const remove = (index: number) => onChange(applied.filter((_, at) => at !== index));
+  const commitChange = (filters: ClipFilter[]) => {
+    onChange(filters);
+    onCommit();
+  };
+  const add = (id: string) => commitChange([...applied, { id, params: {} }]);
+  const remove = (index: number) => commitChange(applied.filter((_, at) => at !== index));
   const patch = (index: number, change: Partial<ClipFilter>) =>
-    onChange(applied.map((filter, at) => (at === index ? { ...filter, ...change } : filter)));
+    commitChange(applied.map((filter, at) => (at === index ? { ...filter, ...change } : filter)));
+  // Live: parameters echo while the slider moves and commit on release.
   const setParam = (index: number, key: string, value: number) =>
-    patch(index, { params: { ...applied[index].params, [key]: value } });
+    onChange(
+      applied.map((filter, at) =>
+        at === index ? { ...filter, params: { ...filter.params, [key]: value } } : filter,
+      ),
+    );
   const move = (index: number, by: number) => {
     const target = index + by;
     if (target < 0 || target >= applied.length) return;
     const next = [...applied];
     [next[index], next[target]] = [next[target], next[index]];
-    onChange(next);
+    commitChange(next);
   };
 
   // A search cuts across the categories: when you know the name you should
@@ -144,8 +156,12 @@ export function FiltersPanel({
                         max={param.max}
                         step={param.step}
                         format={param.format}
-                        onReset={() => setParam(index, param.key, param.default)}
+                        onReset={() => {
+                          setParam(index, param.key, param.default);
+                          onCommit();
+                        }}
                         onChange={(value) => setParam(index, param.key, value)}
+                        onCommit={onCommit}
                       />
                     ))}
                   </div>

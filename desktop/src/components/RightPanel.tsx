@@ -1,6 +1,12 @@
 import type { AppliedEffect, ClipTransition } from "../lib/effects";
 import type { ClipFilter } from "../lib/filters";
-import { precedingClip, type Clip, type MediaItem, type Project } from "../lib/project";
+import {
+  precedingClip,
+  type Clip,
+  type CustomFont,
+  type EditorProject,
+  type MediaItem,
+} from "../lib/editor";
 import { AdjustPanel } from "./AdjustPanel";
 import { EffectsPanel } from "./EffectsPanel";
 import { FiltersPanel } from "./FiltersPanel";
@@ -50,12 +56,14 @@ export function RightPanel({
   clip,
   media,
   project,
+  fonts,
   projectName,
   projectPath,
   frame,
   duration,
   frameRate,
   onChangeClip,
+  onCommitClip,
   onSpeedChange,
   onAddFont,
   onRemoveFont,
@@ -64,13 +72,17 @@ export function RightPanel({
   onTab: (tab: RightTab) => void;
   clip: Clip | null;
   media: MediaItem | null;
-  project: Project;
+  project: EditorProject;
+  /** Custom fonts with the UI's missing-file marks applied. */
+  fonts: CustomFont[];
   projectName: string;
   projectPath: string;
   frame: { width: number; height: number };
   duration: number;
   frameRate: number;
   onChangeClip: (patch: Partial<Clip>) => void;
+  /** Ends a control gesture: the accumulated change becomes one command. */
+  onCommitClip: () => void;
   onSpeedChange: (speed: number) => void;
   onAddFont: () => void;
   onRemoveFont: (family: string) => void;
@@ -125,19 +137,26 @@ export function RightPanel({
       {active === "text" && (
         <TextPanel
           clip={clip}
-          project={project}
+          fonts={fonts}
           onChange={onChangeClip}
+          onCommit={onCommitClip}
           onAddFont={onAddFont}
           onRemoveFont={onRemoveFont}
         />
       )}
       {active === "adjust" && (
-        <AdjustPanel clip={clip} onChange={onChangeClip} onSpeedChange={onSpeedChange} />
+        <AdjustPanel
+          clip={clip}
+          onChange={onChangeClip}
+          onCommit={onCommitClip}
+          onSpeedChange={onSpeedChange}
+        />
       )}
       {active === "filters" && (
         <FiltersPanel
           clip={clip}
           onChange={(filters: ClipFilter[]) => onChangeClip({ filters })}
+          onCommit={onCommitClip}
         />
       )}
       {active === "effects" && (
@@ -148,6 +167,7 @@ export function RightPanel({
           onChangeTransition={(transitionIn: ClipTransition | undefined) =>
             onChangeClip({ transitionIn })
           }
+          onCommit={onCommitClip}
         />
       )}
     </Panel>

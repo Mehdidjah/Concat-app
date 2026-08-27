@@ -8,6 +8,7 @@ The video engine behind Relay. Rust, no GC, no hidden control flow.
 |---|---|---|
 | `relay-core` | Time, arena, frames, timeline model. The vocabulary every other crate speaks. | **none** (std only) |
 | `relay-media` | Getting pixels in and out of files. FFmpeg lives here and nowhere else. | `relay-core`, serde_json |
+| `relay-project` | The edit itself: document model, operations as commands, undo, relay.json IO. | serde, serde_json |
 | `relay-render` | Turning a timeline plus a timestamp into one finished frame. | `relay-core` |
 | `relay-cli` | A binary to drive the above. The vertical slice. | all of them |
 

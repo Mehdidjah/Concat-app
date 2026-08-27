@@ -10,7 +10,7 @@ import { convertFileSrc } from "@tauri-apps/api/core";
 
 import { buildPreviewLook, type AppliedEffect, type CanvasOp } from "../lib/effects";
 import { timecode } from "../lib/time";
-import { MAX_SCALE, MIN_SCALE } from "../lib/project";
+import { MAX_SCALE, MIN_SCALE } from "../lib/editor";
 import { textCss, type TextStyle } from "../lib/text";
 import { Icon, IconButton } from "./Icon";
 import { Menu } from "./Menu";
@@ -217,7 +217,9 @@ export function Preview({
   selectedClipId,
   onSelectClip,
   onTransformChange,
+  onTransformEnd,
   onOverlayChange,
+  onOverlayEnd,
   onFrameChange,
   onTogglePlay,
   onStep,
@@ -250,12 +252,16 @@ export function Preview({
   selectedClipId: string | null;
   onSelectClip: (clipId: string) => void;
   onTransformChange: (clipId: string, transform: Partial<PreviewTransform>) => void;
+  /** The gizmo drag ended - the echoed transform becomes one engine command. */
+  onTransformEnd: () => void;
   /** Edits to a title dragged in the monitor: position, and size from the
    * corner handles. */
   onOverlayChange: (
     clipId: string,
     change: { offsetX?: number; offsetY?: number; fontSize?: number },
   ) => void;
+  /** The title drag ended - the echoed change becomes one engine command. */
+  onOverlayEnd: () => void;
   onFrameChange: (width: number, height: number) => void;
   onTogglePlay: () => void;
   onStep: (frames: number) => void;
@@ -575,6 +581,7 @@ export function Preview({
               selected={selectedClipId === source.clipId}
               onSelect={onSelectClip}
               onChange={onTransformChange}
+              onChangeEnd={onTransformEnd}
               onGuides={setGuides}
             />
           )}
@@ -603,6 +610,7 @@ export function Preview({
                   selected={selectedClipId === overlay.clipId}
                   onSelect={onSelectClip}
                   onChange={onOverlayChange}
+                  onChangeEnd={onOverlayEnd}
                   onGuides={setGuides}
                 />
               ))}
@@ -947,6 +955,7 @@ function TransformGizmo({
   selected,
   onSelect,
   onChange,
+  onChangeEnd,
   onGuides,
 }: {
   clipId: string;
@@ -956,6 +965,8 @@ function TransformGizmo({
   selected: boolean;
   onSelect: (clipId: string) => void;
   onChange: (clipId: string, transform: Partial<PreviewTransform>) => void;
+  /** The drag finished; whatever was echoed becomes one engine command. */
+  onChangeEnd: () => void;
   onGuides: (guides: Guides) => void;
 }) {
   const box = useRef<HTMLDivElement>(null);
@@ -1042,6 +1053,7 @@ function TransformGizmo({
       () => {
         onGuides(NO_GUIDES);
         detach.current = null;
+        onChangeEnd();
       },
     );
   };
@@ -1131,6 +1143,7 @@ function TextOverlayBox({
   selected,
   onSelect,
   onChange,
+  onChangeEnd,
   onGuides,
 }: {
   overlay: TextOverlay;
@@ -1138,6 +1151,8 @@ function TextOverlayBox({
   selected: boolean;
   onSelect: (clipId: string) => void;
   onChange: (clipId: string, change: { offsetX?: number; offsetY?: number; fontSize?: number }) => void;
+  /** The drag finished; whatever was echoed becomes one engine command. */
+  onChangeEnd: () => void;
   onGuides: (guides: Guides) => void;
 }) {
   const block = useRef<HTMLDivElement>(null);
@@ -1192,6 +1207,7 @@ function TextOverlayBox({
       () => {
         onGuides(NO_GUIDES);
         detach.current = null;
+        onChangeEnd();
       },
     );
   };

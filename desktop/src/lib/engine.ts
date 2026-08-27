@@ -11,6 +11,8 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
+import type { EditorCommand, EditorView } from "./editor";
+
 export interface VideoStreamInfo {
   index: number;
   codec: string;
@@ -95,14 +97,52 @@ export async function openProject(path: string): Promise<ProjectInfo> {
   return invoke<ProjectInfo>("open_project", { path });
 }
 
-/** Writes the whole project document to the project folder. */
-export async function saveProject(path: string, document: unknown): Promise<void> {
-  return invoke<void>("save_project", { path, document });
+// ── the editing session ────────────────────────────────────────────────────
+// The engine owns the edit (see engine decision 0007): the UI opens a
+// session, sends commands, and renders the state that comes back.
+
+/** Opens a project folder as the engine's editing session. */
+export async function editorOpen(session: {
+  path: string;
+  name: string;
+  width: number;
+  height: number;
+  rateNum: number;
+  rateDen: number;
+}): Promise<EditorView> {
+  return invoke<EditorView>("editor_open", session);
 }
 
-/** Reads the whole project document back. */
-export async function loadProject(path: string): Promise<unknown> {
-  return invoke<unknown>("load_project", { path });
+/** Applies one edit command; the returned state is the truth. */
+export async function editorApply(command: EditorCommand): Promise<EditorView> {
+  return invoke<EditorView>("editor_apply", { command });
+}
+
+export async function editorUndo(): Promise<EditorView> {
+  return invoke<EditorView>("editor_undo");
+}
+
+export async function editorRedo(): Promise<EditorView> {
+  return invoke<EditorView>("editor_redo");
+}
+
+/** The current state, without changing anything. */
+export async function editorState(): Promise<EditorView> {
+  return invoke<EditorView>("editor_state");
+}
+
+/** Writes the session's document to disk. The output size rides along
+ * because the preview footer can edit it. */
+export async function editorSave(frame?: { width: number; height: number }): Promise<void> {
+  return invoke<void>("editor_save", {
+    width: frame?.width ?? null,
+    height: frame?.height ?? null,
+  });
+}
+
+/** Closes the session, dropping its undo history. */
+export async function editorClose(): Promise<void> {
+  return invoke<void>("editor_close");
 }
 
 /** Recently opened projects, newest first, with vanished folders left out. */

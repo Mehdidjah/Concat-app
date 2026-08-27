@@ -8,6 +8,7 @@
 
 // Public so the integration tests can drive a real export; see tests/.
 pub mod export;
+mod editor_api;
 mod playback;
 mod projects;
 mod transcribe;
@@ -547,6 +548,7 @@ pub fn run() {
             app.manage(transcribe::TranscribeState(std::sync::Arc::new(
                 std::sync::Mutex::new(None),
             )));
+            app.manage(editor_api::EditorState(std::sync::Mutex::new(None)));
             Ok(())
         })
         .plugin(tauri_plugin_opener::init())
@@ -571,6 +573,13 @@ pub fn run() {
             forget_project,
             export_project,
             cancel_export,
+            editor_api::editor_open,
+            editor_api::editor_apply,
+            editor_api::editor_undo,
+            editor_api::editor_redo,
+            editor_api::editor_state,
+            editor_api::editor_save,
+            editor_api::editor_close,
             transcribe::transcriber_status,
             transcribe::set_transcriber_binary,
             transcribe::download_transcriber_model,

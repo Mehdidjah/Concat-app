@@ -1,5 +1,5 @@
-import type { Clip, Project } from "../lib/project";
-import { FONTS, WEIGHTS, type CustomFont, type TextStyle } from "../lib/text";
+import type { Clip, CustomFont } from "../lib/editor";
+import { FONTS, WEIGHTS, type TextStyle } from "../lib/text";
 import { Group, Slider, Toggle } from "./controls";
 import { Icon } from "./Icon";
 import { Empty } from "./Panel";
@@ -17,14 +17,19 @@ import { Empty } from "./Panel";
  */
 export function TextPanel({
   clip,
-  project,
+  fonts,
   onChange,
+  onCommit,
   onAddFont,
   onRemoveFont,
 }: {
   clip: Clip | null;
-  project: Project;
+  /** The project's custom fonts, with the UI's missing-file marks applied. */
+  fonts: CustomFont[];
+  /** Live change - echoed locally while the gesture is in flight. */
   onChange: (patch: Partial<Clip>) => void;
+  /** Gesture finished - the accumulated change becomes one engine command. */
+  onCommit: () => void;
   onAddFont: () => void;
   onRemoveFont: (family: string) => void;
 }) {
@@ -49,7 +54,14 @@ export function TextPanel({
     );
   };
 
-  const custom: CustomFont[] = project.fonts;
+  // Discrete controls commit immediately; sliders and the textarea echo
+  // live and commit on release or blur.
+  const commitSet = (patch: Partial<TextStyle>) => {
+    set(patch);
+    onCommit();
+  };
+
+  const custom: CustomFont[] = fonts;
 
   return (
     <div className="px-3 py-3">
@@ -57,6 +69,7 @@ export function TextPanel({
         <textarea
           value={style.content}
           onChange={(event) => set({ content: event.target.value })}
+          onBlur={onCommit}
           rows={3}
           spellCheck={false}
           placeholder="Your text"
@@ -69,7 +82,7 @@ export function TextPanel({
       <Group title="Font">
         <select
           value={style.fontFamily}
-          onChange={(event) => set({ fontFamily: event.target.value })}
+          onChange={(event) => commitSet({ fontFamily: event.target.value })}
           className="mb-2 w-full cursor-pointer rounded-lg border border-hairline-strong bg-sunken
                      px-2.5 py-2 text-[12px] text-primary outline-none focus:border-accent"
         >
@@ -140,7 +153,7 @@ export function TextPanel({
 
         <select
           value={style.fontWeight}
-          onChange={(event) => set({ fontWeight: Number(event.target.value) })}
+          onChange={(event) => commitSet({ fontWeight: Number(event.target.value) })}
           className="mb-3 w-full cursor-pointer rounded-lg border border-hairline-strong bg-sunken
                      px-2.5 py-2 text-[12px] text-primary outline-none focus:border-accent"
         >
@@ -161,14 +174,15 @@ export function TextPanel({
           // is. Points would be a lie: the frame can be any resolution.
           format={(value) => `${(value * 100).toFixed(1)}% of height`}
           onChange={(fontSize) => set({ fontSize })}
-          onReset={() => set({ fontSize: 0.09 })}
+          onCommit={onCommit}
+          onReset={() => commitSet({ fontSize: 0.09 })}
         />
 
-        <Toggle label="Italic" checked={style.italic} onChange={(italic) => set({ italic })} />
+        <Toggle label="Italic" checked={style.italic} onChange={(italic) => commitSet({ italic })} />
       </Group>
 
       <Group title="Colour">
-        <Swatch label="Fill" value={style.color} onChange={(color) => set({ color })} />
+        <Swatch label="Fill" value={style.color} onChange={(color) => commitSet({ color })} />
 
         <Slider
           label="Opacity"
@@ -177,27 +191,28 @@ export function TextPanel({
           max={1}
           format={(value) => `${Math.round(value * 100)}%`}
           onChange={(opacity) => set({ opacity })}
-          onReset={() => set({ opacity: 1 })}
+          onCommit={onCommit}
+          onReset={() => commitSet({ opacity: 1 })}
         />
 
         <Toggle
           label="Drop shadow"
           hint="Keeps text readable over bright footage."
           checked={style.shadow}
-          onChange={(shadow) => set({ shadow })}
+          onChange={(shadow) => commitSet({ shadow })}
         />
 
         <Toggle
           label="Plate behind text"
           hint="A solid block, for when a shadow is not enough."
           checked={style.background !== ""}
-          onChange={(on) => set({ background: on ? "#000000" : "" })}
+          onChange={(on) => commitSet({ background: on ? "#000000" : "" })}
         />
         {style.background !== "" && (
           <Swatch
             label="Plate colour"
             value={style.background}
-            onChange={(background) => set({ background })}
+            onChange={(background) => commitSet({ background })}
           />
         )}
       </Group>
@@ -211,13 +226,14 @@ export function TextPanel({
           step={0.005}
           format={(value) => (value === 0 ? "none" : `${(value * 100).toFixed(1)}%`)}
           onChange={(strokeWidth) => set({ strokeWidth })}
-          onReset={() => set({ strokeWidth: 0 })}
+          onCommit={onCommit}
+          onReset={() => commitSet({ strokeWidth: 0 })}
         />
         {style.strokeWidth > 0 && (
           <Swatch
             label="Outline colour"
             value={style.strokeColor}
-            onChange={(strokeColor) => set({ strokeColor })}
+            onChange={(strokeColor) => commitSet({ strokeColor })}
           />
         )}
       </Group>
@@ -229,7 +245,7 @@ export function TextPanel({
               key={align}
               type="button"
               aria-pressed={style.align === align}
-              onClick={() => set({ align })}
+              onClick={() => commitSet({ align })}
               className={`flex-1 cursor-pointer rounded-[6px] px-2 py-1 text-[11px] capitalize
                           transition-colors ${
                             style.align === align
@@ -250,7 +266,8 @@ export function TextPanel({
           step={0.05}
           format={(value) => value.toFixed(2)}
           onChange={(lineHeight) => set({ lineHeight })}
-          onReset={() => set({ lineHeight: 1.2 })}
+          onCommit={onCommit}
+          onReset={() => commitSet({ lineHeight: 1.2 })}
         />
 
         <Slider
@@ -261,7 +278,8 @@ export function TextPanel({
           step={0.005}
           format={(value) => `${value >= 0 ? "+" : ""}${(value * 100).toFixed(1)}%`}
           onChange={(tracking) => set({ tracking })}
-          onReset={() => set({ tracking: 0 })}
+          onCommit={onCommit}
+          onReset={() => commitSet({ tracking: 0 })}
         />
       </Group>
 
@@ -281,7 +299,8 @@ export function TextPanel({
             Math.abs(value) < 0.0025 ? "centred" : `${(value * 100).toFixed(1)}%`
           }
           onChange={(offsetX) => onChange({ offsetX })}
-          onReset={() => onChange({ offsetX: 0 })}
+          onCommit={onCommit}
+          onReset={() => { onChange({ offsetX: 0 }); onCommit(); }}
         />
         <Slider
           label="Vertical"
@@ -293,7 +312,8 @@ export function TextPanel({
             Math.abs(value) < 0.0025 ? "centred" : `${(value * 100).toFixed(1)}%`
           }
           onChange={(offsetY) => onChange({ offsetY })}
-          onReset={() => onChange({ offsetY: 0 })}
+          onCommit={onCommit}
+          onReset={() => { onChange({ offsetY: 0 }); onCommit(); }}
         />
       </Group>
     </div>

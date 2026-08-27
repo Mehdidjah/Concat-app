@@ -64,6 +64,7 @@ export function Slider({
   step = 0.01,
   format,
   onChange,
+  onCommit,
   onReset,
 }: {
   label: string;
@@ -74,6 +75,12 @@ export function Slider({
   /** Turns the raw value into what the reader sees. */
   format: (value: number) => string;
   onChange: (value: number) => void;
+  /**
+   * Fires when a gesture finishes: pointer released, typed value committed,
+   * or a keyboard step. The engine records one undo entry per commit, so
+   * this is what makes a drag one undoable edit instead of sixty.
+   */
+  onCommit?: () => void;
   /** Double-clicking the label returns the control to this value. */
   onReset?: () => void;
 }) {
@@ -114,6 +121,7 @@ export function Slider({
     const parsed = Number.parseFloat(typing.replace(",", "."));
     if (Number.isFinite(parsed)) onChange(clampStep(parsed));
     setTyping(null);
+    onCommit?.();
   };
 
   const fill = max === min ? 0 : Math.min(1, Math.max(0, (value - min) / (max - min)));
@@ -147,6 +155,9 @@ export function Slider({
             if (event.key === "ArrowLeft") onChange(clampStep(value - by));
             if (event.key === "ArrowRight") onChange(clampStep(value + by));
           }}
+          onKeyUp={(event) => {
+            if (event.key === "ArrowLeft" || event.key === "ArrowRight") onCommit?.();
+          }}
           onPointerDown={(event) => {
             event.currentTarget.setPointerCapture(event.pointerId);
             lastX.current = event.clientX;
@@ -155,6 +166,12 @@ export function Slider({
           }}
           onPointerMove={(event) => {
             if (event.currentTarget.hasPointerCapture(event.pointerId)) commit(event);
+          }}
+          onPointerUp={(event) => {
+            if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+              event.currentTarget.releasePointerCapture(event.pointerId);
+            }
+            onCommit?.();
           }}
           className="relative h-6 min-w-0 flex-1 cursor-ew-resize touch-none select-none
                      overflow-hidden rounded-md bg-sunken"
@@ -197,6 +214,7 @@ export function Slider({
               const by = (event.shiftKey ? step * 10 : step) * (event.key === "ArrowUp" ? 1 : -1);
               setTyping(null);
               onChange(clampStep(value + by));
+              onCommit?.();
             }
           }}
           className="h-6 w-14 shrink-0 rounded-md border border-hairline bg-sunken px-1.5

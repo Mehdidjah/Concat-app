@@ -37,7 +37,7 @@ src/
     Inspector.tsx      properties of the selection
   lib/
     engine.ts          the ONLY file that calls invoke(). Typed IPC boundary.
-    project.ts         the provisional edit model and its operations
+    editor.ts          type mirrors of the engine model, selectors, gesture echo
     transport.ts       the playback clock (follows the engine's position events)
     effects.ts         video effect & transition catalogue -> ffmpeg chains + live previews
     filters.ts         audio filter catalogue -> ffmpeg chains
@@ -55,12 +55,11 @@ src-tauri/
 - **The timeline is not DOM.** One canvas, one rAF loop. See decision 0002.
 - **No time arithmetic in TypeScript.** The engine works in exact rational
   seconds; JS numbers are `f64` and drift. `lib/time.ts` formats, nothing more.
-- **The UI does not own the edit — but it does today.** `lib/project.ts` holds
-  a provisional model because the engine has no project API yet. Every
-  operation there is a pure `(project, args) => project` function, which is the
-  shape an engine command will have, so the call sites survive the migration.
-  Do not let it grow an undo stack or a serialiser; those belong to the engine,
-  and building them twice is how the two copies drift apart.
+- **The engine owns the edit.** Every mutation is an `editor_apply` command
+  into `relay-project` (engine decision 0007); the UI renders the state that
+  comes back and holds only a transient gesture echo while a drag is in
+  flight. Undo, serialisation and the operations themselves live in Rust -
+  do not reintroduce model logic in TypeScript.
 
 ## Keyboard
 

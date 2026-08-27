@@ -1,4 +1,4 @@
-import { MAX_SCALE, MIN_SCALE, type Clip } from "../lib/project";
+import { MAX_SCALE, MIN_SCALE, type Clip } from "../lib/editor";
 import { Group, Slider, Toggle } from "./controls";
 import { Icon } from "./Icon";
 import { Empty } from "./Panel";
@@ -48,10 +48,14 @@ function formatDecibels(decibels: number): string {
 export function AdjustPanel({
   clip,
   onChange,
+  onCommit,
   onSpeedChange,
 }: {
   clip: Clip | null;
+  /** Live change - echoed locally while the gesture is in flight. */
   onChange: (patch: Partial<Clip>) => void;
+  /** Gesture finished - the accumulated change becomes one engine command. */
+  onCommit: () => void;
   /** Separate, because changing speed also rescales the clip's duration. */
   onSpeedChange: (speed: number) => void;
 }) {
@@ -82,8 +86,9 @@ export function AdjustPanel({
             max={MAX_SCALE}
             step={0.01}
             format={(value) => `${Math.round(value * 100)}%`}
-            onReset={() => onChange({ scale: 1 })}
+            onReset={() => { onChange({ scale: 1 }); onCommit(); }}
             onChange={(scale) => onChange({ scale })}
+            onCommit={onCommit}
           />
           <Slider
             label="Position X"
@@ -92,8 +97,9 @@ export function AdjustPanel({
             max={1}
             step={0.005}
             format={(value) => `${Math.round(value * 100)}%`}
-            onReset={() => onChange({ offsetX: 0 })}
+            onReset={() => { onChange({ offsetX: 0 }); onCommit(); }}
             onChange={(offsetX) => onChange({ offsetX })}
+            onCommit={onCommit}
           />
           <Slider
             label="Position Y"
@@ -102,8 +108,9 @@ export function AdjustPanel({
             max={1}
             step={0.005}
             format={(value) => `${Math.round(value * 100)}%`}
-            onReset={() => onChange({ offsetY: 0 })}
+            onReset={() => { onChange({ offsetY: 0 }); onCommit(); }}
             onChange={(offsetY) => onChange({ offsetY })}
+            onCommit={onCommit}
           />
           <Slider
             label="Rotation"
@@ -112,8 +119,9 @@ export function AdjustPanel({
             max={180}
             step={1}
             format={(value) => `${Math.round(value)}°`}
-            onReset={() => onChange({ rotation: 0 })}
+            onReset={() => { onChange({ rotation: 0 }); onCommit(); }}
             onChange={(rotation) => onChange({ rotation })}
+            onCommit={onCommit}
           />
           <Slider
             label="Opacity"
@@ -122,8 +130,9 @@ export function AdjustPanel({
             max={1}
             step={0.01}
             format={(value) => `${Math.round(value * 100)}%`}
-            onReset={() => onChange({ opacity: 1 })}
+            onReset={() => { onChange({ opacity: 1 }); onCommit(); }}
             onChange={(opacity) => onChange({ opacity })}
+            onCommit={onCommit}
           />
         </Group>
       )}
@@ -137,8 +146,9 @@ export function AdjustPanel({
           max={MAX_DB}
           step={0.5}
           format={formatDecibels}
-          onReset={() => onChange({ volume: 1 })}
+          onReset={() => { onChange({ volume: 1 }); onCommit(); }}
           onChange={(decibels) => onChange({ volume: fromDecibels(decibels) })}
+          onCommit={onCommit}
         />
       </Group>
       )}
@@ -158,14 +168,15 @@ export function AdjustPanel({
             max={16}
             step={0.05}
             format={(value) => `${value.toFixed(2)}x`}
-            onReset={() => onSpeedChange(1)}
+            onReset={() => { onSpeedChange(1); onCommit(); }}
             onChange={onSpeedChange}
+            onCommit={onCommit}
           />
           <Toggle
             label="Change pitch with speed"
             hint="Off keeps the voice where it is. On is tape behaviour - faster also means higher."
             checked={!clip.preservePitch}
-            onChange={(checked) => onChange({ preservePitch: !checked })}
+            onChange={(checked) => { onChange({ preservePitch: !checked }); onCommit(); }}
           />
         </Group>
       )}
@@ -179,8 +190,9 @@ export function AdjustPanel({
           max={fadeLimit}
           step={0.05}
           format={(value) => (value === 0 ? "none" : `${value.toFixed(2)}s`)}
-          onReset={() => onChange({ fadeIn: 0 })}
+          onReset={() => { onChange({ fadeIn: 0 }); onCommit(); }}
           onChange={(fadeIn) => onChange({ fadeIn })}
+          onCommit={onCommit}
         />
         <Slider
           label="Fade out"
@@ -189,8 +201,9 @@ export function AdjustPanel({
           max={fadeLimit}
           step={0.05}
           format={(value) => (value === 0 ? "none" : `${value.toFixed(2)}s`)}
-          onReset={() => onChange({ fadeOut: 0 })}
+          onReset={() => { onChange({ fadeOut: 0 }); onCommit(); }}
           onChange={(fadeOut) => onChange({ fadeOut })}
+          onCommit={onCommit}
         />
       </Group>
       )}

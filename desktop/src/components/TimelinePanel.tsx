@@ -6,8 +6,15 @@ import type {
 
 import type { MediaAssets, Peaks } from "../lib/assets";
 import { themeColor, type Theme } from "../lib/theme";
-import type { Clip, ClipMove, Project, TimelineMeta, Track } from "../lib/project";
-import { snapTime } from "../lib/project";
+import {
+  activeTimeline,
+  snapTime,
+  type Clip,
+  type ClipMove,
+  type EditorProject,
+  type TimelineMeta,
+  type Track,
+} from "../lib/editor";
 import { timecode } from "../lib/time";
 import { Icon, IconButton } from "./Icon";
 import { Menu, type MenuOption } from "./Menu";
@@ -149,8 +156,9 @@ export function TimelinePanel({
   onAddTimeline,
   onRenameTimeline,
   onRequestRemoveTimeline,
+  onGestureEnd,
 }: {
-  project: Project;
+  project: EditorProject;
   playhead: number;
   /** Drives the view following the playhead during playback. */
   playing: boolean;
@@ -199,6 +207,8 @@ export function TimelinePanel({
   onRenameTimeline: (timelineId: string, name: string) => void;
   /** Asks the app to confirm and delete; the panel never deletes directly. */
   onRequestRemoveTimeline: (timelineId: string) => void;
+  /** A move or trim drag finished; the echoed change becomes one command. */
+  onGestureEnd: () => void;
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const drag = useRef<DragState | null>(null);
@@ -212,9 +222,11 @@ export function TimelinePanel({
   scrollRef.current = onScroll;
   /** The header column, kept in step with the canvas's vertical offset. */
   const headerScroll = useRef<HTMLDivElement>(null);
+  // The lane and clip set being drawn: the active timeline's.
+  const timeline = activeTimeline(project);
   // Top-most track first on screen; the model stores them bottom-most first to
   // match the engine's compositing order.
-  const rows: Track[] = [...project.tracks].reverse();
+  const rows: Track[] = [...timeline.tracks].reverse();
 
   // Which lane a dragged bin item would land on. Tracks are untyped, so any
   // lane under the pointer is a valid target.
@@ -235,8 +247,8 @@ export function TimelinePanel({
 
   // The draw loop reads everything through this ref, so a prop change never
   // tears down and rebuilds the loop.
-  const view = useRef({ project, playhead, playing, secondsPerPixel, scrollLeft, trackScroll, frameRate, selected, rows, dropTrack, assets, tool });
-  view.current = { project, playhead, playing, secondsPerPixel, scrollLeft, trackScroll, frameRate, selected, rows, dropTrack, assets, tool };
+  const view = useRef({ project, timeline, playhead, playing, secondsPerPixel, scrollLeft, trackScroll, frameRate, selected, rows, dropTrack, assets, tool });
+  view.current = { project, timeline, playhead, playing, secondsPerPixel, scrollLeft, trackScroll, frameRate, selected, rows, dropTrack, assets, tool };
 
   const timeAt = useCallback(
     (clientX: number) => {
@@ -263,11 +275,11 @@ export function TimelinePanel({
       const track = rowAt(clientY);
       if (!track) return null;
       const time = timeAt(clientX);
-      const { project, secondsPerPixel } = view.current;
+      const { timeline, secondsPerPixel } = view.current;
 
       // Later clips draw on top, so search back to front.
-      for (let index = project.clips.length - 1; index >= 0; index -= 1) {
-        const clip = project.clips[index];
+      for (let index = timeline.clips.length - 1; index >= 0; index -= 1) {
+        const clip = timeline.clips[index];
         if (clip.trackId !== track.id) continue;
         if (time < clip.start || time > clip.start + clip.duration) continue;
 
@@ -365,7 +377,7 @@ export function TimelinePanel({
     context.rect(0, RULER_HEIGHT, width, Math.max(0, height - RULER_HEIGHT));
     context.clip();
 
-    for (const clip of state.project.clips) {
+    for (const clip of state.timeline.clips) {
       const rowIndex = state.rows.findIndex((track) => track.id === clip.trackId);
       if (rowIndex < 0) continue;
 
@@ -400,7 +412,7 @@ export function TimelinePanel({
         const overClip =
           localY > RULER_HEIGHT &&
           track !== undefined &&
-          state.project.clips.some(
+          state.timeline.clips.some(
             (clip) =>
               clip.trackId === track.id && time > clip.start && time < clip.start + clip.duration,
           );
@@ -534,7 +546,7 @@ export function TimelinePanel({
         grab: timeAt(event.clientX) - hit.clip.start,
         originRow,
         origins: moving.flatMap((clipId) => {
-          const clip = project.clips.find((candidate) => candidate.id === clipId);
+          const clip = timeline.clips.find((candidate) => candidate.id === clipId);
           if (!clip) return [];
           return [
             {
@@ -589,7 +601,7 @@ export function TimelinePanel({
     }
 
     if (state.kind === "move") {
-      const primary = project.clips.find((candidate) => candidate.id === state.primary);
+      const primary = timeline.clips.find((candidate) => candidate.id === state.primary);
       const anchor = state.origins.find((origin) => origin.clipId === state.primary);
       if (!primary || !anchor) return;
 
@@ -623,7 +635,7 @@ export function TimelinePanel({
       return;
     }
 
-    const clip = project.clips.find((candidate) => candidate.id === state.clipId);
+    const clip = timeline.clips.find((candidate) => candidate.id === state.clipId);
     if (!clip) return;
     if (state.kind === "trimStart") onTrimClip(clip.id, "start", time - clip.start);
     if (state.kind === "trimEnd") onTrimClip(clip.id, "end", time - (clip.start + clip.duration));
@@ -672,11 +684,15 @@ export function TimelinePanel({
     }
 
     const state = drag.current;
+    // A move or trim was echoing locally; releasing is what makes it real.
+    if (state?.kind === "move" || state?.kind === "trimStart" || state?.kind === "trimEnd") {
+      onGestureEnd();
+    }
     if (state?.kind === "marquee") {
       // Commit on release rather than live: selecting as the band sweeps looks
       // busy and makes a mistaken sweep hard to back out of.
       const band = normalise(state);
-      const caught = project.clips.filter((clip) => {
+      const caught = timeline.clips.filter((clip) => {
         const rect = clipRect(clip, rows, secondsPerPixel, scrollLeft, trackScroll);
         return rect !== null && intersects(band, rect);
       });

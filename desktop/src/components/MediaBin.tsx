@@ -12,7 +12,7 @@ import {
   type EffectCategory,
   type TransitionCategory,
 } from "../lib/effects";
-import type { MediaItem } from "../lib/project";
+import type { MediaItem } from "../lib/editor";
 import { themeColor } from "../lib/theme";
 import { shortDuration } from "../lib/time";
 import { ErrorNotice } from "./ErrorNotice";

@@ -933,6 +933,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "relay-project"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "relay-render"
 version = "0.1.0"
 dependencies = [
