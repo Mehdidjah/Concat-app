@@ -4,6 +4,7 @@ import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 
+import { ConfirmDialog } from "./components/ConfirmDialog";
 import { ContextMenu, type ContextTarget } from "./components/ContextMenu";
 import { ExportDialog, type ExportTitle } from "./components/ExportDialog";
 import { Icon } from "./components/Icon";
@@ -29,6 +30,7 @@ import { getTranscriberLanguage, getTranscriberModel } from "./lib/settings";
 import {
   addClip,
   addMedia,
+  addTimeline,
   addTrack,
   clipsAt,
   createProject,
@@ -47,13 +49,18 @@ import {
   reattachAudio,
   removeClips,
   removeFont,
+  removeMediaEverywhere,
+  removeTimeline,
   removeTrack,
+  renameTimeline,
   renameTrack,
   setClipSpeed,
   setClipTransform,
   setTrackFlag,
   snapTime,
   splitClip,
+  switchTimeline,
+  timelineClipCount,
   toMediaItem,
   updateClip,
   trimClip,
@@ -61,6 +68,7 @@ import {
   type Clip,
   type MediaItem,
   type Project,
+  type TimelineMeta,
 } from "./lib/project";
 import { buildChain } from "./lib/filters";
 import { familyForPath, registerFont } from "./lib/text";
@@ -266,6 +274,60 @@ function Editor({
       return next;
     });
   }, []);
+
+  // ── timelines ────────────────────────────────────────────────────────────
+  // The timeline awaiting delete confirmation, if any. Deleting throws away
+  // every clip on it and there is no undo, hence the prompt.
+  const [timelineToDelete, setTimelineToDelete] = useState<TimelineMeta | null>(null);
+  // Where the playhead was parked on each timeline, so switching back lands
+  // where you left off. Window state, deliberately not saved in the document.
+  const playheadByTimeline = useRef(new Map<string, number>());
+
+  const selectTimeline = useCallback(
+    (timelineId: string) => {
+      const current = latest.current.project;
+      if (timelineId === current.activeTimelineId) return;
+      const next = switchTimeline(current, timelineId);
+      if (next === current) return;
+
+      playheadByTimeline.current.set(current.activeTimelineId, latest.current.playhead);
+      setProject(next);
+      // The selection names clips on the timeline being left; keeping it
+      // would aim every clip operation at things no longer on screen.
+      setSelectedClipIds([]);
+      transport.pause();
+      transport.seek(playheadByTimeline.current.get(timelineId) ?? 0);
+    },
+    [transport],
+  );
+
+  const createTimeline = useCallback(() => {
+    const current = latest.current.project;
+    playheadByTimeline.current.set(current.activeTimelineId, latest.current.playhead);
+    setProject(addTimeline(current).project);
+    setSelectedClipIds([]);
+    transport.pause();
+    transport.seek(0);
+  }, [transport]);
+
+  /** Runs after the ConfirmDialog's Delete button; never called directly. */
+  const deleteTimelineNow = useCallback(
+    (timelineId: string) => {
+      const current = latest.current.project;
+      const wasActive = timelineId === current.activeTimelineId;
+      const next = removeTimeline(current, timelineId);
+      if (next === current) return;
+
+      playheadByTimeline.current.delete(timelineId);
+      setProject(next);
+      if (wasActive) {
+        setSelectedClipIds([]);
+        transport.pause();
+        transport.seek(playheadByTimeline.current.get(next.activeTimelineId) ?? 0);
+      }
+    },
+    [transport],
+  );
 
   /** Adds a font file to the project and makes it available immediately. */
   const pickFont = useCallback(async () => {
@@ -1095,13 +1157,7 @@ function Editor({
                 setSelectedClipIds([]);
               }}
               onImport={(paths) => void importPaths(paths)}
-              onRemove={(id) =>
-                setProject((current) => ({
-                  ...current,
-                  media: current.media.filter((item) => item.id !== id),
-                  clips: current.clips.filter((clip) => clip.mediaId !== id),
-                }))
-              }
+              onRemove={(id) => setProject((current) => removeMediaEverywhere(current, id))}
               onDismissError={() => setError(null)}
               onBeginDrag={beginMediaDrag}
               onAddToTimeline={addToTimeline}
@@ -1247,6 +1303,15 @@ function Editor({
               setProject((current) => setTrackFlag(current, trackId, flag, value))
             }
             clipTools={clipTools}
+            onSelectTimeline={selectTimeline}
+            onAddTimeline={createTimeline}
+            onRenameTimeline={(timelineId, name) =>
+              setProject((current) => renameTimeline(current, timelineId, name))
+            }
+            onRequestRemoveTimeline={(timelineId) => {
+              const meta = project.timelines.find((candidate) => candidate.id === timelineId);
+              if (meta) setTimelineToDelete(meta);
+            }}
             onAddTrack={() => setProject((current) => addTrack(current).project)}
             onRenameTrack={(trackId, name) =>
               setProject((current) => renameTrack(current, trackId, name))
@@ -1370,6 +1435,25 @@ function Editor({
 
       {context && <ContextMenu target={context} onClose={() => setContext(null)} />}
       {settingsOpen && <SettingsDialog onClose={() => setSettingsOpen(false)} />}
+
+      {timelineToDelete && (
+        <ConfirmDialog
+          title={`Delete "${timelineToDelete.name}"?`}
+          message={(() => {
+            const count = timelineClipCount(project, timelineToDelete.id);
+            return count > 0
+              ? `The ${count} clip${count === 1 ? "" : "s"} on this timeline will be lost. ` +
+                  "There is no undo."
+              : "The timeline is empty; nothing else is affected.";
+          })()}
+          confirmLabel="Delete timeline"
+          onConfirm={() => {
+            deleteTimelineNow(timelineToDelete.id);
+            setTimelineToDelete(null);
+          }}
+          onCancel={() => setTimelineToDelete(null)}
+        />
+      )}
 
       {toast && (
         <div

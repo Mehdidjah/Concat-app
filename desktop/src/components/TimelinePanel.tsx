@@ -6,7 +6,7 @@ import type {
 
 import type { MediaAssets, Peaks } from "../lib/assets";
 import { themeColor, type Theme } from "../lib/theme";
-import type { Clip, ClipMove, Project, Track } from "../lib/project";
+import type { Clip, ClipMove, Project, TimelineMeta, Track } from "../lib/project";
 import { snapTime } from "../lib/project";
 import { timecode } from "../lib/time";
 import { Icon, IconButton } from "./Icon";
@@ -145,6 +145,10 @@ export function TimelinePanel({
   onRenameTrack,
   onClipContextMenu,
   clipTools,
+  onSelectTimeline,
+  onAddTimeline,
+  onRenameTimeline,
+  onRequestRemoveTimeline,
 }: {
   project: Project;
   playhead: number;
@@ -190,6 +194,11 @@ export function TimelinePanel({
    * owns the selection logic; this panel only hangs it in the tray.
    */
   clipTools: MenuOption[][];
+  onSelectTimeline: (timelineId: string) => void;
+  onAddTimeline: () => void;
+  onRenameTimeline: (timelineId: string, name: string) => void;
+  /** Asks the app to confirm and delete; the panel never deletes directly. */
+  onRequestRemoveTimeline: (timelineId: string) => void;
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const drag = useRef<DragState | null>(null);
@@ -700,6 +709,30 @@ export function TimelinePanel({
 
   return (
     <div className={PANEL_SHELL}>
+      {/*
+        The timeline tabs. One per timeline in the project, like sequences in
+        any other editor: the active one is what the canvas below, the preview
+        and the exporter all show. Kept above the tool bar so switching reads
+        as changing documents, not changing tools.
+      */}
+      <div
+        className="thin-scroll flex h-8 shrink-0 items-center gap-1 overflow-x-auto
+                   border-b border-hairline px-1.5"
+      >
+        {project.timelines.map((timeline) => (
+          <TimelineTab
+            key={timeline.id}
+            timeline={timeline}
+            active={timeline.id === project.activeTimelineId}
+            closable={project.timelines.length > 1}
+            onSelect={onSelectTimeline}
+            onRename={onRenameTimeline}
+            onRequestRemove={onRequestRemoveTimeline}
+          />
+        ))}
+        <IconButton icon="plus" label="New timeline" size={7} onClick={onAddTimeline} />
+      </div>
+
       <Bar>
         <IconButton
           icon="select"
@@ -831,6 +864,91 @@ export function TimelinePanel({
         />
       </div>
     </div>
+  );
+}
+
+/**
+ * One timeline tab.
+ *
+ * Click switches, double-click renames in place (the same commit-on-blur rule
+ * as a track rename), and the close button asks the app to confirm - deleting
+ * a timeline throws away every clip on it, so the panel never does it
+ * directly.
+ */
+function TimelineTab({
+  timeline,
+  active,
+  closable,
+  onSelect,
+  onRename,
+  onRequestRemove,
+}: {
+  timeline: TimelineMeta;
+  active: boolean;
+  closable: boolean;
+  onSelect: (timelineId: string) => void;
+  onRename: (timelineId: string, name: string) => void;
+  onRequestRemove: (timelineId: string) => void;
+}) {
+  const [renaming, setRenaming] = useState(false);
+
+  if (renaming) {
+    return (
+      <input
+        autoFocus
+        defaultValue={timeline.name}
+        spellCheck={false}
+        onFocus={(event) => event.currentTarget.select()}
+        onBlur={(event) => {
+          onRename(timeline.id, event.target.value);
+          setRenaming(false);
+        }}
+        onKeyDown={(event) => {
+          if (event.key === "Enter") event.currentTarget.blur();
+          if (event.key === "Escape") {
+            event.currentTarget.value = timeline.name;
+            event.currentTarget.blur();
+          }
+        }}
+        className="w-28 shrink-0 rounded bg-sunken px-1.5 py-0.5 text-xs text-primary
+                   outline-none ring-1 ring-accent"
+      />
+    );
+  }
+
+  return (
+    <span
+      role="tab"
+      aria-selected={active}
+      title={active ? timeline.name : `Switch to ${timeline.name}`}
+      onClick={() => onSelect(timeline.id)}
+      onDoubleClick={() => setRenaming(true)}
+      className={`group flex max-w-44 shrink-0 cursor-pointer items-center gap-1 rounded-md
+                  px-2 py-0.5 text-xs transition-colors ${
+                    active
+                      ? "bg-active text-primary"
+                      : "text-secondary hover:bg-hover hover:text-primary"
+                  }`}
+    >
+      <span className="truncate">{timeline.name}</span>
+      {closable && (
+        <button
+          type="button"
+          aria-label={`Delete ${timeline.name}`}
+          title={`Delete ${timeline.name}`}
+          onClick={(event) => {
+            // The x must not also switch tabs: deleting an inactive timeline
+            // should not first drag the editor onto it.
+            event.stopPropagation();
+            onRequestRemove(timeline.id);
+          }}
+          className="invisible shrink-0 cursor-pointer rounded p-0.5 text-tertiary
+                     transition-colors hover:bg-danger-soft hover:text-danger group-hover:visible"
+        >
+          <Icon name="close" size={10} />
+        </button>
+      )}
+    </span>
   );
 }
 

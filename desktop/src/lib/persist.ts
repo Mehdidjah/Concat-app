@@ -17,15 +17,34 @@ import { defaultTextStyle, type CustomFont, type TextStyle } from "./text";
 /** Bumped only when a change cannot be absorbed by defaulting. */
 const DOCUMENT_VERSION = 1;
 
+/** One timeline, as the file stores it. */
+export interface TimelineDocument {
+  id: string;
+  name: string;
+  tracks: Track[];
+  clips: Clip[];
+}
+
 export interface ProjectDocument {
   relay: string;
   version: number;
   name: string;
   video: { width: number; height: number; rateNum: number; rateDen: number };
   media: MediaItem[];
+  /**
+   * The ACTIVE timeline's lanes and clips, duplicated out of `timelines`.
+   *
+   * Deliberate redundancy: a build that predates multiple timelines reads
+   * exactly these two fields, so a new document still opens there - showing
+   * the timeline that was active, which is the least surprising slice of the
+   * project to survive a downgrade.
+   */
   tracks: Track[];
   clips: Clip[];
   fonts: CustomFont[];
+  /** Every timeline, in tab order. The source of truth on load. */
+  timelines: TimelineDocument[];
+  activeTimelineId: string;
 }
 
 export function toDocument(session: ProjectSession, project: Project): ProjectDocument {
@@ -43,6 +62,14 @@ export function toDocument(session: ProjectSession, project: Project): ProjectDo
     tracks: project.tracks,
     clips: project.clips,
     fonts: project.fonts,
+    timelines: project.timelines.map((meta) => {
+      const content =
+        meta.id === project.activeTimelineId
+          ? { tracks: project.tracks, clips: project.clips }
+          : (project.shelved[meta.id] ?? { tracks: [], clips: [] });
+      return { id: meta.id, name: meta.name, tracks: content.tracks, clips: content.clips };
+    }),
+    activeTimelineId: project.activeTimelineId,
   };
 }
 
@@ -95,27 +122,28 @@ export function fromDocument(raw: unknown): Project | null {
       })
     : [];
 
-  const tracks: Track[] = Array.isArray(document.tracks)
-    ? document.tracks.flatMap((entry) => {
-        if (typeof entry !== "object" || entry === null) return [];
-        const track = entry as Record<string, unknown>;
-        if (typeof track.id !== "string") return [];
-        return [
-          {
-            id: track.id,
-            name: text(track.name, track.id),
-            visible: flag(track.visible, true),
-            muted: flag(track.muted, false),
-          },
-        ];
-      })
-    : [];
-
-  const known = new Set(tracks.map((track) => track.id));
   const mediaIds = new Set(media.map((item) => item.id));
 
-  const clips: Clip[] = Array.isArray(document.clips)
-    ? document.clips.flatMap((entry) => {
+  const readTracks = (raw: unknown): Track[] =>
+    Array.isArray(raw)
+      ? raw.flatMap((entry) => {
+          if (typeof entry !== "object" || entry === null) return [];
+          const track = entry as Record<string, unknown>;
+          if (typeof track.id !== "string") return [];
+          return [
+            {
+              id: track.id,
+              name: text(track.name, track.id),
+              visible: flag(track.visible, true),
+              muted: flag(track.muted, false),
+            },
+          ];
+        })
+      : [];
+
+  const readClips = (raw: unknown, known: Set<string>): Clip[] =>
+    Array.isArray(raw)
+      ? raw.flatMap((entry) => {
         if (typeof entry !== "object" || entry === null) return [];
         const clip = entry as Record<string, unknown>;
         if (typeof clip.id !== "string") return [];
@@ -196,13 +224,74 @@ export function fromDocument(raw: unknown): Project | null {
       })
     : [];
 
-  // A file with no tracks at all is not something to open silently as empty.
-  if (tracks.length === 0) return null;
+  // The `timelines` array is the source of truth when it is present and
+  // usable; a file from before multiple timelines existed has only the flat
+  // tracks/clips, which load as the single timeline they always were.
+  interface ParsedTimeline {
+    id: string;
+    name: string;
+    tracks: Track[];
+    clips: Clip[];
+  }
+  const parsed: ParsedTimeline[] = [];
+  if (Array.isArray(document.timelines)) {
+    for (const entry of document.timelines) {
+      if (typeof entry !== "object" || entry === null) continue;
+      const timeline = entry as Record<string, unknown>;
+      if (typeof timeline.id !== "string") continue;
+      // A second timeline with the same id could only come from a hand-edited
+      // file; keeping the first is the same rule the id re-mint applies.
+      if (parsed.some((existing) => existing.id === timeline.id)) continue;
+      const timelineTracks = readTracks(timeline.tracks);
+      // A timeline with no lanes has nowhere to put anything; skip it rather
+      // than open a dead tab.
+      if (timelineTracks.length === 0) continue;
+      parsed.push({
+        id: timeline.id,
+        name: text(timeline.name, "Timeline"),
+        tracks: timelineTracks,
+        clips: readClips(timeline.clips, new Set(timelineTracks.map((track) => track.id))),
+      });
+    }
+  }
+  if (parsed.length === 0) {
+    const tracks = readTracks(document.tracks);
+    // A file with no tracks at all is not something to open silently as empty.
+    if (tracks.length === 0) return null;
+    parsed.push({
+      id: "TL1",
+      name: "Timeline 1",
+      tracks,
+      clips: readClips(document.clips, new Set(tracks.map((track) => track.id))),
+    });
+  }
+
+  const activeId =
+    typeof document.activeTimelineId === "string" &&
+    parsed.some((timeline) => timeline.id === document.activeTimelineId)
+      ? document.activeTimelineId
+      : parsed[0].id;
+  const active = parsed.find((timeline) => timeline.id === activeId) ?? parsed[0];
+
+  const shelved: Record<string, { tracks: Track[]; clips: Clip[] }> = {};
+  for (const timeline of parsed) {
+    if (timeline.id !== active.id) {
+      shelved[timeline.id] = { tracks: timeline.tracks, clips: timeline.clips };
+    }
+  }
 
   // The restored ids were minted by an earlier session; the counter must move
   // past them - and any baked-in duplicates must be re-minted - before
   // anything new is added, or identities collide.
-  return adoptProject({ media, tracks, clips, fonts });
+  return adoptProject({
+    media,
+    fonts,
+    tracks: active.tracks,
+    clips: active.clips,
+    timelines: parsed.map((timeline) => ({ id: timeline.id, name: timeline.name })),
+    activeTimelineId: active.id,
+    shelved,
+  });
 }
 
 /**

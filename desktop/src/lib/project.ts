@@ -179,9 +179,26 @@ export interface Clip {
   text?: TextStyle;
 }
 
+/**
+ * One timeline's identity. The content lives either at the top of the project
+ * (the active timeline) or in `shelved` (everything else) - see `Project`.
+ */
+export interface TimelineMeta {
+  id: string;
+  name: string;
+}
+
+/** The parked content of an inactive timeline. */
+export interface ShelvedTimeline {
+  tracks: Track[];
+  clips: Clip[];
+}
+
 export interface Project {
   media: MediaItem[];
+  /** The ACTIVE timeline's lanes. */
   tracks: Track[];
+  /** The ACTIVE timeline's clips. */
   clips: Clip[];
   /**
    * Font files the user added, by path.
@@ -191,6 +208,22 @@ export interface Project {
    * the composition silently changes.
    */
   fonts: CustomFont[];
+  /**
+   * Every timeline in the project, in tab order. Always at least one, and
+   * always includes the active one.
+   *
+   * The active timeline's tracks and clips live at the top of the project -
+   * exactly where they always did - and only *inactive* timelines keep their
+   * content in `shelved`. That invariant is the whole design: every edit
+   * operation in this file, and every reader from the draw loop to the
+   * exporter, already works on `project.tracks`/`project.clips`, so "which
+   * timeline am I editing" is decided in exactly one place (the switch) and
+   * nowhere else has to know timelines exist.
+   */
+  timelines: TimelineMeta[];
+  activeTimelineId: string;
+  /** Content of every inactive timeline, by timeline id. Never the active one. */
+  shelved: Record<string, ShelvedTimeline>;
 }
 
 /** Fallback length for media whose container reports no duration. */
@@ -236,28 +269,51 @@ export function adoptProject(project: Project): Project {
   for (const item of project.media) consider(item.id);
   for (const track of project.tracks) consider(track.id);
   for (const clip of project.clips) consider(clip.id);
+  for (const meta of project.timelines) consider(meta.id);
+  for (const shelf of Object.values(project.shelved)) {
+    for (const track of shelf.tracks) consider(track.id);
+    for (const clip of shelf.clips) consider(clip.id);
+  }
   if (highest > counter) counter = highest;
 
-  const reMint = <T extends { id: string }>(items: T[], prefix: string): T[] => {
-    const seen = new Set<string>();
-    return items.map((item) => {
+  const reMint = <T extends { id: string }>(items: T[], prefix: string, seen: Set<string>): T[] =>
+    items.map((item) => {
       if (!seen.has(item.id)) {
         seen.add(item.id);
         return item;
       }
       return { ...item, id: nextId(prefix) };
     });
+
+  // Track and clip ids must be unique across *every* timeline, not just within
+  // one - the shared sets are what catches a duplicate that spans two. The
+  // active timeline goes first, so on a collision it is the shelved copy that
+  // gets re-minted, never the one on screen.
+  const seenTracks = new Set<string>();
+  const seenClips = new Set<string>();
+  const active = {
+    tracks: reMint(project.tracks, "t", seenTracks),
+    clips: reMint(project.clips, "c", seenClips),
   };
+  const shelved: Record<string, ShelvedTimeline> = {};
+  for (const [timelineId, shelf] of Object.entries(project.shelved)) {
+    shelved[timelineId] = {
+      tracks: reMint(shelf.tracks, "t", seenTracks),
+      clips: reMint(shelf.clips, "c", seenClips),
+    };
+  }
 
   return {
     ...project,
-    media: reMint(project.media, "m"),
-    tracks: reMint(project.tracks, "t"),
-    clips: reMint(project.clips, "c"),
+    media: reMint(project.media, "m", new Set()),
+    timelines: reMint(project.timelines, "tl", new Set()),
+    tracks: active.tracks,
+    clips: active.clips,
+    shelved,
   };
 }
 
-/** A project with four empty lanes. */
+/** A project with one timeline of four empty lanes. */
 export function createProject(): Project {
   return {
     media: [],
@@ -271,6 +327,148 @@ export function createProject(): Project {
       muted: false,
     })),
     clips: [],
+    timelines: [{ id: "TL1", name: "Timeline 1" }],
+    activeTimelineId: "TL1",
+    shelved: {},
+  };
+}
+
+/**
+ * Four fresh lanes for a brand-new timeline.
+ *
+ * Minted ids rather than the first timeline's static `T1..T4`: track ids must
+ * be unique across the whole project, or `adoptProject`'s duplicate sweep
+ * would re-mint one timeline's lanes and orphan every clip on them.
+ */
+function freshLanes(): Track[] {
+  return [1, 2, 3, 4].map((number) => ({
+    id: nextId("t"),
+    name: `Track ${number}`,
+    visible: true,
+    muted: false,
+  }));
+}
+
+/**
+ * Adds a timeline and switches to it.
+ *
+ * Numbered from the highest number already in a timeline name, the same rule
+ * `addTrack` uses, so deleting Timeline 2 and adding another does not produce
+ * a second Timeline 3.
+ */
+export function addTimeline(project: Project): { project: Project; timelineId: string } {
+  const highest = project.timelines.reduce((best, meta) => {
+    const number = Number.parseInt(meta.name.replace(/\D+/g, ""), 10);
+    return Number.isFinite(number) ? Math.max(best, number) : best;
+  }, 0);
+
+  const meta: TimelineMeta = { id: nextId("tl"), name: `Timeline ${highest + 1}` };
+  return {
+    project: {
+      ...project,
+      timelines: [...project.timelines, meta],
+      shelved: {
+        ...project.shelved,
+        [project.activeTimelineId]: { tracks: project.tracks, clips: project.clips },
+      },
+      activeTimelineId: meta.id,
+      tracks: freshLanes(),
+      clips: [],
+    },
+    timelineId: meta.id,
+  };
+}
+
+/**
+ * Makes another timeline the one being edited.
+ *
+ * The current content is parked in `shelved` and the target's content becomes
+ * the project's tracks and clips - after which every operation in this file
+ * works on the new timeline without knowing a switch happened.
+ */
+export function switchTimeline(project: Project, timelineId: string): Project {
+  if (timelineId === project.activeTimelineId) return project;
+  const target = project.shelved[timelineId];
+  if (!target || !project.timelines.some((meta) => meta.id === timelineId)) return project;
+
+  const shelved = {
+    ...project.shelved,
+    [project.activeTimelineId]: { tracks: project.tracks, clips: project.clips },
+  };
+  delete shelved[timelineId];
+
+  return {
+    ...project,
+    activeTimelineId: timelineId,
+    tracks: target.tracks,
+    clips: target.clips,
+    shelved,
+  };
+}
+
+/**
+ * Removes a timeline and everything on it.
+ *
+ * Refuses to remove the last one, the same rule as `removeTrack` and for the
+ * same reason: an editor with nowhere to put a clip is not a recoverable
+ * state. Deleting the active timeline switches to a neighbour first, so there
+ * is always something on screen afterwards.
+ */
+export function removeTimeline(project: Project, timelineId: string): Project {
+  if (project.timelines.length <= 1) return project;
+  const index = project.timelines.findIndex((meta) => meta.id === timelineId);
+  if (index < 0) return project;
+
+  let base = project;
+  if (timelineId === project.activeTimelineId) {
+    const neighbour = project.timelines[index + 1] ?? project.timelines[index - 1];
+    base = switchTimeline(project, neighbour.id);
+  }
+
+  const shelved = { ...base.shelved };
+  delete shelved[timelineId];
+  return {
+    ...base,
+    timelines: base.timelines.filter((meta) => meta.id !== timelineId),
+    shelved,
+  };
+}
+
+/** Renames a timeline. An empty or whitespace-only name is ignored. */
+export function renameTimeline(project: Project, timelineId: string, name: string): Project {
+  const trimmed = name.trim();
+  if (!trimmed) return project;
+  return {
+    ...project,
+    timelines: project.timelines.map((meta) =>
+      meta.id === timelineId ? { ...meta, name: trimmed } : meta,
+    ),
+  };
+}
+
+/** How many clips a timeline holds, active or shelved. For the delete prompt. */
+export function timelineClipCount(project: Project, timelineId: string): number {
+  if (timelineId === project.activeTimelineId) return project.clips.length;
+  return project.shelved[timelineId]?.clips.length ?? 0;
+}
+
+/**
+ * Removes a bin item and every clip cut from it, on every timeline.
+ *
+ * All timelines, not just the active one: a shelved clip whose media is gone
+ * would linger as a dead reference until the next reload silently dropped it.
+ */
+export function removeMediaEverywhere(project: Project, mediaId: string): Project {
+  const purge = (clips: Clip[]) => clips.filter((clip) => clip.mediaId !== mediaId);
+  const shelved: Record<string, ShelvedTimeline> = {};
+  for (const [timelineId, shelf] of Object.entries(project.shelved)) {
+    shelved[timelineId] = { tracks: shelf.tracks, clips: purge(shelf.clips) };
+  }
+  return {
+    ...project,
+    media: project.media.filter((item) => item.id !== mediaId),
+    clips: purge(project.clips),
+    shelved,
   };
 }
 
