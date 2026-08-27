@@ -244,6 +244,102 @@ fn filmstrip(path: &str, count: u32, height: u32) -> Result<Vec<u8>, String> {
     Ok(output.stdout)
 }
 
+/// A small poster frame for one project, for the launch screen's recents.
+///
+/// Grabbed from the earliest visible clip of the project's active timeline
+/// and cached as `cache/preview.jpg` in the project folder; the cache is
+/// fresh as long as it is newer than `relay.json`, so an edited project gets
+/// a new poster on its next appearance and an untouched one costs a stat.
+#[tauri::command]
+async fn project_preview(path: String) -> Result<tauri::ipc::Response, String> {
+    tauri::async_runtime::spawn_blocking(move || poster_frame(&path))
+        .await
+        .map_err(|error| format!("preview task failed: {error}"))?
+        .map(tauri::ipc::Response::new)
+}
+
+fn poster_frame(project: &str) -> Result<Vec<u8>, String> {
+    let root = std::path::Path::new(project);
+    let manifest = root.join("relay.json");
+    let cached = root.join("cache").join("preview.jpg");
+
+    let fresh = match (std::fs::metadata(&cached), std::fs::metadata(&manifest)) {
+        (Ok(cache), Ok(source)) => match (cache.modified(), source.modified()) {
+            (Ok(cache), Ok(source)) => cache >= source,
+            _ => false,
+        },
+        _ => false,
+    };
+    if fresh {
+        if let Ok(bytes) = std::fs::read(&cached) {
+            return Ok(bytes);
+        }
+    }
+
+    let text = std::fs::read_to_string(&manifest)
+        .map_err(|error| format!("could not read {}: {error}", manifest.display()))?;
+    let document: serde_json::Value =
+        serde_json::from_str(&text).map_err(|error| format!("not a project: {error}"))?;
+
+    // The flat top-level clips are the active timeline - exactly the frame
+    // the user last saw. The earliest clip with a picture is the poster.
+    let clips = document.get("clips").and_then(|value| value.as_array());
+    let media = document.get("media").and_then(|value| value.as_array());
+    let (clips, media) = match (clips, media) {
+        (Some(clips), Some(media)) => (clips, media),
+        _ => return Err("the project has no timeline to preview".to_owned()),
+    };
+
+    let mut poster: Option<(f64, String, f64, bool)> = None;
+    for clip in clips {
+        let kind = clip.get("kind").and_then(|value| value.as_str()).unwrap_or("");
+        if kind != "video" && kind != "image" {
+            continue;
+        }
+        let start = clip.get("start").and_then(|value| value.as_f64()).unwrap_or(0.0);
+        if poster.as_ref().is_some_and(|(best, ..)| *best <= start) {
+            continue;
+        }
+        let media_id = clip.get("mediaId").and_then(|value| value.as_str()).unwrap_or("");
+        let Some(path) = media.iter().find_map(|item| {
+            (item.get("id").and_then(|value| value.as_str()) == Some(media_id))
+                .then(|| item.get("path").and_then(|value| value.as_str()))
+                .flatten()
+        }) else {
+            continue;
+        };
+        let source_start = clip.get("sourceStart").and_then(|value| value.as_f64()).unwrap_or(0.0);
+        poster = Some((start, path.to_owned(), source_start, kind == "image"));
+    }
+
+    let Some((_, media_path, source_start, is_still)) = poster else {
+        return Err("nothing on the timeline to preview".to_owned());
+    };
+
+    let mut command = std::process::Command::new(relay_media::ffmpeg());
+    command.args(["-hide_banner", "-nostdin", "-loglevel", "error"]);
+    // Seeking a still means seeking a one-frame stream to nowhere.
+    if !is_still && source_start > 0.0 {
+        command.args(["-ss", &format!("{source_start:.3}")]);
+    }
+    let output = command
+        .args(["-i", &media_path])
+        .args(["-frames:v", "1", "-vf", "scale=480:-2", "-q:v", "4", "-f", "mjpeg", "pipe:1"])
+        .output()
+        .map_err(|error| format!("could not run ffmpeg: {error}"))?;
+
+    if !output.status.success() || output.stdout.is_empty() {
+        return Err(format!("no poster frame for {media_path}"));
+    }
+
+    // Best effort: a failed cache write only means regenerating next launch.
+    if let Some(parent) = cached.parent() {
+        let _ = std::fs::create_dir_all(parent);
+        let _ = std::fs::write(&cached, &output.stdout);
+    }
+    Ok(output.stdout)
+}
+
 /// The audible clip set, replaced wholesale whenever the timeline changes.
 ///
 /// Decoding, mixing and the playback clock all live in the engine - see
@@ -468,6 +564,7 @@ pub fn run() {
             write_artwork,
             create_project,
             open_project,
+            project_preview,
             save_project,
             load_project,
             recent_projects,

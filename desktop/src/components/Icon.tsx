@@ -350,8 +350,9 @@ export function IconButton({
         ? "text-success hover:bg-hover"
         : "text-primary hover:bg-hover";
 
-  const on =
-    tone === "go" ? "bg-success text-on-accent" : "bg-tool-active-bg text-tool-active";
+  // Active is the one lime everywhere - including the transport's play
+  // button, which used to fill green and read as a different system.
+  const on = "bg-tool-active-bg text-tool-active";
 
   return (
     <button

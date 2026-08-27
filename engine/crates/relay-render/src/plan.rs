@@ -79,7 +79,9 @@ pub fn plan_frame(timeline: &Timeline, time: Rational) -> FramePlan {
             media: clip.media.path.clone(),
             source_time,
             speed: clip.speed,
-            opacity: clip.opacity.clamp(0.0, 1.0),
+            // The fade ramp multiplies in here, so the compositor only ever
+            // sees a per-frame opacity - it has no idea fades exist.
+            opacity: (clip.opacity * clip.video_fade_factor(time)).clamp(0.0, 1.0),
             transform: clip.transform,
         });
     }
@@ -166,6 +168,19 @@ mod tests {
         }
 
         assert!(plan_frame(&timeline, seconds(1)).is_empty());
+    }
+
+    #[test]
+    fn a_video_fade_ramps_the_planned_opacity() {
+        let mut timeline = Timeline::new(640, 360, FrameRate::THIRTY);
+        let track = timeline.add_track(Track::new("V1", TrackKind::Video));
+        let mut clip = Clip::new(MediaRef::new("a.mp4"), seconds(0), seconds(4));
+        clip.video_fade_in = Rational::from_int(2);
+        timeline.add_clip(track, clip).expect("track exists");
+
+        assert_eq!(plan_frame(&timeline, seconds(0)).layers[0].opacity, 0.0);
+        assert_eq!(plan_frame(&timeline, seconds(1)).layers[0].opacity, 0.5);
+        assert_eq!(plan_frame(&timeline, seconds(3)).layers[0].opacity, 1.0);
     }
 
     #[test]

@@ -115,6 +115,15 @@ export async function forgetProject(path: string): Promise<void> {
   return invoke<void>("forget_project", { path });
 }
 
+/**
+ * A poster frame for one project, as JPEG bytes - the launch screen's
+ * thumbnail. Cached in the project folder by the host; throws when the
+ * project has nothing visual to show, which the caller treats as "no art".
+ */
+export async function projectPreview(path: string): Promise<ArrayBuffer> {
+  return invoke<ArrayBuffer>("project_preview", { path });
+}
+
 /** One clip, flattened for the exporter. */
 export interface ExportClip {
   path: string;
@@ -145,6 +154,11 @@ export interface ExportClip {
   rotation: number;
   /** Blend strength over the layers beneath, 1 being solid. */
   opacity: number;
+  /** FFmpeg video filter chain from the Effects tab, or empty for none. */
+  videoFilterChain: string;
+  /** The transition on the cut into this clip, or null. The host resolves the
+   * pair by adjacency and does all the overlap arithmetic. */
+  transition: { kind: string; duration: number } | null;
   /** The source's pixel size, when known - what makes an aspect-correct fit possible. */
   mediaWidth: number | null;
   mediaHeight: number | null;

@@ -20,6 +20,7 @@
  * acceptable once it is. See docs/decisions/0004.
  */
 
+import type { AppliedEffect, ClipTransition } from "./effects";
 import type { MediaSummary } from "./engine";
 import type { ClipFilter } from "./filters";
 import { defaultTextStyle, type CustomFont, type TextStyle } from "./text";
@@ -156,6 +157,22 @@ export interface Clip {
    * limiter is a different sound from the reverse.
    */
   filters: ClipFilter[];
+
+  /**
+   * Video effects, applied in order. The visual sibling of `filters`: one
+   * FFmpeg chain built in `lib/effects.ts`, run by the exporter at decode.
+   */
+  videoEffects: AppliedEffect[];
+
+  /**
+   * The transition on the cut *into* this clip, if any.
+   *
+   * On the incoming clip rather than in a separate table because a transition
+   * has no life of its own: it exists exactly as long as this clip starts
+   * where another one ends. Moving the clips apart orphans it, and an
+   * orphaned transition renders as a plain cut rather than an error.
+   */
+  transitionIn?: ClipTransition;
 
   /**
    * True when this video clip's embedded audio is left out of preview and
@@ -560,6 +577,7 @@ export function addClip(
     speed: 1,
     preservePitch: true,
     filters: [],
+    videoEffects: [],
   };
 
   return { project: { ...project, clips: [...project.clips, clip] }, clipId: clip.id };
@@ -610,6 +628,7 @@ export function addTextClip(
     speed: 1,
     preservePitch: true,
     filters: [],
+    videoEffects: [],
     text,
   };
 
@@ -800,6 +819,9 @@ export function detachAudio(project: Project, clipId: string): Project {
     trackId,
     kind: "audio",
     filters: [...clip.filters],
+    // Sound has no picture: effects and transitions stay with the video clip.
+    videoEffects: [],
+    transitionIn: undefined,
     detachedFrom: clip.id,
     muted: undefined,
   };
@@ -855,7 +877,12 @@ export function splitClip(project: Project, clipId: string, time: number): Proje
     return project;
   }
 
-  const head: Clip = { ...clip, duration: offset, filters: [...clip.filters] };
+  const head: Clip = {
+    ...clip,
+    duration: offset,
+    filters: [...clip.filters],
+    videoEffects: [...clip.videoEffects],
+  };
   const tail: Clip = {
     ...clip,
     id: nextId("c"),
@@ -865,6 +892,11 @@ export function splitClip(project: Project, clipId: string, time: number): Proje
     // 2x clip the cut is twice as far into the file as it is into the clip.
     sourceStart: clip.sourceStart + offset * clip.speed,
     filters: [...clip.filters],
+    videoEffects: [...clip.videoEffects],
+    // The transition belongs to the cut at the original clip's start, which
+    // the head keeps. The split point is continuous material - a transition
+    // there would dissolve a frame into its own neighbour.
+    transitionIn: undefined,
   };
 
   return {
@@ -939,6 +971,29 @@ export function clipsOnTrack(project: Project, trackId: string): Clip[] {
  * occasionally refuse to rejoin a clip it had just cut.
  */
 const JOIN_EPSILON = 1e-6;
+
+/**
+ * The clip that ends exactly where this one starts, on the same track - the
+ * outgoing half of a cut. This is what a transition needs to exist: no
+ * preceding clip, no cut, nothing to transition across.
+ *
+ * A whole-frame tolerance rather than JOIN_EPSILON, because clips placed by
+ * dragging land wherever the pointer was; edges that *look* joined on the
+ * timeline should accept a transition.
+ */
+export function precedingClip(project: Project, clipId: string): Clip | null {
+  const clip = findClip(project, clipId);
+  if (!clip) return null;
+  return (
+    project.clips.find(
+      (other) =>
+        other.id !== clip.id &&
+        other.trackId === clip.trackId &&
+        other.kind !== "audio" &&
+        Math.abs(other.start + other.duration - clip.start) < 1 / 60,
+    ) ?? null
+  );
+}
 
 /**
  * Why these clips cannot be merged, or `null` if they can.

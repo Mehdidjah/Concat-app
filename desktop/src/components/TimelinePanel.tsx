@@ -716,8 +716,8 @@ export function TimelinePanel({
         as changing documents, not changing tools.
       */}
       <div
-        className="thin-scroll flex h-8 shrink-0 items-center gap-1 overflow-x-auto
-                   border-b border-hairline px-1.5"
+        className="thin-scroll flex h-8 shrink-0 items-end gap-0.5 overflow-x-auto
+                   overflow-y-hidden border-b border-hairline bg-sunken px-1.5 pt-1"
       >
         {project.timelines.map((timeline) => (
           <TimelineTab
@@ -730,7 +730,9 @@ export function TimelinePanel({
             onRequestRemove={onRequestRemoveTimeline}
           />
         ))}
-        <IconButton icon="plus" label="New timeline" size={7} onClick={onAddTimeline} />
+        <span className="self-center">
+          <IconButton icon="plus" label="New timeline" size={7} onClick={onAddTimeline} />
+        </span>
       </div>
 
       <Bar>
@@ -779,22 +781,30 @@ export function TimelinePanel({
           active={snap}
           onClick={() => onSnapChange(!snap)}
         />
-        <Divider />
-        <Menu
-          groups={clipTools}
-          trigger={(open) => (
-            <span
-              title="Audio & video tools"
-              className={`flex h-9 items-center gap-0.5 rounded-lg px-1.5 transition-colors
-                          duration-150 ${
-                            open ? "bg-tool-active-bg text-tool-active" : "text-primary hover:bg-hover"
-                          }`}
-            >
-              <Icon name="waveform" size={16} />
-              <Icon name="chevronDown" size={11} />
-            </span>
-          )}
-        />
+        {/* Only while a sound-capable clip is selected: a title has nothing
+            to detach or transcribe, and a menu of grey rows teaches nothing. */}
+        {clipTools.length > 0 && (
+          <>
+            <Divider />
+            <Menu
+              groups={clipTools}
+              trigger={(open) => (
+                <span
+                  title="Audio & video tools"
+                  className={`flex h-9 items-center gap-0.5 rounded-lg px-1.5 transition-colors
+                              duration-150 ${
+                                open
+                                  ? "bg-tool-active-bg text-tool-active"
+                                  : "text-primary hover:bg-hover"
+                              }`}
+                >
+                  <Icon name="waveform" size={16} />
+                  <Icon name="chevronDown" size={11} />
+                </span>
+              )}
+            />
+          </>
+        )}
         <Divider />
         <IconButton icon="plus" label="Add track" onClick={onAddTrack} />
 
@@ -923,10 +933,14 @@ function TimelineTab({
       title={active ? timeline.name : `Switch to ${timeline.name}`}
       onClick={() => onSelect(timeline.id)}
       onDoubleClick={() => setRenaming(true)}
-      className={`group flex max-w-44 shrink-0 cursor-pointer items-center gap-1 rounded-md
-                  px-2 py-0.5 text-xs transition-colors ${
+      // Browser-tab shape: rounded top only, and the active tab overlaps the
+      // strip's bottom border by a pixel with the panel's own background, so
+      // it reads as one surface with the tray below rather than a pill
+      // floating above it.
+      className={`group -mb-px flex max-w-44 shrink-0 cursor-pointer items-center gap-1
+                  rounded-t-md px-2.5 py-1 text-xs transition-colors ${
                     active
-                      ? "bg-active text-primary"
+                      ? "border border-b-0 border-hairline bg-panel text-primary"
                       : "text-secondary hover:bg-hover hover:text-primary"
                   }`}
     >
@@ -1318,12 +1332,48 @@ function drawClip(
   context.fillStyle = palette.header;
   context.fillRect(x, y, drawWidth, CLIP_HEADER);
 
+  // An "fx" chip in the header when effects are live on the clip, so a styled
+  // clip is tellable from a plain one without opening a panel.
+  const liveEffects = clip.videoEffects.some((effect) => effect.enabled !== false);
+  const chipWidth = liveEffects && drawWidth > 60 ? 20 : 0;
+
   if (drawWidth > 30) {
     context.fillStyle = COLORS.clipText;
     context.font = LABEL_FONT;
     context.textBaseline = "middle";
-    const label = ellipsize(context, clip.name, drawWidth - 14);
+    const label = ellipsize(context, clip.name, drawWidth - 14 - chipWidth);
     if (label) context.fillText(label, x + 7, y + CLIP_HEADER / 2 + 0.5);
+  }
+
+  if (chipWidth > 0) {
+    context.fillStyle = "rgba(0,0,0,0.35)";
+    context.beginPath();
+    context.roundRect(x + drawWidth - chipWidth + 2, y + 2.5, chipWidth - 6, CLIP_HEADER - 5, 3);
+    context.fill();
+    context.fillStyle = COLORS.clipText;
+    context.font = '9px "Cabinet Grotesk", system-ui, sans-serif';
+    context.fillText("fx", x + drawWidth - chipWidth + 6, y + CLIP_HEADER / 2 + 0.5);
+  }
+
+  // A transition on the cut into this clip: a small wedge pair at the left
+  // edge, the mark every editor uses for "these two dissolve".
+  if (clip.transitionIn && drawWidth > 16) {
+    const size = Math.min(9, bodyHeight / 2);
+    const midY = bodyY + bodyHeight / 2;
+    context.fillStyle = "rgba(255,255,255,0.8)";
+    context.beginPath();
+    context.moveTo(x + 1, midY - size);
+    context.lineTo(x + 1 + size, midY);
+    context.lineTo(x + 1, midY + size);
+    context.closePath();
+    context.fill();
+    context.fillStyle = "rgba(255,255,255,0.45)";
+    context.beginPath();
+    context.moveTo(x + 1 + size, midY - size);
+    context.lineTo(x + 1, midY);
+    context.lineTo(x + 1 + size, midY + size);
+    context.closePath();
+    context.fill();
   }
 
   context.restore();

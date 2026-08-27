@@ -74,6 +74,19 @@ pub struct ExportClip {
     /// requests from a UI that predates it.
     #[serde(default = "unity")]
     pub opacity: f64,
+    /// FFmpeg *video* filter chain from the Effects tab, or empty. Applied at
+    /// decode, after scaling - see `DecodeOptions::filter_chain`.
+    #[serde(default)]
+    pub video_filter_chain: String,
+    /// The transition into this clip's cut, when the UI put one there. The
+    /// clip before it on the same track is found here, by adjacency - the UI
+    /// only says what it wants, never how to overlap decoders.
+    #[serde(default)]
+    pub transition: Option<TransitionSpec>,
+    /// Video opacity ramp up from the clip's start, in seconds. Set by
+    /// transition resolution below, never by the UI directly.
+    #[serde(default)]
+    pub video_fade_in: f64,
     /// The source's pixel size, when the UI knows it. What makes an
     /// aspect-correct decode possible - absent, the frame is filled edge to
     /// edge the way it always was.
@@ -81,6 +94,16 @@ pub struct ExportClip {
     pub media_width: Option<u32>,
     #[serde(default)]
     pub media_height: Option<u32>,
+}
+
+/// A transition on the cut into a clip.
+#[derive(Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct TransitionSpec {
+    /// "cross-fade", "fade-black" or "fade-white". Anything else is ignored.
+    pub kind: String,
+    /// Seconds the transition covers.
+    pub duration: f64,
 }
 
 fn yes() -> bool {
@@ -150,6 +173,131 @@ pub fn run(
     render(&request, Reporter { progress: &mut progress, cancel })
 }
 
+/// Turns per-cut transition requests into things the renderer already knows
+/// how to draw: overlapping clips, opacity ramps, and fade filters.
+///
+/// Track indices are doubled first, so an incoming cross-fade clip gets an
+/// odd lane of its own directly above the pair it dissolves over - stacking
+/// against every other track is preserved, and nothing else occupies odd
+/// lanes. Cuts are collected before anything mutates, so resolving one
+/// transition cannot unhook the adjacency test of the next.
+fn resolve_transitions(clips: &mut [ExportClip], rate: FrameRate) {
+    for clip in clips.iter_mut() {
+        clip.track *= 2;
+    }
+
+    let fps = rate.fps().as_f64();
+    let frame = 1.0 / fps;
+
+    struct Cut {
+        incoming: usize,
+        outgoing: usize,
+        kind: String,
+        duration: f64,
+    }
+    let mut cuts: Vec<Cut> = Vec::new();
+    for (incoming, clip) in clips.iter().enumerate() {
+        let Some(transition) = &clip.transition else { continue };
+        if clip.hidden || (clip.kind != "video" && clip.kind != "image") {
+            continue;
+        }
+        // The outgoing clip is whatever ends where this one starts, on the
+        // same lane. No match - the cut was edited apart - means the
+        // transition is silently orphaned, exactly like the UI treats it.
+        let outgoing = clips.iter().position(|other| {
+            !other.hidden
+                && (other.kind == "video" || other.kind == "image")
+                && other.track == clip.track
+                && (other.start + other.duration - clip.start).abs() < frame / 2.0
+        });
+        match outgoing {
+            Some(outgoing) if outgoing != incoming => cuts.push(Cut {
+                incoming,
+                outgoing,
+                kind: transition.kind.clone(),
+                duration: transition.duration.max(0.0),
+            }),
+            _ => {}
+        }
+    }
+
+    for cut in cuts {
+        match cut.kind.as_str() {
+            "cross-fade" => {
+                let (a_track, a_duration) = {
+                    let a = &clips[cut.outgoing];
+                    (a.track, a.duration)
+                };
+                let b = &mut clips[cut.incoming];
+
+                // The incoming clip extends backwards over the outgoing one,
+                // showing the source it has *before* its in-point - the
+                // handle, exactly what a dissolve consumes in any editor. No
+                // handle, shorter dissolve: the duration clamps to what
+                // actually exists rather than freezing or inventing frames.
+                let mut d = cut.duration.min(a_duration).min(b.duration);
+                if b.kind != "image" {
+                    d = d.min(b.source_start / b.speed.max(0.0625));
+                }
+                if d < frame {
+                    continue;
+                }
+                b.start -= d;
+                b.duration += d;
+                if b.kind != "image" {
+                    b.source_start -= d * b.speed;
+                }
+                b.video_fade_in = d;
+                // Sound rides the picture: the pre-roll fades in rather than
+                // arriving at full level a dissolve early.
+                b.fade_in = b.fade_in.max(d);
+                b.track = a_track + 1;
+            }
+            "fade-black" | "fade-white" => {
+                // Half the duration on each side of the cut, as fade filters
+                // at decode. Frame-based, because the decoder emits exactly
+                // one frame per output frame - so the fade lands on the same
+                // frames the timeline arithmetic says it covers.
+                let colour = if cut.kind == "fade-white" { ":color=white" } else { "" };
+                let half = cut.duration / 2.0;
+                {
+                    let a = &mut clips[cut.outgoing];
+                    let frames = ((half.min(a.duration) * fps).round() as i64).max(1);
+                    let total = (a.duration * fps).round() as i64;
+                    append_filter(
+                        &mut a.video_filter_chain,
+                        &format!(
+                            "fade=t=out:start_frame={}:nb_frames={frames}{colour}",
+                            (total - frames).max(0)
+                        ),
+                    );
+                }
+                {
+                    let b = &mut clips[cut.incoming];
+                    let frames = ((half.min(b.duration) * fps).round() as i64).max(1);
+                    append_filter(
+                        &mut b.video_filter_chain,
+                        &format!("fade=t=in:start_frame=0:nb_frames={frames}{colour}"),
+                    );
+                }
+            }
+            // A kind this build does not know renders as a plain cut rather
+            // than failing the export - the same degrade a missing effect
+            // filter must NOT get, because there the user styled the picture.
+            _ => {}
+        }
+    }
+}
+
+/// Appends one filter to a chain, comma-separated. Effects the user stacked
+/// come first; a transition fades the styled picture, not the raw one.
+fn append_filter(chain: &mut String, filter: &str) {
+    if !chain.is_empty() {
+        chain.push(',');
+    }
+    chain.push_str(filter);
+}
+
 /// Renders `request` and returns the path written.
 pub fn render(request: &ExportRequest, mut reporter: Reporter<'_>) -> Result<String, String> {
     if request.clips.is_empty() {
@@ -159,15 +307,19 @@ pub fn render(request: &ExportRequest, mut reporter: Reporter<'_>) -> Result<Str
     let rate = FrameRate::new(Rational::new(request.rate_num, request.rate_den));
     let output = PathBuf::from(&request.output);
 
+    // Transitions become overlaps, ramps and fade filters before anything
+    // else reads the clip list, so the picture and sound paths below never
+    // know transitions exist.
+    let mut resolved = request.clips.clone();
+    resolve_transitions(&mut resolved, rate);
+
     // Stills composite exactly like footage; they only differ in how they are
     // decoded, which is handled where the decoder is opened.
-    let visible: Vec<&ExportClip> = request
-        .clips
+    let visible: Vec<&ExportClip> = resolved
         .iter()
         .filter(|clip| (clip.kind == "video" || clip.kind == "image") && !clip.hidden)
         .collect();
-    let audible: Vec<&ExportClip> = request
-        .clips
+    let audible: Vec<&ExportClip> = resolved
         .iter()
         .filter(|clip| clip.kind == "audio" && !clip.muted)
         .collect();
@@ -176,8 +328,7 @@ pub fn render(request: &ExportRequest, mut reporter: Reporter<'_>) -> Result<Str
     // contributes to the mix as well as to the picture.
     let mut sound: Vec<&ExportClip> = audible;
     sound.extend(
-        request
-            .clips
+        resolved
             .iter()
             .filter(|clip| clip.kind == "video" && !clip.muted),
     );
@@ -193,8 +344,7 @@ pub fn render(request: &ExportRequest, mut reporter: Reporter<'_>) -> Result<Str
         })
     });
 
-    let timeline_end = request
-        .clips
+    let timeline_end = resolved
         .iter()
         .map(|clip| clip.start + clip.duration)
         .fold(0.0f64, f64::max);
@@ -270,7 +420,7 @@ fn render_picture(
     destination: &Path,
     reporter: &mut Reporter<'_>,
 ) -> Result<(), String> {
-    let (timeline, stills, decode_sizes) = build_timeline(request, rate, visible);
+    let (timeline, stills, decode_sizes, filter_chains) = build_timeline(request, rate, visible);
 
     let mut encoder = FfmpegEncoder::create(
         destination,
@@ -328,6 +478,13 @@ fn render_picture(
                         .starting_at(layer.source_time)
                         .scaled_to(decode_width, decode_height)
                         .at_rate(decode_rate);
+
+                    // Effects and transition fades, as one FFmpeg chain. The
+                    // decoder guards the frame size after it, so an effect
+                    // that resizes cannot shear the pipe.
+                    if let Some(chain) = filter_chains.get(&layer.clip) {
+                        options = options.filtered(chain.clone());
+                    }
 
                     // A still is a one-frame stream. Without looping it would
                     // contribute a single frame and then disappear.
@@ -403,10 +560,12 @@ fn build_timeline(
     Timeline,
     std::collections::HashSet<ClipId>,
     HashMap<ClipId, (u32, u32)>,
+    HashMap<ClipId, String>,
 ) {
     let mut timeline = Timeline::new(request.width, request.height, rate);
     let mut stills = std::collections::HashSet::new();
     let mut decode_sizes: HashMap<ClipId, (u32, u32)> = HashMap::new();
+    let mut filter_chains: HashMap<ClipId, String> = HashMap::new();
 
     let lanes = visible.iter().map(|clip| clip.track).max().unwrap_or(0) + 1;
     let tracks: Vec<_> = (0..lanes)
@@ -438,6 +597,9 @@ fn build_timeline(
             rotation: clip.rotation,
         };
         engine_clip.opacity = clip.opacity.clamp(0.0, 1.0) as f32;
+        // Quantised like every other time: the ramp must land on the same
+        // frame grid the overlap does, or the dissolve ends a frame early.
+        engine_clip.video_fade_in = quantise(clip.video_fade_in, rate);
 
         if let Some(id) = timeline.add_clip(tracks[clip.track], engine_clip) {
             if clip.kind == "image" {
@@ -446,10 +608,13 @@ fn build_timeline(
             if let Some(size) = fitted_size(request, clip) {
                 decode_sizes.insert(id, size);
             }
+            if !clip.video_filter_chain.is_empty() {
+                filter_chains.insert(id, clip.video_filter_chain.clone());
+            }
         }
     }
 
-    (timeline, stills, decode_sizes)
+    (timeline, stills, decode_sizes, filter_chains)
 }
 
 /// The source's contain-fitted size inside the output frame, or `None` when
@@ -469,4 +634,140 @@ fn fitted_size(request: &ExportRequest, clip: &ExportClip) -> Option<(u32, u32)>
 
 fn quantise(seconds: f64, rate: FrameRate) -> Rational {
     rate.time_of_frame((seconds * rate.fps().as_f64()).round().max(0.0) as i64)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn clip(kind: &str, track: usize, start: f64, duration: f64, source_start: f64) -> ExportClip {
+        ExportClip {
+            path: format!("{kind}.mp4"),
+            kind: kind.to_owned(),
+            start,
+            duration,
+            source_start,
+            track,
+            hidden: false,
+            muted: false,
+            volume: 1.0,
+            fade_in: 0.0,
+            fade_out: 0.0,
+            filter_chain: String::new(),
+            speed: 1.0,
+            preserve_pitch: true,
+            scale: 1.0,
+            offset_x: 0.0,
+            offset_y: 0.0,
+            rotation: 0.0,
+            opacity: 1.0,
+            video_filter_chain: String::new(),
+            transition: None,
+            video_fade_in: 0.0,
+            media_width: None,
+            media_height: None,
+        }
+    }
+
+    fn spec(kind: &str, duration: f64) -> Option<TransitionSpec> {
+        Some(TransitionSpec { kind: kind.to_owned(), duration })
+    }
+
+    #[test]
+    fn a_cross_fade_overlaps_the_incoming_clip_on_its_own_lane() {
+        let mut clips = vec![clip("video", 0, 0.0, 4.0, 0.0), clip("video", 0, 4.0, 4.0, 2.0)];
+        clips[1].transition = spec("cross-fade", 1.0);
+        resolve_transitions(&mut clips, FrameRate::THIRTY);
+
+        let b = &clips[1];
+        assert_eq!(b.start, 3.0, "extends backwards over the cut");
+        assert_eq!(b.duration, 5.0);
+        assert_eq!(b.source_start, 1.0, "consumes the handle before the in-point");
+        assert_eq!(b.video_fade_in, 1.0);
+        assert_eq!(b.fade_in, 1.0, "sound rides the picture");
+        assert_eq!(clips[0].track, 0, "outgoing stays on its doubled lane");
+        assert_eq!(b.track, 1, "incoming sits directly above it");
+    }
+
+    #[test]
+    fn a_cross_fade_clamps_to_the_available_handle() {
+        let mut clips = vec![clip("video", 0, 0.0, 4.0, 0.0), clip("video", 0, 4.0, 4.0, 0.25)];
+        clips[1].transition = spec("cross-fade", 2.0);
+        resolve_transitions(&mut clips, FrameRate::THIRTY);
+
+        // Only a quarter second of source exists before the in-point, so that
+        // is the whole dissolve.
+        assert_eq!(clips[1].video_fade_in, 0.25);
+        assert_eq!(clips[1].source_start, 0.0);
+        assert_eq!(clips[1].start, 3.75);
+    }
+
+    #[test]
+    fn a_still_needs_no_handle_to_dissolve() {
+        let mut clips = vec![clip("video", 0, 0.0, 4.0, 0.0), clip("image", 0, 4.0, 4.0, 0.0)];
+        clips[1].transition = spec("cross-fade", 1.0);
+        resolve_transitions(&mut clips, FrameRate::THIRTY);
+        assert_eq!(clips[1].video_fade_in, 1.0);
+        assert_eq!(clips[1].source_start, 0.0, "a still has no source clock to rewind");
+    }
+
+    #[test]
+    fn a_fade_to_black_splits_across_the_cut_as_fade_filters() {
+        let mut clips = vec![clip("video", 0, 0.0, 4.0, 0.0), clip("video", 0, 4.0, 4.0, 0.0)];
+        clips[1].transition = spec("fade-black", 1.0);
+        resolve_transitions(&mut clips, FrameRate::THIRTY);
+
+        // Half a second each side at 30fps is 15 frames.
+        assert_eq!(clips[0].video_filter_chain, "fade=t=out:start_frame=105:nb_frames=15");
+        assert_eq!(clips[1].video_filter_chain, "fade=t=in:start_frame=0:nb_frames=15");
+        assert_eq!(clips[1].start, 4.0, "nothing moves for an edge fade");
+    }
+
+    #[test]
+    fn a_fade_to_white_names_its_colour() {
+        let mut clips = vec![clip("video", 0, 0.0, 2.0, 0.0), clip("video", 0, 2.0, 2.0, 0.0)];
+        clips[1].transition = spec("fade-white", 0.5);
+        resolve_transitions(&mut clips, FrameRate::THIRTY);
+        assert!(clips[0].video_filter_chain.ends_with(":color=white"));
+        assert!(clips[1].video_filter_chain.contains("t=in"));
+    }
+
+    #[test]
+    fn transition_fades_append_after_the_clips_own_effects() {
+        let mut clips = vec![clip("video", 0, 0.0, 2.0, 0.0), clip("video", 0, 2.0, 2.0, 0.0)];
+        clips[1].video_filter_chain = "hue=s=0".to_owned();
+        clips[1].transition = spec("fade-black", 0.5);
+        resolve_transitions(&mut clips, FrameRate::THIRTY);
+        assert!(
+            clips[1].video_filter_chain.starts_with("hue=s=0,fade=t=in"),
+            "was: {}",
+            clips[1].video_filter_chain
+        );
+    }
+
+    #[test]
+    fn a_transition_with_no_adjacent_clip_is_orphaned_not_fatal() {
+        let mut clips = vec![clip("video", 0, 0.0, 2.0, 0.0), clip("video", 0, 5.0, 2.0, 0.0)];
+        clips[1].transition = spec("cross-fade", 1.0);
+        resolve_transitions(&mut clips, FrameRate::THIRTY);
+        assert_eq!(clips[1].start, 5.0);
+        assert_eq!(clips[1].video_fade_in, 0.0);
+    }
+
+    #[test]
+    fn track_indices_are_doubled_for_everyone() {
+        let mut clips = vec![clip("video", 0, 0.0, 2.0, 0.0), clip("audio", 3, 0.0, 2.0, 0.0)];
+        resolve_transitions(&mut clips, FrameRate::THIRTY);
+        assert_eq!(clips[0].track, 0);
+        assert_eq!(clips[1].track, 6);
+    }
+
+    #[test]
+    fn an_unknown_transition_kind_renders_as_a_plain_cut() {
+        let mut clips = vec![clip("video", 0, 0.0, 2.0, 0.0), clip("video", 0, 2.0, 2.0, 0.0)];
+        clips[1].transition = spec("wipe-left", 1.0);
+        resolve_transitions(&mut clips, FrameRate::THIRTY);
+        assert_eq!(clips[1].start, 2.0);
+        assert!(clips[1].video_filter_chain.is_empty());
+    }
 }

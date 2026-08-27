@@ -70,6 +70,8 @@ export function MediaBin({
   onDismissError,
   onBeginDrag,
   onAddToTimeline,
+  onApplyEffect,
+  onApplyTransition,
   assets,
   dropping,
 }: {
@@ -92,6 +94,10 @@ export function MediaBin({
   /** Called once the pointer has moved far enough to count as a drag. */
   onBeginDrag: (item: MediaItem, clientX: number, clientY: number) => void;
   onAddToTimeline: (mediaId: string) => void;
+  /** Applies an effect to the selected clip; the app validates and explains. */
+  onApplyEffect: (effectId: string) => void;
+  /** Puts a transition on the selected clip's cut; the app validates. */
+  onApplyTransition: (transitionId: string) => void;
 }) {
   const [tab, setTab] = useState<LibraryTab>("media");
   const [effectCategory, setEffectCategory] = useState<EffectCategory>("basic");
@@ -181,8 +187,10 @@ export function MediaBin({
               />
             )}
             {tab === "text" && <TextPage onAddText={onAddText} />}
-            {tab === "transitions" && <TransitionsPage category={transitionCategory} />}
-            {tab === "effects" && <EffectsPage category={effectCategory} />}
+            {tab === "transitions" && (
+              <TransitionsPage category={transitionCategory} onApply={onApplyTransition} />
+            )}
+            {tab === "effects" && <EffectsPage category={effectCategory} onApply={onApplyEffect} />}
           </div>
         </div>
       </div>
@@ -510,46 +518,73 @@ function TextPage({ onAddText }: { onAddText: () => void }) {
 // ── the transitions and effects pages ────────────────────────────────────────
 
 /**
- * A catalogue card that cannot be used yet.
- *
- * The "Soon" badge is the honest version of a disabled drag: the catalogue is
- * browsable so the library's shape is settled, but nothing pretends to work
- * before the engine can render it.
+ * A catalogue card. Clickable when the thing it offers actually works;
+ * otherwise the "Soon" badge stays - the honest version of a disabled drag,
+ * kept for the motion transitions the engine cannot animate yet.
  */
 function CatalogueCard({
   label,
   blurb,
+  onApply,
   children,
 }: {
   label: string;
   blurb: string;
+  /** Absent means not implemented yet - the card browses but does nothing. */
+  onApply?: () => void;
   children: ReactNode;
 }) {
   return (
-    <li title={`${label}\n${blurb}\nNot available yet`} className="select-none">
+    <li
+      title={`${label}\n${blurb}\n${onApply ? "Click to apply to the selected clip" : "Not available yet"}`}
+      onClick={onApply}
+      className={`group select-none ${onApply ? "cursor-pointer" : ""}`}
+    >
       <div
-        className="relative flex aspect-video items-center justify-center overflow-hidden
-                   rounded-lg bg-sunken ring-1 ring-hairline"
+        className={`relative flex aspect-video items-center justify-center overflow-hidden
+                    rounded-lg bg-sunken ring-1 ring-hairline ${
+                      onApply ? "transition-shadow group-hover:ring-hairline-strong" : ""
+                    }`}
       >
         {children}
-        <span
-          className="absolute bottom-1 right-1 rounded bg-black/55 px-1 py-px font-technical
-                     text-[10px] text-white"
-        >
-          Soon
-        </span>
+        {onApply ? (
+          <span
+            className="invisible absolute bottom-1 right-1 flex h-5 w-5 items-center
+                       justify-center rounded bg-black/55 text-white group-hover:visible"
+          >
+            <Icon name="plus" size={11} />
+          </span>
+        ) : (
+          <span
+            className="absolute bottom-1 right-1 rounded bg-black/55 px-1 py-px font-technical
+                       text-[10px] text-white"
+          >
+            Soon
+          </span>
+        )}
       </div>
       <span className="mt-1 block truncate text-[11px] leading-tight text-secondary">{label}</span>
     </li>
   );
 }
 
-function TransitionsPage({ category }: { category: TransitionCategory }) {
+function TransitionsPage({
+  category,
+  onApply,
+}: {
+  category: TransitionCategory;
+  onApply: (transitionId: string) => void;
+}) {
   const visible = TRANSITIONS.filter((transition) => transition.category === category);
   return (
     <ul className={`${CARD_GRID} pt-2`}>
       {visible.map((transition) => (
-        <CatalogueCard key={transition.id} label={transition.label} blurb={transition.blurb}>
+        <CatalogueCard
+          key={transition.id}
+          label={transition.label}
+          blurb={transition.blurb}
+          onApply={transition.implemented ? () => onApply(transition.id) : undefined}
+        >
           <Icon name="transition" size={22} strokeWidth={1.5} className="text-tertiary" />
         </CatalogueCard>
       ))}
@@ -557,12 +592,23 @@ function TransitionsPage({ category }: { category: TransitionCategory }) {
   );
 }
 
-function EffectsPage({ category }: { category: EffectCategory }) {
+function EffectsPage({
+  category,
+  onApply,
+}: {
+  category: EffectCategory;
+  onApply: (effectId: string) => void;
+}) {
   const visible = EFFECTS.filter((effect) => effect.category === category);
   return (
     <ul className={`${CARD_GRID} pt-2`}>
       {visible.map((effect) => (
-        <CatalogueCard key={effect.id} label={effect.label} blurb={effect.blurb}>
+        <CatalogueCard
+          key={effect.id}
+          label={effect.label}
+          blurb={effect.blurb}
+          onApply={() => onApply(effect.id)}
+        >
           <span className="absolute inset-0" style={{ background: effect.swatch }} aria-hidden />
           <Icon name="sparkles" size={20} strokeWidth={1.5} className="relative text-white/85" />
         </CatalogueCard>

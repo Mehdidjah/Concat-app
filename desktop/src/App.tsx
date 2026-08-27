@@ -71,6 +71,11 @@ import {
   type TimelineMeta,
 } from "./lib/project";
 import { buildChain } from "./lib/filters";
+import {
+  buildEffectChain,
+  findTransition,
+} from "./lib/effects";
+import { precedingClip } from "./lib/project";
 import { familyForPath, registerFont } from "./lib/text";
 import { fromDocument, toDocument } from "./lib/persist";
 import { useTheme, type Theme } from "./lib/theme";
@@ -275,6 +280,79 @@ function Editor({
     });
   }, []);
 
+  // ── effects and transitions ──────────────────────────────────────────────
+
+  /**
+   * Applies one effect from the bin's Effects page to the selected clip.
+   *
+   * The card is clickable whatever is selected, so the misses have to explain
+   * themselves: no selection, or a selection that has no picture, each get a
+   * toast saying what to do instead of nothing happening.
+   */
+  const applyEffect = useCallback((effectId: string) => {
+    const current = latest.current.project;
+    const selected = selectedClipIds.length === 1 ? findClip(current, selectedClipIds[0]) : null;
+    if (!selected || (selected.kind !== "video" && selected.kind !== "image")) {
+      setToast({
+        id: Date.now(),
+        message: "Select a video or image clip on the timeline first",
+        failed: true,
+      });
+      return;
+    }
+    setProject((project) =>
+      updateClip(project, selected.id, {
+        videoEffects: [...selected.videoEffects, { id: effectId, params: {} }],
+      }),
+    );
+    setRightTab("effects");
+  }, [selectedClipIds]);
+
+  /**
+   * Puts a transition on the selected clip's cut.
+   *
+   * A transition needs a cut: a clip ending exactly where the selected one
+   * starts. Without one there is nothing to dissolve across, and saying so
+   * beats silently attaching a transition that renders as nothing.
+   */
+  const applyTransition = useCallback(
+    (transitionId: string) => {
+      const definition = findTransition(transitionId);
+      if (!definition?.implemented) return;
+
+      const current = latest.current.project;
+      const selected = selectedClipIds.length === 1 ? findClip(current, selectedClipIds[0]) : null;
+      if (!selected || (selected.kind !== "video" && selected.kind !== "image")) {
+        setToast({
+          id: Date.now(),
+          message: "Select the incoming clip - the one after the cut - first",
+          failed: true,
+        });
+        return;
+      }
+      if (!precedingClip(current, selected.id)) {
+        setToast({
+          id: Date.now(),
+          message: "No clip ends where this one starts - transitions need a cut",
+          failed: true,
+        });
+        return;
+      }
+      setProject((project) =>
+        updateClip(project, selected.id, {
+          transitionIn: { id: transitionId, duration: definition.defaultDuration },
+        }),
+      );
+      setRightTab("effects");
+      setToast({
+        id: Date.now(),
+        message: `${definition.label} added to the cut`,
+        failed: false,
+      });
+    },
+    [selectedClipIds],
+  );
+
   // ── timelines ────────────────────────────────────────────────────────────
   // The timeline awaiting delete confirmation, if any. Deleting throws away
   // every clip on it and there is no undo, hence the prompt.
@@ -476,14 +554,18 @@ function Editor({
   /**
    * The audio/video tools dropdown in the timeline tray.
    *
-   * The same operations the clip context menu offers, but discoverable: a
-   * right-click menu only teaches people who already right-click. Items are
-   * disabled rather than hidden, so the tool's existence does not depend on
-   * what happens to be selected.
+   * Shown only while a clip that can carry sound is selected - a title has no
+   * audio to detach or transcribe, and offering the menu anyway would be a
+   * drawer of permanently grey items. Within an eligible selection, items are
+   * still disabled rather than hidden, so what the tool *could* do stays
+   * visible.
    */
   const clipTools = useMemo(() => {
     const clip = selectedClipIds.length === 1 ? findClip(project, selectedClipIds[0]) : null;
     const media = clip ? findMedia(project, clip.mediaId) : null;
+
+    // No sound-capable clip, no menu: the panel hides the whole dropdown.
+    if (!clip || (clip.kind !== "video" && clip.kind !== "audio")) return [];
 
     const hasSound = Boolean(
       clip && (clip.kind === "video" || clip.kind === "audio") && media?.hasAudio,
@@ -968,6 +1050,14 @@ function Editor({
             offsetY: clip.offsetY,
             rotation: clip.rotation,
             opacity: clip.opacity,
+            videoFilterChain: buildEffectChain(clip.videoEffects) ?? "",
+            // The transition rides along only while its cut still exists;
+            // the host would orphan it anyway, but not sending it keeps the
+            // request honest about what will render.
+            transition:
+              clip.transitionIn && precedingClip(project, clip.id)
+                ? { kind: clip.transitionIn.id, duration: clip.transitionIn.duration }
+                : null,
             mediaWidth: media.width,
             mediaHeight: media.height,
           },
@@ -975,6 +1065,65 @@ function Editor({
       }),
     [project],
   );
+
+  /**
+   * A cross-fade window the playhead currently sits inside: the incoming
+   * clip's pre-roll, faded in over the outgoing picture. This is the same
+   * overlap the export builds - the ghost plays the handle before the
+   * incoming clip's in-point, ramping from zero to solid at the cut.
+   */
+  const previewGhost = useMemo(() => {
+    for (const clip of project.clips) {
+      const transition = clip.transitionIn;
+      if (!transition || transition.id !== "cross-fade") continue;
+      if (clip.kind !== "video" && clip.kind !== "image") continue;
+      if (!precedingClip(project, clip.id)) continue;
+
+      // The dissolve clamps to the source handle, like the export does.
+      const handle = clip.kind === "image" ? Infinity : clip.sourceStart / Math.max(0.0625, clip.speed);
+      const d = Math.min(transition.duration, handle);
+      const cut = clip.start;
+      if (d <= 0 || playhead < cut - d || playhead >= cut) continue;
+
+      const media = findMedia(project, clip.mediaId);
+      if (!media) continue;
+      return {
+        clipId: clip.id,
+        path: media.path,
+        time: Math.max(0, clip.sourceStart - (cut - playhead) * clip.speed),
+        speed: clip.speed,
+        opacity: 1 - (cut - playhead) / d,
+      };
+    }
+    return null;
+  }, [project, playhead]);
+
+  /**
+   * The fade-to-colour wash over the monitor while the playhead crosses a
+   * fade-black/white transition. Mirrors the exporter's shape exactly: half
+   * the duration out on the old clip, half in on the new one, meeting fully
+   * opaque at the cut.
+   */
+  const previewVeil = useMemo(() => {
+    for (const clip of project.clips) {
+      const transition = clip.transitionIn;
+      if (!transition) continue;
+      if (transition.id !== "fade-black" && transition.id !== "fade-white") continue;
+      if (!precedingClip(project, clip.id)) continue;
+
+      const half = transition.duration / 2;
+      const cut = clip.start;
+      if (playhead < cut - half || playhead > cut + half) continue;
+
+      const opacity =
+        playhead <= cut ? (playhead - (cut - half)) / half : (cut + half - playhead) / half;
+      return {
+        color: transition.id === "fade-white" ? "#ffffff" : "#000000",
+        opacity: Math.min(1, Math.max(0, opacity)),
+      };
+    }
+    return null;
+  }, [project, playhead]);
 
   // Titles for the exporter. They have no file to hand over - the dialog
   // rasterises them into full-frame PNGs at export time - so all it needs is
@@ -1161,6 +1310,8 @@ function Editor({
               onDismissError={() => setError(null)}
               onBeginDrag={beginMediaDrag}
               onAddToTimeline={addToTimeline}
+              onApplyEffect={applyEffect}
+              onApplyTransition={applyTransition}
             />
           </div>
 
@@ -1191,6 +1342,9 @@ function Editor({
                   : null
               }
               opacity={previewClip?.opacity ?? 1}
+              effects={previewClip?.videoEffects ?? null}
+              ghost={previewGhost}
+              veil={previewVeil}
               mediaSize={
                 previewMedia && previewMedia.width && previewMedia.height
                   ? { width: previewMedia.width, height: previewMedia.height }

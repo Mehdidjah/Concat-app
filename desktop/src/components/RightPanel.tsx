@@ -1,12 +1,14 @@
-import type { Clip, MediaItem, Project } from "../lib/project";
+import type { AppliedEffect, ClipTransition } from "../lib/effects";
 import type { ClipFilter } from "../lib/filters";
+import { precedingClip, type Clip, type MediaItem, type Project } from "../lib/project";
 import { AdjustPanel } from "./AdjustPanel";
+import { EffectsPanel } from "./EffectsPanel";
 import { FiltersPanel } from "./FiltersPanel";
 import { Inspector } from "./Inspector";
 import { Panel } from "./Panel";
 import { TextPanel } from "./TextPanel";
 
-export type RightTab = "details" | "adjust" | "filters" | "text";
+export type RightTab = "details" | "adjust" | "filters" | "effects" | "text";
 
 /**
  * The tab strip follows the selection.
@@ -23,6 +25,13 @@ const DETAILS_TABS: { id: RightTab; label: string }[] = [{ id: "details", label:
 const CLIP_TABS: { id: RightTab; label: string }[] = [
   { id: "adjust", label: "Adjust" },
   { id: "filters", label: "Filters" },
+  { id: "effects", label: "Effects" },
+];
+
+// A still has picture but no sound, so it gets Effects but not Filters.
+const IMAGE_TABS: { id: RightTab; label: string }[] = [
+  { id: "adjust", label: "Adjust" },
+  { id: "effects", label: "Effects" },
 ];
 
 const TEXT_TABS: { id: RightTab; label: string }[] = [{ id: "text", label: "Text" }];
@@ -67,7 +76,13 @@ export function RightPanel({
   onRemoveFont: (family: string) => void;
 }) {
   const isText = clip?.kind === "text";
-  const tabs = clip ? (isText ? TEXT_TABS : CLIP_TABS) : DETAILS_TABS;
+  const tabs = clip
+    ? isText
+      ? TEXT_TABS
+      : clip.kind === "image"
+        ? IMAGE_TABS
+        : CLIP_TABS
+    : DETAILS_TABS;
 
   // A selection change can leave the strip showing a tab that is no longer
   // offered, so the active tab falls back to the first one that exists.
@@ -123,6 +138,16 @@ export function RightPanel({
         <FiltersPanel
           clip={clip}
           onChange={(filters: ClipFilter[]) => onChangeClip({ filters })}
+        />
+      )}
+      {active === "effects" && (
+        <EffectsPanel
+          clip={clip}
+          hasPreceding={clip ? precedingClip(project, clip.id) !== null : false}
+          onChangeEffects={(videoEffects: AppliedEffect[]) => onChangeClip({ videoEffects })}
+          onChangeTransition={(transitionIn: ClipTransition | undefined) =>
+            onChangeClip({ transitionIn })
+          }
         />
       )}
     </Panel>

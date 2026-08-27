@@ -74,6 +74,15 @@ pub struct DecodeOptions {
     /// footage of arbitrary length, and the caller stops pulling when the clip
     /// ends.
     pub looping: bool,
+    /// Extra FFmpeg video filters, applied after any scaling. Empty for none.
+    ///
+    /// This is how video effects reach the pixels: the same "one FFmpeg
+    /// string" design the audio filters use, so there is no second effect
+    /// implementation to drift from. The decoder appends a final scale back
+    /// to the requested size, because raw video has no framing - a chain that
+    /// changed the frame size would not fail, it would silently shear every
+    /// frame after the first.
+    pub filter_chain: Option<String>,
 }
 
 impl DecodeOptions {
@@ -106,6 +115,31 @@ impl DecodeOptions {
         self.looping = true;
         self
     }
+
+    /// Applies `chain` after scaling. See [`DecodeOptions::filter_chain`].
+    pub fn filtered(mut self, chain: impl Into<String>) -> Self {
+        let chain = chain.into();
+        self.filter_chain = (!chain.is_empty()).then_some(chain);
+        self
+    }
+}
+
+/// The `-vf` argument for these options, or `None` when nothing filters.
+///
+/// Scale-to-fit first, then the effect chain at output resolution (cheaper
+/// than filtering the source size, and parameters mean the same thing at
+/// every export size), then the guard scale that pins the frame size the pipe
+/// was promised.
+fn video_filter(options: &DecodeOptions, width: u32, height: u32) -> Option<String> {
+    let mut parts: Vec<String> = Vec::new();
+    if options.size.is_some() {
+        parts.push(format!("scale={width}:{height}"));
+    }
+    if let Some(chain) = &options.filter_chain {
+        parts.push(chain.clone());
+        parts.push(format!("scale={width}:{height}"));
+    }
+    (!parts.is_empty()).then(|| parts.join(","))
 }
 
 /// Decodes a file by piping raw RGBA out of an `ffmpeg` child process.
@@ -161,8 +195,8 @@ impl FfmpegDecoder {
         if let Some(limit) = options.max_frames {
             command.args(["-frames:v", &limit.to_string()]);
         }
-        if options.size.is_some() {
-            command.args(["-vf", &format!("scale={width}:{height}")]);
+        if let Some(filters) = video_filter(options, width, height) {
+            command.args(["-vf", &filters]);
         }
         if let Some(rate) = options.frame_rate {
             command.args(["-r", &fraction(rate)]);
@@ -305,6 +339,25 @@ mod tests {
         assert_eq!(options.start, Some(Rational::from_int(2)));
         assert_eq!(options.max_frames, Some(10));
         assert_eq!(options.size, Some((640, 360)));
+    }
+
+    #[test]
+    fn a_filter_chain_is_fenced_by_the_guard_scale() {
+        let options = DecodeOptions::default().scaled_to(640, 360).filtered("hue=s=0");
+        assert_eq!(
+            video_filter(&options, 640, 360).as_deref(),
+            Some("scale=640:360,hue=s=0,scale=640:360"),
+        );
+    }
+
+    #[test]
+    fn no_size_and_no_chain_means_no_vf_at_all() {
+        assert_eq!(video_filter(&DecodeOptions::default(), 1920, 1080), None);
+    }
+
+    #[test]
+    fn an_empty_chain_is_no_chain() {
+        assert!(DecodeOptions::default().filtered("").filter_chain.is_none());
     }
 
     #[test]

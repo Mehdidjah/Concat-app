@@ -209,6 +209,34 @@ export function fromDocument(raw: unknown): Project | null {
                   ];
                 })
               : [],
+            videoEffects: Array.isArray(clip.videoEffects)
+              ? clip.videoEffects.flatMap((effect) => {
+                  if (typeof effect !== "object" || effect === null) return [];
+                  const applied = effect as Record<string, unknown>;
+                  if (typeof applied.id !== "string") return [];
+                  return [
+                    {
+                      id: applied.id,
+                      params:
+                        typeof applied.params === "object" && applied.params !== null
+                          ? (applied.params as Record<string, number>)
+                          : {},
+                      enabled: flag(applied.enabled, true),
+                    },
+                  ];
+                })
+              : [],
+            transitionIn: (() => {
+              if (typeof clip.transitionIn !== "object" || clip.transitionIn === null) {
+                return undefined;
+              }
+              const transition = clip.transitionIn as Record<string, unknown>;
+              if (typeof transition.id !== "string") return undefined;
+              return {
+                id: transition.id,
+                duration: Math.max(0.1, number(transition.duration, 1)),
+              };
+            })(),
             ...(isText ? { text: readTextStyle(clip.text) } : {}),
           },
         ];

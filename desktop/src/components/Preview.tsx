@@ -8,6 +8,7 @@ import {
 } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 
+import { buildPreviewLook, type AppliedEffect, type CanvasOp } from "../lib/effects";
 import { timecode } from "../lib/time";
 import { MAX_SCALE, MIN_SCALE } from "../lib/project";
 import { textCss, type TextStyle } from "../lib/text";
@@ -170,7 +171,7 @@ function softSnap(
  */
 export function Preview({
   source,
-  overlays,
+  overlays: titleOverlays,
   playing,
   playhead,
   duration,
@@ -178,6 +179,9 @@ export function Preview({
   frame,
   transform,
   opacity,
+  effects,
+  ghost,
+  veil,
   mediaSize,
   selectedClipId,
   onSelectClip,
@@ -201,6 +205,14 @@ export function Preview({
   transform: PreviewTransform | null;
   /** The displayed clip's blend strength, 1 being solid. */
   opacity: number;
+  /** The displayed clip's video effects, drawn live. Null for none. */
+  effects: AppliedEffect[] | null;
+  /** A cross-fade in progress: the incoming clip's pre-roll, faded in over
+   * the picture. Null outside a dissolve window. */
+  ghost: { clipId: string; path: string; time: number; speed: number; opacity: number } | null;
+  /** A fade-to-colour transition passing over the playhead: a coloured wash
+   * whose opacity the app computes per frame. Null when no fade is live. */
+  veil: { color: string; opacity: number } | null;
   /** The source's pixel size, when the probe reported one. */
   mediaSize: { width: number; height: number } | null;
   /** The single selected clip, if there is one - its box shows handles. */
@@ -219,6 +231,7 @@ export function Preview({
   onSeek: (seconds: number) => void;
 }) {
   const video = useRef<HTMLVideoElement>(null);
+  const still = useRef<HTMLImageElement>(null);
   const loadedClip = useRef<string | null>(null);
 
   // The picture's true pixel size, measured off the element once it has
@@ -279,15 +292,37 @@ export function Preview({
   // The same placement the exporter applies, as CSS. Order matters and matches
   // the compositor: scale about the picture's centre, rotate about it, then
   // translate. (CSS applies the list right to left.)
+  // Everything the clip's effects need to draw live: the CSS/SVG filter
+  // string, overlay layers, canvas geometry passes, and shake jitter -
+  // assembled in applied order, scaled to preview pixels.
+  const pixelScale = frameRect ? frameRect.width / frame.width : 1;
+  const look = useMemo(
+    () => buildPreviewLook(effects ?? undefined, pixelScale),
+    [effects, pixelScale],
+  );
+
+  // Deterministic shake, evaluated from the playhead clock - the exact
+  // `sin(t*f)` expression the export's jitter crop runs, so pausing anywhere
+  // shows the same displaced frame the file will have.
+  const jitterX = look.jitter
+    ? -look.jitter.amount * pixelScale * Math.sin(playhead * look.jitter.speed)
+    : 0;
+  const jitterY = look.jitter
+    ? -look.jitter.amount * pixelScale * Math.cos(playhead * look.jitter.speed * 1.3)
+    : 0;
+
   const mediaCss =
     transform && frameRect
       ? {
-          transform: `translate(${transform.offsetX * frameRect.width}px, ${
-            transform.offsetY * frameRect.height
+          transform: `translate(${transform.offsetX * frameRect.width + jitterX}px, ${
+            transform.offsetY * frameRect.height + jitterY
           }px) rotate(${transform.rotation}deg) scale(${transform.scale})`,
           // The same blend the compositor applies on export. On the wrapper
           // with the transform, so the whole picture fades as one surface.
           opacity: Math.min(1, Math.max(0, opacity)),
+          // The live effect filters. On the wrapper, so the canvas pass
+          // underneath inherits them too.
+          filter: look.filter ?? undefined,
         }
       : undefined;
 
@@ -384,6 +419,23 @@ export function Preview({
                   media element itself: WKWebView keeps `<video>` in its own
                   compositing layer, and animating transforms directly on it
                   is unreliable where a plain div never is. */}
+              {/* The SVG filters the effect chain references via url(#id).
+                  Zero-sized and inert; only the defs matter. */}
+              {look.svgFilters.length > 0 && (
+                <svg width="0" height="0" className="absolute" aria-hidden>
+                  <defs
+                    dangerouslySetInnerHTML={{
+                      __html: look.svgFilters
+                        .map(
+                          (entry) =>
+                            `<filter id="${entry.id}" color-interpolation-filters="sRGB">${entry.content}</filter>`,
+                        )
+                        .join(""),
+                    }}
+                  />
+                </svg>
+              )}
+
               <div className="absolute inset-0" style={mediaCss}>
                 <video
                   ref={video}
@@ -398,6 +450,7 @@ export function Preview({
                   className={`absolute inset-0 h-full w-full object-contain ${
                     source && !source.isStill ? "block" : "hidden"
                   }`}
+                  style={look.canvas.length > 0 ? { visibility: "hidden" } : undefined}
                 />
                 {source?.isStill && (
                   <img
@@ -405,6 +458,7 @@ export function Preview({
                     // actually swaps the picture rather than reusing the
                     // decoded one.
                     key={source.clipId}
+                    ref={still}
                     src={convertFileSrc(source.path)}
                     alt=""
                     draggable={false}
@@ -415,9 +469,50 @@ export function Preview({
                       })
                     }
                     className="absolute inset-0 h-full w-full object-contain"
+                    style={look.canvas.length > 0 ? { visibility: "hidden" } : undefined}
+                  />
+                )}
+
+                {/* Geometry effects - pixelate, mirror, fisheye - redraw the
+                    media on a canvas the wrapper's filters still apply to.
+                    The media element stays live underneath, just invisible:
+                    it is the decoder this canvas samples. */}
+                {look.canvas.length > 0 && source && (
+                  <EffectCanvas
+                    ops={look.canvas}
+                    pixelScale={pixelScale}
+                    source={() => (source.isStill ? still.current : video.current)}
                   />
                 )}
               </div>
+
+              {/* Effect overlay layers: vignette's gradient, grain's animated
+                  noise. Over the picture, under the incoming dissolve. */}
+              {look.overlays.map((overlay, index) => (
+                <div
+                  key={index}
+                  className={`pointer-events-none absolute ${
+                    overlay.grain ? "-inset-[12%] grain-layer" : "inset-0"
+                  }`}
+                  style={overlay.style as React.CSSProperties}
+                />
+              ))}
+
+              {/* A cross-fade in progress: the incoming clip's pre-roll,
+                  ramping in over everything above - the dissolve itself. */}
+              {ghost && ghost.opacity > 0 && (
+                <GhostVideo key={ghost.clipId} ghost={ghost} playing={playing} />
+              )}
+
+              {/* A fade-to-black/white transition washing over the cut. Above
+                  the picture, below titles - titles ride through a fade the
+                  same way the exporter composites them, on top. */}
+              {veil && veil.opacity > 0 && (
+                <div
+                  className="pointer-events-none absolute inset-0"
+                  style={{ backgroundColor: veil.color, opacity: Math.min(1, veil.opacity) }}
+                />
+              )}
 
               {/* Alignment guides, only alive mid-drag. Dashed and faint on
                   purpose: a hint that something lined up, not a grid. */}
@@ -459,7 +554,7 @@ export function Preview({
             fall through to the footage behind it. The layer clips like the
             frame does.
           */}
-          {frameRect && overlays.length > 0 && (
+          {frameRect && titleOverlays.length > 0 && (
             <div
               className="absolute overflow-hidden"
               style={{
@@ -469,7 +564,7 @@ export function Preview({
                 height: frameRect.height,
               }}
             >
-              {overlays.map((overlay) => (
+              {titleOverlays.map((overlay) => (
                 <TextOverlayBox
                   key={overlay.clipId}
                   overlay={overlay}
@@ -483,7 +578,7 @@ export function Preview({
             </div>
           )}
 
-          {!source && overlays.length === 0 && (
+          {!source && titleOverlays.length === 0 && (
             // No surface of its own: an empty monitor *is* black, and drawing
             // a bordered card on top of it invents an edge that means nothing.
             // Just the words, sitting on the stage.
@@ -583,6 +678,218 @@ export function Preview({
         </span>
       </div>
     </div>
+  );
+}
+
+/**
+ * The canvas pass for geometry effects the CSS filter pipeline cannot do.
+ *
+ * Redraws the media element into a canvas every animation frame, applying
+ * pixelate, mirror and fisheye in effect order. The canvas sits inside the
+ * filtered wrapper, so colour and blur effects stack on top of the geometry
+ * the same way the export's single FFmpeg chain runs them - approximate in
+ * order, identical in look.
+ */
+function EffectCanvas({
+  ops,
+  pixelScale,
+  source,
+}: {
+  ops: CanvasOp[];
+  /** Preview pixels per export pixel, so block sizes match the file. */
+  pixelScale: number;
+  source: () => HTMLVideoElement | HTMLImageElement | null;
+}) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const state = useRef({ ops, pixelScale, source });
+  state.current = { ops, pixelScale, source };
+
+  useEffect(() => {
+    const work = document.createElement("canvas");
+    const scratch = document.createElement("canvas");
+    let frame = 0;
+
+    const tick = () => {
+      frame = requestAnimationFrame(tick);
+      const canvas = canvasRef.current;
+      const media = state.current.source();
+      const context = canvas?.getContext("2d");
+      if (!canvas || !media || !context) return;
+
+      const width = canvas.clientWidth;
+      const height = canvas.clientHeight;
+      if (width === 0 || height === 0) return;
+      const ratio = window.devicePixelRatio || 1;
+      if (canvas.width !== Math.round(width * ratio) || canvas.height !== Math.round(height * ratio)) {
+        canvas.width = Math.max(1, Math.round(width * ratio));
+        canvas.height = Math.max(1, Math.round(height * ratio));
+      }
+
+      const naturalWidth =
+        media instanceof HTMLVideoElement ? media.videoWidth : media.naturalWidth;
+      const naturalHeight =
+        media instanceof HTMLVideoElement ? media.videoHeight : media.naturalHeight;
+      if (!naturalWidth || !naturalHeight) return;
+
+      // The same contain-fit the hidden element's object-contain performs.
+      const fit = Math.min(width / naturalWidth, height / naturalHeight);
+      const drawWidth = naturalWidth * fit;
+      const drawHeight = naturalHeight * fit;
+
+      work.width = Math.max(1, Math.round(drawWidth * ratio));
+      work.height = Math.max(1, Math.round(drawHeight * ratio));
+      const workContext = work.getContext("2d");
+      if (!workContext) return;
+      workContext.imageSmoothingQuality = "high";
+      workContext.drawImage(media, 0, 0, work.width, work.height);
+
+      for (const op of state.current.ops) {
+        applyCanvasOp(work, workContext, scratch, op, state.current.pixelScale * ratio);
+      }
+
+      context.setTransform(ratio, 0, 0, ratio, 0, 0);
+      context.clearRect(0, 0, width, height);
+      context.drawImage(work, (width - drawWidth) / 2, (height - drawHeight) / 2, drawWidth, drawHeight);
+    };
+
+    frame = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(frame);
+  }, []);
+
+  return <canvas ref={canvasRef} className="absolute inset-0 h-full w-full" />;
+}
+
+/** Applies one geometry op to `work` in place, using `scratch` as the copy. */
+function applyCanvasOp(
+  work: HTMLCanvasElement,
+  context: CanvasRenderingContext2D,
+  scratch: HTMLCanvasElement,
+  op: CanvasOp,
+  pixelScale: number,
+): void {
+  const { width, height } = work;
+  const scratchContext = scratch.getContext("2d");
+  if (!scratchContext) return;
+
+  if (op.kind === "pixelate") {
+    // Downscale then nearest-neighbour upscale - the definition of pixelate.
+    const block = Math.max(2, op.size * pixelScale);
+    const smallWidth = Math.max(1, Math.round(width / block));
+    const smallHeight = Math.max(1, Math.round(height / block));
+    scratch.width = smallWidth;
+    scratch.height = smallHeight;
+    scratchContext.imageSmoothingQuality = "high";
+    scratchContext.drawImage(work, 0, 0, smallWidth, smallHeight);
+    context.imageSmoothingEnabled = false;
+    context.clearRect(0, 0, width, height);
+    context.drawImage(scratch, 0, 0, width, height);
+    context.imageSmoothingEnabled = true;
+    return;
+  }
+
+  if (op.kind === "mirror") {
+    scratch.width = width;
+    scratch.height = height;
+    scratchContext.drawImage(work, 0, 0);
+    const half = Math.floor(width / 2);
+    context.clearRect(0, 0, width, height);
+    context.drawImage(scratch, 0, 0, half, height, 0, 0, half, height);
+    context.save();
+    context.translate(width, 0);
+    context.scale(-1, 1);
+    context.drawImage(scratch, 0, 0, half, height, 0, 0, half, height);
+    context.restore();
+    return;
+  }
+
+  // Fisheye: a two-pass one-dimensional barrel remap in strips. Not a true
+  // lens equation, but the centre magnifies and the edges compress the same
+  // way, at a cost of ~100 strip draws instead of a per-pixel loop.
+  const k = op.strength * 0.45;
+  const strips = 48;
+  const remap = (normalised: number) => normalised * (1 - k * (1 - normalised * normalised));
+
+  scratch.width = width;
+  scratch.height = height;
+  scratchContext.drawImage(work, 0, 0);
+  context.clearRect(0, 0, width, height);
+  for (let index = 0; index < strips; index += 1) {
+    const x0 = (index / strips) * 2 - 1;
+    const x1 = ((index + 1) / strips) * 2 - 1;
+    const sx0 = ((remap(x0) + 1) / 2) * width;
+    const sx1 = ((remap(x1) + 1) / 2) * width;
+    context.drawImage(
+      scratch,
+      sx0, 0, Math.max(1, sx1 - sx0), height,
+      (index / strips) * width, 0, width / strips + 1, height,
+    );
+  }
+  scratchContext.clearRect(0, 0, width, height);
+  scratchContext.drawImage(work, 0, 0);
+  context.clearRect(0, 0, width, height);
+  for (let index = 0; index < strips; index += 1) {
+    const y0 = (index / strips) * 2 - 1;
+    const y1 = ((index + 1) / strips) * 2 - 1;
+    const sy0 = ((remap(y0) + 1) / 2) * height;
+    const sy1 = ((remap(y1) + 1) / 2) * height;
+    context.drawImage(
+      scratch,
+      0, sy0, width, Math.max(1, sy1 - sy0),
+      0, (index / strips) * height, width, height / strips + 1,
+    );
+  }
+}
+
+/**
+ * The incoming clip of a cross-fade, playing its pre-roll over the picture.
+ *
+ * A second, short-lived video element with the same corrective sync the main
+ * one uses. It exists only inside the dissolve window; the `key` on its mount
+ * point retires it the moment the transition's clip changes.
+ */
+function GhostVideo({
+  ghost,
+  playing,
+}: {
+  ghost: { clipId: string; path: string; time: number; speed: number; opacity: number };
+  playing: boolean;
+}) {
+  const element = useRef<HTMLVideoElement>(null);
+
+  useEffect(() => {
+    const media = element.current;
+    if (!media) return;
+    media.src = convertFileSrc(ghost.path);
+    media.load();
+    // Mount effect only: the sync effect below lands the position.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ghost.path]);
+
+  useEffect(() => {
+    const media = element.current;
+    if (!media) return;
+    const rate = Math.min(16, Math.max(0.0625, ghost.speed));
+    if (media.playbackRate !== rate) media.playbackRate = rate;
+    const tolerance = playing ? 0.3 : 0.03;
+    if (media.readyState > 0 && Math.abs(media.currentTime - ghost.time) > tolerance) {
+      try {
+        media.currentTime = Math.max(0, ghost.time);
+      } catch {
+        // Still opening; the next update lands it.
+      }
+    }
+    if (playing && media.paused) void media.play().catch(() => undefined);
+    if (!playing && !media.paused) media.pause();
+  }, [ghost, playing]);
+
+  return (
+    <video
+      ref={element}
+      muted
+      playsInline
+      className="pointer-events-none absolute inset-0 h-full w-full object-contain"
+      style={{ opacity: Math.min(1, Math.max(0, ghost.opacity)) }}
+    />
   );
 }
 

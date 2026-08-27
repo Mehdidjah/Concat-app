@@ -68,6 +68,16 @@ pub struct Clip {
     pub speed: Rational,
     /// Blend factor in `0.0..=1.0`, applied over whatever is beneath.
     pub opacity: f32,
+    /// Ramp the picture's opacity from zero over this many seconds from the
+    /// clip's start. Zero means no ramp.
+    ///
+    /// This is what a cross-dissolve is made of: the incoming clip overlaps
+    /// the outgoing one and ramps in on top. It multiplies `opacity`, so a
+    /// half-transparent clip fades up to half, not to solid.
+    pub video_fade_in: Rational,
+    /// Ramp the opacity back to zero over this many seconds into the clip's
+    /// end. Zero means no ramp.
+    pub video_fade_out: Rational,
     /// How the picture sits in the frame. Identity is fitted and centred.
     pub transform: Transform,
 }
@@ -117,8 +127,30 @@ impl Clip {
             duration,
             speed: Rational::ONE,
             opacity: 1.0,
+            video_fade_in: Rational::ZERO,
+            video_fade_out: Rational::ZERO,
             transform: Transform::IDENTITY,
         }
+    }
+
+    /// The opacity ramp factor at `time`, in `0.0..=1.0`.
+    ///
+    /// One at any instant outside the fade windows, and always one for a clip
+    /// with no fades - the common case costs two comparisons. This lives on
+    /// the clip, next to `source_time_at`, because it is the same kind of
+    /// fact: the one definition every renderer has to agree with.
+    pub fn video_fade_factor(&self, time: Rational) -> f32 {
+        let mut factor = 1.0f32;
+        let local = time - self.start;
+
+        if !self.video_fade_in.is_zero() && local < self.video_fade_in {
+            factor *= (local / self.video_fade_in).as_f64().clamp(0.0, 1.0) as f32;
+        }
+        let remaining = self.duration - local;
+        if !self.video_fade_out.is_zero() && remaining < self.video_fade_out {
+            factor *= (remaining / self.video_fade_out).as_f64().clamp(0.0, 1.0) as f32;
+        }
+        factor
     }
 
     /// The span of timeline this clip occupies.
@@ -373,6 +405,30 @@ mod tests {
         let clip = timeline.clip(id).expect("clip exists");
         assert_eq!(clip.source_time_at(seconds(2)), Some(seconds(10)));
         assert_eq!(clip.source_time_at(seconds(3)), Some(seconds(11)));
+    }
+
+    #[test]
+    fn video_fades_ramp_and_hold() {
+        let (mut timeline, _, id) = fixture(); // covers timeline [2, 5)
+        {
+            let clip = timeline.clip_mut(id).expect("clip exists");
+            clip.video_fade_in = Rational::ONE;
+            clip.video_fade_out = Rational::ONE;
+        }
+        let clip = timeline.clip(id).expect("clip exists");
+
+        assert_eq!(clip.video_fade_factor(seconds(2)), 0.0, "starts at zero");
+        assert_eq!(clip.video_fade_factor(Rational::new(5, 2)), 0.5, "halfway up");
+        assert_eq!(clip.video_fade_factor(seconds(3)), 1.0, "holds at one between fades");
+        assert_eq!(clip.video_fade_factor(Rational::new(9, 2)), 0.5, "halfway down");
+    }
+
+    #[test]
+    fn no_fade_means_no_attenuation() {
+        let (timeline, _, id) = fixture();
+        let clip = timeline.clip(id).expect("clip exists");
+        assert_eq!(clip.video_fade_factor(seconds(2)), 1.0);
+        assert_eq!(clip.video_fade_factor(seconds(4)), 1.0);
     }
 
     #[test]

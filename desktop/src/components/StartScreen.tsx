@@ -7,6 +7,7 @@ import {
   createProject,
   forgetProject,
   openProject,
+  projectPreview,
   recentProjects,
   type ProjectInfo,
 } from "../lib/engine";
@@ -139,7 +140,20 @@ export function StartScreen({ onCreate }: { onCreate: (session: ProjectSession) 
 
   return (
     <div className="thin-scroll h-full overflow-y-auto bg-base">
-      <div className="mx-auto flex min-h-full w-full max-w-xl flex-col justify-center px-8 py-16">
+      {/*
+        Two columns once there is history: the setup form on the left, the
+        projects being returned to on the right - the two reasons anyone is on
+        this screen, side by side instead of one buried under the other. With
+        no history the form sits alone, centred, exactly as before.
+      */}
+      <div
+        className={`mx-auto flex min-h-full w-full flex-col justify-center px-8 py-16 ${
+          recents.length > 0
+            ? "max-w-5xl lg:grid lg:grid-cols-[minmax(0,1fr)_minmax(0,22rem)] lg:items-start lg:gap-16"
+            : "max-w-xl"
+        }`}
+      >
+      <div className="min-w-0">
         <header className="mb-10">
           <h1 className="font-display text-[34px] font-semibold leading-tight tracking-[-0.03em] text-primary">
             New project
@@ -227,35 +241,43 @@ export function StartScreen({ onCreate }: { onCreate: (session: ProjectSession) 
             The timeline is not saved to disk yet.
           </p>
         </div>
+      </div>
 
         {/* No empty state: a "Recent" heading over nothing is worse than no
-            heading at all, so the section simply is not there until it has
+            heading at all, so the column simply is not there until it has
             something to show. */}
         {recents.length > 0 && (
-          <section className="mt-14 border-t border-hairline pt-7">
-            <h2 className="mb-2 text-[13px] font-semibold text-secondary">Recent</h2>
-            <ul className="-mx-3">
+          <section className="mt-14 border-t border-hairline pt-7 lg:mt-0 lg:border-t-0 lg:pt-0">
+            <h2 className="mb-3 text-[13px] font-semibold text-secondary">Recent</h2>
+            <ul className="flex flex-col gap-1.5">
               {recents.map((project) => (
-                <li key={project.path} className="group flex items-center gap-3 rounded-lg px-3
-                                                  transition-colors hover:bg-hover">
+                <li
+                  key={project.path}
+                  className="group flex items-center gap-3 rounded-xl p-2 transition-colors
+                             hover:bg-hover"
+                >
                   <button
                     type="button"
                     title={project.path}
                     disabled={busy}
                     onClick={() => void reopen(project)}
-                    className="min-w-0 flex-1 cursor-pointer py-2.5 text-left
+                    className="flex min-w-0 flex-1 cursor-pointer items-center gap-3 text-left
                                disabled:cursor-not-allowed"
                   >
-                    <span className="block truncate text-[14px] text-primary">{project.name}</span>
-                    <span className="block truncate font-technical text-[11px] text-tertiary">
-                      {project.width} x {project.height} ·{" "}
-                      {(project.rateNum / project.rateDen).toFixed(2)} fps
+                    <ProjectThumb project={project} />
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate text-[14px] text-primary">
+                        {project.name}
+                      </span>
+                      <span className="block truncate font-technical text-[11px] text-tertiary">
+                        {project.width} x {project.height} ·{" "}
+                        {(project.rateNum / project.rateDen).toFixed(2)} fps
+                      </span>
+                      <span className="block text-[11px] text-tertiary">
+                        {relativeTime(project.openedAt)}
+                      </span>
                     </span>
                   </button>
-
-                  <span className="shrink-0 text-[11px] text-tertiary">
-                    {relativeTime(project.openedAt)}
-                  </span>
 
                   <button
                     type="button"
@@ -275,6 +297,47 @@ export function StartScreen({ onCreate }: { onCreate: (session: ProjectSession) 
         )}
       </div>
     </div>
+  );
+}
+
+/**
+ * A project's poster frame: a frame from the earliest clip of its timeline,
+ * generated and cached by the host. A project with nothing visual on it - or
+ * whose media has moved - falls back to a quiet film icon rather than an
+ * error; the launch screen is not the place to complain about footage.
+ */
+function ProjectThumb({ project }: { project: ProjectInfo }) {
+  const [poster, setPoster] = useState<string | null>(null);
+
+  useEffect(() => {
+    let url: string | null = null;
+    let cancelled = false;
+    void projectPreview(project.path)
+      .then((bytes) => {
+        if (cancelled) return;
+        url = URL.createObjectURL(new Blob([bytes], { type: "image/jpeg" }));
+        setPoster(url);
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+      if (url) URL.revokeObjectURL(url);
+    };
+  }, [project.path]);
+
+  return (
+    <span
+      className="relative block aspect-video w-24 shrink-0 overflow-hidden rounded-lg bg-sunken
+                 ring-1 ring-hairline"
+    >
+      {poster ? (
+        <img src={poster} alt="" draggable={false} className="h-full w-full object-cover" />
+      ) : (
+        <span className="absolute inset-0 flex items-center justify-center text-tertiary">
+          <Icon name="film" size={16} strokeWidth={1.5} />
+        </span>
+      )}
+    </span>
   );
 }
 

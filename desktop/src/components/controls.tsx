@@ -81,6 +81,8 @@ export function Slider({
   // Where the last pointer event landed, so a shift-drag can be relative to
   // the previous position rather than jumping to the pointer.
   const lastX = useRef(0);
+  // What the number field holds while it is being edited. Null means it shows
+  // the value; the project is not touched until the entry commits.
   const [typing, setTyping] = useState<string | null>(null);
 
   const clampStep = (raw: number) => {
@@ -126,69 +128,80 @@ export function Slider({
         >
           {label}
         </span>
-        {typing === null ? (
-          <button
-            type="button"
-            title="Click to type a value"
-            onClick={() => setTyping(String(Number(value.toFixed(4))))}
-            className="cursor-text rounded px-1 font-technical text-[11px] text-primary
-                       transition-colors hover:bg-hover"
-          >
-            {format(value)}
-          </button>
-        ) : (
-          <input
-            autoFocus
-            value={typing}
-            onChange={(event) => setTyping(event.target.value)}
-            onFocus={(event) => event.target.select()}
-            onBlur={commitTyped}
-            onKeyDown={(event: ReactKeyboardEvent<HTMLInputElement>) => {
-              if (event.key === "Enter") commitTyped();
-              if (event.key === "Escape") setTyping(null);
-            }}
-            className="w-16 rounded border border-accent bg-sunken px-1 text-right
-                       font-technical text-[11px] text-primary outline-none"
-          />
-        )}
+        <span className="font-technical text-[11px] text-tertiary">{format(value)}</span>
       </div>
 
-      <div
-        ref={track}
-        role="slider"
-        aria-label={label}
-        aria-valuenow={value}
-        aria-valuemin={min}
-        aria-valuemax={max}
-        tabIndex={0}
-        onKeyDown={(event) => {
-          // Shift jumps by ten steps - the keyboard's coarse mode, mirroring
-          // how shift is the pointer's fine mode: both mean "the other rate".
-          const by = event.shiftKey ? step * 10 : step;
-          if (event.key === "ArrowLeft") onChange(clampStep(value - by));
-          if (event.key === "ArrowRight") onChange(clampStep(value + by));
-        }}
-        onPointerDown={(event) => {
-          event.currentTarget.setPointerCapture(event.pointerId);
-          lastX.current = event.clientX;
-          // A shift-click means "adjust from here", not "jump here".
-          if (!event.shiftKey) commit(event);
-        }}
-        onPointerMove={(event) => {
-          if (event.currentTarget.hasPointerCapture(event.pointerId)) commit(event);
-        }}
-        className="relative h-6 cursor-ew-resize touch-none select-none overflow-hidden
-                   rounded-md bg-sunken"
-      >
+      <div className="flex items-stretch gap-1.5">
         <div
-          className="absolute inset-y-0 left-0 bg-accent-soft"
-          style={{ width: `${fill * 100}%` }}
-        />
-        {/* The knob subtracts its own width as it travels, so it stays inside
-            the track at both ends instead of hanging over the edge. */}
-        <div
-          className="absolute top-0 h-full w-1 rounded bg-accent"
-          style={{ left: `calc(${fill * 100}% - ${fill * 4}px)` }}
+          ref={track}
+          role="slider"
+          aria-label={label}
+          aria-valuenow={value}
+          aria-valuemin={min}
+          aria-valuemax={max}
+          tabIndex={0}
+          onKeyDown={(event) => {
+            // Shift jumps by ten steps - the keyboard's coarse mode, mirroring
+            // how shift is the pointer's fine mode: both mean "the other rate".
+            const by = event.shiftKey ? step * 10 : step;
+            if (event.key === "ArrowLeft") onChange(clampStep(value - by));
+            if (event.key === "ArrowRight") onChange(clampStep(value + by));
+          }}
+          onPointerDown={(event) => {
+            event.currentTarget.setPointerCapture(event.pointerId);
+            lastX.current = event.clientX;
+            // A shift-click means "adjust from here", not "jump here".
+            if (!event.shiftKey) commit(event);
+          }}
+          onPointerMove={(event) => {
+            if (event.currentTarget.hasPointerCapture(event.pointerId)) commit(event);
+          }}
+          className="relative h-6 min-w-0 flex-1 cursor-ew-resize touch-none select-none
+                     overflow-hidden rounded-md bg-sunken"
+        >
+          <div
+            className="absolute inset-y-0 left-0 bg-accent-soft"
+            style={{ width: `${fill * 100}%` }}
+          />
+          {/* The knob subtracts its own width as it travels, so it stays inside
+              the track at both ends instead of hanging over the edge. */}
+          <div
+            className="absolute top-0 h-full w-1 rounded bg-accent"
+            style={{ left: `calc(${fill * 100}% - ${fill * 4}px)` }}
+          />
+        </div>
+
+        {/*
+          The number field: the slider's exact twin in height, always present,
+          for dialling in a value the track is too coarse for. A text input
+          rather than type="number" because the spinner buttons are the part
+          nobody wants - arrow keys step instead, and typing commits on Enter
+          or blur, reverting on Escape.
+        */}
+        <input
+          value={typing ?? String(Number(value.toFixed(4)))}
+          inputMode="decimal"
+          spellCheck={false}
+          aria-label={`${label} value`}
+          onChange={(event) => setTyping(event.target.value)}
+          onFocus={(event) => event.target.select()}
+          onBlur={commitTyped}
+          onKeyDown={(event: ReactKeyboardEvent<HTMLInputElement>) => {
+            if (event.key === "Enter") commitTyped();
+            if (event.key === "Escape") {
+              setTyping(null);
+              event.currentTarget.blur();
+            }
+            if (event.key === "ArrowUp" || event.key === "ArrowDown") {
+              event.preventDefault();
+              const by = (event.shiftKey ? step * 10 : step) * (event.key === "ArrowUp" ? 1 : -1);
+              setTyping(null);
+              onChange(clampStep(value + by));
+            }
+          }}
+          className="h-6 w-14 shrink-0 rounded-md border border-hairline bg-sunken px-1.5
+                     text-right font-technical text-[11px] text-primary outline-none
+                     transition-colors focus:border-accent"
         />
       </div>
     </div>

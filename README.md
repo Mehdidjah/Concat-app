@@ -34,14 +34,10 @@ start cutting, no account, no extra downloads, no setup.
 
 ## 🚀 Get started
 
-Grab a build from [Releases](https://github.com/jub0t/WolfCut/releases), or
-build it yourself:
-
-```sh
-cd desktop
-npm install
-npm run app
-```
+The alpha is out — grab the installer for your platform from
+[Releases](https://github.com/jub0t/WolfCut/releases): macOS (Apple Silicon
+`.dmg`) and Windows (`.msi` / `.exe`), FFmpeg included, nothing else to
+install.
 
 ## 📈 Growth
 

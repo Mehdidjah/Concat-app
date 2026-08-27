@@ -97,6 +97,9 @@ jobs:
             --enable-bsf=h264_mp4toannexb,hevc_mp4toannexb,aac_adtstoasc \
             --enable-protocol=file,pipe \
             --enable-filter=scale,tile,fps,format,null,copy,setpts,trim,transpose,crop,overlay \
+            --enable-filter=fade,hue,colorchannelmixer,negate,unsharp,gblur,boxblur,colortemperature \
+            --enable-filter=vibrance,eq,vignette,noise,lutrgb,pixelize,lenscorrection \
+            --enable-filter=split,blend,hstack,hflip \
             --enable-filter=aresample,asetrate,atempo,aformat,anull,atrim,asetpts,adelay,amix,apad,afade,volume \
             --enable-filter=highpass,lowpass,equalizer,bass,treble,compand,deesser,aecho,alimiter,aphaser,flanger \
             --enable-filter=abuffer,abuffersink,buffer,buffersink

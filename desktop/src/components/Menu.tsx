@@ -7,6 +7,12 @@ export interface MenuOption {
   label: string;
   onSelect: () => void;
   icon?: IconName;
+  /**
+   * An arbitrary element in the icon slot, for rows whose glyph is drawn
+   * rather than named - the frame-size menu's aspect shapes. Wins over
+   * `icon` and `checked` when set.
+   */
+  leading?: ReactNode;
   /** Right-aligned hint, e.g. a keyboard shortcut. */
   hint?: string;
   disabled?: boolean;
@@ -100,7 +106,11 @@ export function Menu({
                               disabled:cursor-not-allowed disabled:opacity-30 disabled:hover:bg-transparent
                               ${option.danger ? "text-danger" : ""}`}
                 >
-                  {option.checked !== undefined ? (
+                  {option.leading ? (
+                    <span className="flex w-4 shrink-0 items-center justify-center">
+                      {option.leading}
+                    </span>
+                  ) : option.checked !== undefined ? (
                     <Icon
                       name="check"
                       size={14}
