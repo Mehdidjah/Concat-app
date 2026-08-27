@@ -27,7 +27,15 @@ the architecture doctrine warns about. Containment:
 - Every effect's chain and preview live in **one catalogue entry**, so adding
   or changing an effect touches one place.
 
+## Status: the retirement clock is running
+The first step of the engine presentation path shipped: the reader pool and
+frame cache exist (`relay_media::pool`), and the paused monitor already shows
+the engine's true composite through `preview_frame` - real multi-track
+stacking and exact effect chains, with the approximation layer doing motion
+and the truth taking over on dwell. What remains for full retirement is
+streaming presentation against the transport clock.
+
 ## What would change our mind
-The engine presentation path (frame cache + reader pool + native surface).
-When the engine can show its own frames at interactive rates, this layer
-retires bottom-up: composite first, effects last.
+The engine presentation path completing. When the engine can show its own
+frames at interactive rates, this layer retires bottom-up: composite first,
+effects last.

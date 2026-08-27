@@ -181,7 +181,7 @@ pub fn run(
 /// against every other track is preserved, and nothing else occupies odd
 /// lanes. Cuts are collected before anything mutates, so resolving one
 /// transition cannot unhook the adjacency test of the next.
-fn resolve_transitions(clips: &mut [ExportClip], rate: FrameRate) {
+fn resolve_transitions(clips: &mut [ExportClip], rate: FrameRate, bake_fades: bool) {
     for clip in clips.iter_mut() {
         clip.track *= 2;
     }
@@ -253,7 +253,7 @@ fn resolve_transitions(clips: &mut [ExportClip], rate: FrameRate) {
                 b.fade_in = b.fade_in.max(d);
                 b.track = a_track + 1;
             }
-            "fade-black" | "fade-white" => {
+            "fade-black" | "fade-white" if bake_fades => {
                 // Half the duration on each side of the cut, as fade filters
                 // at decode. Frame-based, because the decoder emits exactly
                 // one frame per output frame - so the fade lands on the same
@@ -311,7 +311,7 @@ pub fn render(request: &ExportRequest, mut reporter: Reporter<'_>) -> Result<Str
     // else reads the clip list, so the picture and sound paths below never
     // know transitions exist.
     let mut resolved = request.clips.clone();
-    resolve_transitions(&mut resolved, rate);
+    resolve_transitions(&mut resolved, rate, true);
 
     // Stills composite exactly like footage; they only differ in how they are
     // decoded, which is handled where the decoder is opened.
@@ -636,6 +636,107 @@ fn quantise(seconds: f64, rate: FrameRate) -> Rational {
     rate.time_of_frame((seconds * rate.fps().as_f64()).round().max(0.0) as i64)
 }
 
+/// One paused-monitor frame: the same clip list the exporter takes, one
+/// timestamp, a preview resolution.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewFrameRequest {
+    pub time: f64,
+    pub width: u32,
+    pub height: u32,
+    pub rate_num: i64,
+    pub rate_den: i64,
+    pub clips: Vec<ExportClip>,
+}
+
+/// Composites the true frame at one instant, for the paused monitor.
+///
+/// This is the engine presentation path's first step (desktop decision 0007):
+/// the identical plan/composite the exporter runs, fed from the reader pool
+/// so scrubbing revisits are cache hits. Fade-to-colour transitions are NOT
+/// baked here - their filter frame numbers assume decode-from-clip-start,
+/// which pooled seeks break - so the UI keeps drawing its veil, whose shape
+/// already matches the exporter's. Returns raw RGBA, exactly
+/// `width * height * 4` bytes.
+pub fn preview_frame(
+    pool: &mut relay_media::ReaderPool,
+    request: &PreviewFrameRequest,
+) -> Result<Vec<u8>, String> {
+    let rate = FrameRate::new(Rational::new(request.rate_num, request.rate_den));
+
+    let mut resolved = request.clips.clone();
+    resolve_transitions(&mut resolved, rate, false);
+    let visible: Vec<&ExportClip> = resolved
+        .iter()
+        .filter(|clip| (clip.kind == "video" || clip.kind == "image") && !clip.hidden)
+        .collect();
+
+    // build_timeline reads only the output format off the request; the shim
+    // keeps one conversion path rather than a preview-flavoured copy of it.
+    let shim = ExportRequest {
+        output: String::new(),
+        width: request.width,
+        height: request.height,
+        rate_num: request.rate_num,
+        rate_den: request.rate_den,
+        crf: 18,
+        preset: String::new(),
+        clips: Vec::new(),
+    };
+    let (timeline, stills, decode_sizes, filter_chains) = build_timeline(&shim, rate, &visible);
+    let plan = plan_frame(&timeline, quantise(request.time, rate));
+
+    let mut sources: Vec<(std::sync::Arc<Frame>, f32, Transform)> =
+        Vec::with_capacity(plan.layers.len());
+    for layer in &plan.layers {
+        let (decode_width, decode_height) = decode_sizes
+            .get(&layer.clip)
+            .copied()
+            .unwrap_or((request.width, request.height));
+        let chain = filter_chains.get(&layer.clip).map(String::as_str);
+        // A source that fails to decode contributes nothing rather than
+        // blanking the monitor - same grace the exporter extends.
+        if let Ok(frame) = pool.frame_at(
+            std::path::Path::new(&layer.media),
+            layer.source_time,
+            decode_width,
+            decode_height,
+            stills.contains(&layer.clip),
+            chain,
+        ) {
+            sources.push((frame, layer.opacity, layer.transform));
+        }
+    }
+
+    // The same fraction-to-pixel placement the exporter applies.
+    let layers: Vec<Layer<'_>> = sources
+        .iter()
+        .map(|(frame, opacity, transform)| {
+            let x = (i64::from(request.width) - i64::from(frame.width())) / 2;
+            let y = (i64::from(request.height) - i64::from(frame.height())) / 2;
+            let placement = if transform.is_identity() {
+                Placement::IDENTITY
+            } else {
+                Placement {
+                    scale: transform.scale as f32,
+                    rotation: transform.rotation.to_radians() as f32,
+                    translate_x: (transform.offset_x * f64::from(request.width)) as f32,
+                    translate_y: (transform.offset_y * f64::from(request.height)) as f32,
+                }
+            };
+            Layer::new(frame)
+                .at(x as i32, y as i32)
+                .with_opacity(*opacity)
+                .with_placement(placement)
+        })
+        .collect();
+
+    // CPU on purpose: one frame at preview size is milliseconds, and holding
+    // a GPU context alive for occasional scrubs is not worth its memory.
+    let composed = CpuCompositor.composite(request.width, request.height, &layers);
+    Ok(composed.into_pixels())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -677,7 +778,7 @@ mod tests {
     fn a_cross_fade_overlaps_the_incoming_clip_on_its_own_lane() {
         let mut clips = vec![clip("video", 0, 0.0, 4.0, 0.0), clip("video", 0, 4.0, 4.0, 2.0)];
         clips[1].transition = spec("cross-fade", 1.0);
-        resolve_transitions(&mut clips, FrameRate::THIRTY);
+        resolve_transitions(&mut clips, FrameRate::THIRTY, true);
 
         let b = &clips[1];
         assert_eq!(b.start, 3.0, "extends backwards over the cut");
@@ -693,7 +794,7 @@ mod tests {
     fn a_cross_fade_clamps_to_the_available_handle() {
         let mut clips = vec![clip("video", 0, 0.0, 4.0, 0.0), clip("video", 0, 4.0, 4.0, 0.25)];
         clips[1].transition = spec("cross-fade", 2.0);
-        resolve_transitions(&mut clips, FrameRate::THIRTY);
+        resolve_transitions(&mut clips, FrameRate::THIRTY, true);
 
         // Only a quarter second of source exists before the in-point, so that
         // is the whole dissolve.
@@ -706,7 +807,7 @@ mod tests {
     fn a_still_needs_no_handle_to_dissolve() {
         let mut clips = vec![clip("video", 0, 0.0, 4.0, 0.0), clip("image", 0, 4.0, 4.0, 0.0)];
         clips[1].transition = spec("cross-fade", 1.0);
-        resolve_transitions(&mut clips, FrameRate::THIRTY);
+        resolve_transitions(&mut clips, FrameRate::THIRTY, true);
         assert_eq!(clips[1].video_fade_in, 1.0);
         assert_eq!(clips[1].source_start, 0.0, "a still has no source clock to rewind");
     }
@@ -715,7 +816,7 @@ mod tests {
     fn a_fade_to_black_splits_across_the_cut_as_fade_filters() {
         let mut clips = vec![clip("video", 0, 0.0, 4.0, 0.0), clip("video", 0, 4.0, 4.0, 0.0)];
         clips[1].transition = spec("fade-black", 1.0);
-        resolve_transitions(&mut clips, FrameRate::THIRTY);
+        resolve_transitions(&mut clips, FrameRate::THIRTY, true);
 
         // Half a second each side at 30fps is 15 frames.
         assert_eq!(clips[0].video_filter_chain, "fade=t=out:start_frame=105:nb_frames=15");
@@ -727,7 +828,7 @@ mod tests {
     fn a_fade_to_white_names_its_colour() {
         let mut clips = vec![clip("video", 0, 0.0, 2.0, 0.0), clip("video", 0, 2.0, 2.0, 0.0)];
         clips[1].transition = spec("fade-white", 0.5);
-        resolve_transitions(&mut clips, FrameRate::THIRTY);
+        resolve_transitions(&mut clips, FrameRate::THIRTY, true);
         assert!(clips[0].video_filter_chain.ends_with(":color=white"));
         assert!(clips[1].video_filter_chain.contains("t=in"));
     }
@@ -737,7 +838,7 @@ mod tests {
         let mut clips = vec![clip("video", 0, 0.0, 2.0, 0.0), clip("video", 0, 2.0, 2.0, 0.0)];
         clips[1].video_filter_chain = "hue=s=0".to_owned();
         clips[1].transition = spec("fade-black", 0.5);
-        resolve_transitions(&mut clips, FrameRate::THIRTY);
+        resolve_transitions(&mut clips, FrameRate::THIRTY, true);
         assert!(
             clips[1].video_filter_chain.starts_with("hue=s=0,fade=t=in"),
             "was: {}",
@@ -749,7 +850,7 @@ mod tests {
     fn a_transition_with_no_adjacent_clip_is_orphaned_not_fatal() {
         let mut clips = vec![clip("video", 0, 0.0, 2.0, 0.0), clip("video", 0, 5.0, 2.0, 0.0)];
         clips[1].transition = spec("cross-fade", 1.0);
-        resolve_transitions(&mut clips, FrameRate::THIRTY);
+        resolve_transitions(&mut clips, FrameRate::THIRTY, true);
         assert_eq!(clips[1].start, 5.0);
         assert_eq!(clips[1].video_fade_in, 0.0);
     }
@@ -757,7 +858,7 @@ mod tests {
     #[test]
     fn track_indices_are_doubled_for_everyone() {
         let mut clips = vec![clip("video", 0, 0.0, 2.0, 0.0), clip("audio", 3, 0.0, 2.0, 0.0)];
-        resolve_transitions(&mut clips, FrameRate::THIRTY);
+        resolve_transitions(&mut clips, FrameRate::THIRTY, true);
         assert_eq!(clips[0].track, 0);
         assert_eq!(clips[1].track, 6);
     }
@@ -766,7 +867,7 @@ mod tests {
     fn an_unknown_transition_kind_renders_as_a_plain_cut() {
         let mut clips = vec![clip("video", 0, 0.0, 2.0, 0.0), clip("video", 0, 2.0, 2.0, 0.0)];
         clips[1].transition = spec("wipe-left", 1.0);
-        resolve_transitions(&mut clips, FrameRate::THIRTY);
+        resolve_transitions(&mut clips, FrameRate::THIRTY, true);
         assert_eq!(clips[1].start, 2.0);
         assert!(clips[1].video_filter_chain.is_empty());
     }

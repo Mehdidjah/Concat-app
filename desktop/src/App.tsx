@@ -51,6 +51,7 @@ import {
   editorSave,
   editorUndo,
   engineVersion,
+  previewFrame,
   probeMedia,
   readMediaBytes,
   transcribeClip,
@@ -1178,6 +1179,48 @@ function Editor({
     [project, timeline],
   );
 
+  /**
+   * The engine's true frame for the paused monitor: the exporter's own plan,
+   * compositor and effect chains, via the host's reader pool. Fetched when
+   * the playhead settles; cleared the moment it moves again, so scrubbing
+   * shows the live approximation and dwelling shows the truth.
+   */
+  const [engineStill, setEngineStill] = useState<{
+    bytes: ArrayBuffer;
+    width: number;
+    height: number;
+  } | null>(null);
+  const stillToken = useRef(0);
+  useEffect(() => {
+    const token = ++stillToken.current;
+    setEngineStill(null);
+    if (playing || !loaded || exportClips.length === 0) return;
+
+    const timer = window.setTimeout(() => {
+      // Preview resolution: the frame's aspect, capped for IPC weight. Even
+      // dimensions, because decoders round odd ones themselves.
+      const cap = 960;
+      const scale = Math.min(1, cap / Math.max(frame.width, frame.height));
+      const width = Math.max(2, Math.round((frame.width * scale) / 2) * 2);
+      const height = Math.max(2, Math.round((frame.height * scale) / 2) * 2);
+      previewFrame({
+        time: latest.current.playhead,
+        width,
+        height,
+        rateNum: session.rateNum,
+        rateDen: session.rateDen,
+        clips: exportClips,
+      })
+        .then((bytes) => {
+          if (stillToken.current === token) setEngineStill({ bytes, width, height });
+        })
+        .catch(() => {
+          if (stillToken.current === token) setEngineStill(null);
+        });
+    }, 160);
+    return () => window.clearTimeout(timer);
+  }, [playing, loaded, playhead, exportClips, frame, session.rateNum, session.rateDen]);
+
   const selectedClip =
     selectedClipIds.length === 1 ? findClip(project, selectedClipIds[0]) : null;
   const inspectorMedia = selectedClip
@@ -1385,6 +1428,7 @@ function Editor({
               opacity={previewClip?.opacity ?? 1}
               effects={previewClip?.videoEffects ?? null}
               ghost={previewGhost}
+              engineStill={engineStill}
               veil={previewVeil}
               mediaSize={
                 previewMedia && previewMedia.width && previewMedia.height

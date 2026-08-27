@@ -10,9 +10,7 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand};
 use relay_core::time::{FrameRate, Rational};
 use relay_core::timeline::{Clip, MediaRef, Timeline, Track, TrackKind};
-use relay_media::{
-    DecodeOptions, EncodeOptions, FfmpegDecoder, FfmpegEncoder, FrameSink, FrameSource,
-};
+use relay_media::{EncodeOptions, FfmpegEncoder, FrameSink, ReaderPool};
 use relay_render::{Compositor, CpuCompositor, Layer, plan_frame};
 
 #[derive(Parser)]
@@ -89,12 +87,11 @@ fn probe(path: &PathBuf) -> Result<(), Box<dyn Error>> {
 
 /// The vertical slice.
 ///
-/// Note the deliberate shortcut: this pulls frames from one decoder in order
-/// and assumes the plan asks for them in the same order. That holds for a
-/// single clip played start to finish, and it is exactly what breaks the
-/// moment there are two overlapping clips or the playhead jumps. The fix is a
-/// per-media reader pool with a frame cache, which is the next real piece of
-/// work - not something to bodge in here.
+/// Frames come from the reader pool by (media, source time), which is what
+/// makes this loop correct for *any* plan - overlapping clips, gaps, jumps -
+/// not just one clip played start to finish. The shortcut this function
+/// carried for its whole early life is gone; the pool it was waiting for
+/// exists (`relay_media::pool`).
 fn render(
     input: &PathBuf,
     output: &PathBuf,
@@ -108,10 +105,7 @@ fn render(
 
     let timeline = single_clip_timeline(input, width, height, rate, frames);
 
-    let mut decoder = FfmpegDecoder::open(
-        input,
-        &DecodeOptions::default().limited_to(frames).at_rate(rate),
-    )?;
+    let mut pool = ReaderPool::with_defaults();
     let mut encoder =
         FfmpegEncoder::create(output, width, height, rate, &EncodeOptions::default())?;
     let mut compositor = CpuCompositor;
@@ -125,12 +119,19 @@ fn render(
             // A gap in the timeline is black, not an error.
             compositor.composite(width, height, &[])
         } else {
-            let Some(decoded) = decoder.next_frame()? else {
-                println!("source ended after {index} frames");
-                break;
-            };
-            let opacity = plan.layers[0].opacity * fade_in(index, fade);
-            compositor.composite(width, height, &[Layer::new(&decoded).with_opacity(opacity)])
+            let mut sources = Vec::with_capacity(plan.layers.len());
+            for layer in &plan.layers {
+                let frame =
+                    pool.frame_at(&layer.media, layer.source_time, width, height, false, None)?;
+                sources.push((frame, layer.opacity));
+            }
+            let layers: Vec<Layer<'_>> = sources
+                .iter()
+                .map(|(frame, opacity)| {
+                    Layer::new(frame).with_opacity(opacity * fade_in(index, fade))
+                })
+                .collect();
+            compositor.composite(width, height, &layers)
         };
 
         encoder.write_frame(&composed)?;

@@ -236,6 +236,23 @@ export async function cancelExport(): Promise<void> {
 }
 
 /**
+ * The engine-composited frame at one instant: the exporter's own plan,
+ * compositor and effects, fed from the host's reader pool. Raw RGBA bytes,
+ * exactly `width * height * 4` of them. This is what the paused monitor
+ * shows - the true frame, not the approximation.
+ */
+export async function previewFrame(request: {
+  time: number;
+  width: number;
+  height: number;
+  rateNum: number;
+  rateDen: number;
+  clips: ExportClip[];
+}): Promise<ArrayBuffer> {
+  return invoke<ArrayBuffer>("preview_frame", { request });
+}
+
+/**
  * Writes one file into the project's cache folder and returns its path.
  *
  * The same store the artwork cache uses, so it travels with the project and

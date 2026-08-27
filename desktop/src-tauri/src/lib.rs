@@ -448,6 +448,30 @@ fn config_dir(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
 /// The stop flag for the one export that can run at a time.
 struct ExportState(std::sync::Arc<std::sync::atomic::AtomicBool>);
 
+/// The reader pool behind the paused monitor's true frames. One pool for the
+/// app's lifetime: its whole value is what stays warm between scrubs.
+struct PoolState(std::sync::Arc<std::sync::Mutex<relay_media::ReaderPool>>);
+
+/// The engine-composited frame at one instant, as raw RGBA bytes.
+///
+/// Serialised through the pool's mutex on a blocking thread: one scrub at a
+/// time, in order, off the main thread. The UI debounces and drops stale
+/// responses, so a slow decode never wedges anything but itself.
+#[tauri::command]
+async fn preview_frame(
+    state: tauri::State<'_, PoolState>,
+    request: export::PreviewFrameRequest,
+) -> Result<tauri::ipc::Response, String> {
+    let pool = std::sync::Arc::clone(&state.0);
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut pool = pool.lock().map_err(|_| "reader pool poisoned".to_owned())?;
+        export::preview_frame(&mut pool, &request)
+    })
+    .await
+    .map_err(|error| format!("preview task failed: {error}"))?
+    .map(tauri::ipc::Response::new)
+}
+
 /// Renders the timeline to a file.
 ///
 /// Runs on a blocking thread and reports progress through the
@@ -549,6 +573,9 @@ pub fn run() {
                 std::sync::Mutex::new(None),
             )));
             app.manage(editor_api::EditorState(std::sync::Mutex::new(None)));
+            app.manage(PoolState(std::sync::Arc::new(std::sync::Mutex::new(
+                relay_media::ReaderPool::with_defaults(),
+            ))));
             Ok(())
         })
         .plugin(tauri_plugin_opener::init())
@@ -573,6 +600,7 @@ pub fn run() {
             forget_project,
             export_project,
             cancel_export,
+            preview_frame,
             editor_api::editor_open,
             editor_api::editor_apply,
             editor_api::editor_undo,

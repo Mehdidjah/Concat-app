@@ -212,6 +212,7 @@ export function Preview({
   opacity,
   effects,
   ghost,
+  engineStill,
   veil,
   mediaSize,
   selectedClipId,
@@ -243,6 +244,9 @@ export function Preview({
   /** A cross-fade in progress: the incoming clip's pre-roll, faded in over
    * the picture. Null outside a dissolve window. */
   ghost: { clipId: string; path: string; time: number; speed: number; opacity: number } | null;
+  /** The engine's true composite for the paused playhead - the exporter's own
+   * plan and compositor. Drawn over the approximation while it holds. */
+  engineStill: { bytes: ArrayBuffer; width: number; height: number } | null;
   /** A fade-to-colour transition passing over the playhead: a coloured wash
    * whose opacity the app computes per frame. Null when no fade is live. */
   veil: { color: string; opacity: number } | null;
@@ -541,6 +545,12 @@ export function Preview({
                 <GhostVideo key={ghost.clipId} ghost={ghost} playing={playing} />
               )}
 
+              {/* The engine's true frame, once the paused playhead settles:
+                  real multi-track compositing, exact effect chains. It covers
+                  the approximation layers beneath; the veil and titles still
+                  draw above, exactly as the exporter stacks them. */}
+              {engineStill && <EngineStillLayer still={engineStill} />}
+
               {/* A fade-to-black/white transition washing over the cut. Above
                   the picture, below titles - titles ride through a fade the
                   same way the exporter composites them, on top. */}
@@ -721,6 +731,43 @@ export function Preview({
         </span>
       </div>
     </div>
+  );
+}
+
+/**
+ * The engine's paused-frame composite, blitted into the frame box.
+ *
+ * The bytes arrive as raw RGBA at the request's own resolution; the canvas
+ * holds them at that resolution and CSS scales it to the frame, which shares
+ * its aspect by construction.
+ */
+function EngineStillLayer({
+  still,
+}: {
+  still: { bytes: ArrayBuffer; width: number; height: number };
+}) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    const context = canvas?.getContext("2d");
+    if (!canvas || !context) return;
+    if (still.bytes.byteLength !== still.width * still.height * 4) return;
+    canvas.width = still.width;
+    canvas.height = still.height;
+    context.putImageData(
+      new ImageData(new Uint8ClampedArray(still.bytes), still.width, still.height),
+      0,
+      0,
+    );
+  }, [still]);
+
+  return (
+    <canvas
+      ref={canvasRef}
+      className="pointer-events-none absolute inset-0 h-full w-full"
+      aria-hidden
+    />
   );
 }
 

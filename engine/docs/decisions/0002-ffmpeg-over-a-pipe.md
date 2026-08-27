@@ -82,9 +82,20 @@ The seam held: adding it required one new type implementing an existing trait,
 one new trait for the capability the pipe genuinely lacks, and no change to
 `relay-core`, `relay-render`, or any caller.
 
+## Status: the reader pool exists too
+
+`relay_media::pool` is the per-media reader pool with a byte-budgeted LRU
+frame cache that playback was waiting on: warm readers roll forward for near
+requests and seek for far ones - frame-accurately through `FfiDecoder` when
+the `ffi` feature is on, by respawn on the pipe otherwise. Its first two
+consumers are live: `relay-cli render` (whose founding "deliberate shortcut"
+comment is finally deleted) and the host's `preview_frame` command, which
+composites the true frame for the paused monitor.
+
 ## What would change our mind
-Nothing left to decide about *whether*. What remains is wiring playback to the
-linked decoder, at which point scrubbing stops respawning a process per seek.
+Nothing left to decide about *whether*. What remains is streaming playback -
+presenting pooled frames continuously against the transport clock rather than
+one paused frame at a time.
 
 Do **not** migrate probe or export along with it - for those, the tradeoff
 never flips.
