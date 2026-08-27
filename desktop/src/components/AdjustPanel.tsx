@@ -148,11 +148,14 @@ export function AdjustPanel({
           title="Speed"
           help="The clip covers the same material either way, so its length on the timeline changes to match."
         >
+          {/* The engine's full range. The track is linear so the useful
+              0.25-4x band sits left of centre; the number field beside it is
+              how the extremes are actually dialled in. */}
           <Slider
             label="Rate"
             value={clip.speed}
-            min={0.25}
-            max={4}
+            min={0.0625}
+            max={16}
             step={0.05}
             format={(value) => `${value.toFixed(2)}x`}
             onReset={() => onSpeedChange(1)}

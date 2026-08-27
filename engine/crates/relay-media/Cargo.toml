@@ -3,6 +3,7 @@ name = "relay-media"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+license.workspace = true
 description = "Getting pixels in and out of media files. The only crate that knows FFmpeg exists."
 
 [dependencies]

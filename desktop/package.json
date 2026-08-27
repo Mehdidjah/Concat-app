@@ -28,5 +28,6 @@
     "tailwindcss": "^4",
     "typescript": "~5.8.3",
     "vite": "^7.0.4"
-  }
+  },
+  "license": "MPL-2.0"
 }

@@ -6,7 +6,7 @@ members = ["crates/*"]
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.93"
-# license = "TODO"  # see docs/decisions/0005-license-is-undecided.md
+license = "MPL-2.0"  # see docs/decisions/0005-license-mpl-2.md
 
 [workspace.dependencies]
 relay-core = { path = "crates/relay-core" }

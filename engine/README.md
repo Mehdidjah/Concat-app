@@ -21,7 +21,7 @@ wrong crate.
 cargo build
 cargo test
 cargo run -p relay-cli -- probe some-video.mp4
-cargo run -p relay-cli -- demo some-video.mp4 out.mp4 --frames 120
+cargo run -p relay-cli -- render some-video.mp4 out.mp4 --frames 120
 ```
 
 Requires `ffmpeg` and `ffprobe` on `PATH`.

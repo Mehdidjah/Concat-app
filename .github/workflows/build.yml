@@ -148,6 +148,10 @@ jobs:
           # A hyphen in the tag (v0.1.0-alpha.1) marks a pre-release.
           prerelease: ${{ contains(github.ref_name, '-') }}
           generate_release_notes: true
+          body: |
+            WolfCut is MPL-2.0. The installers bundle GPL-built FFmpeg binaries,
+            invoked as separate programs — sources and licenses in
+            [THIRD_PARTY_NOTICES.md](https://github.com/jub0t/WolfCut/blob/main/THIRD_PARTY_NOTICES.md).
           fail_on_unmatched_files: true
           files: |
             bundles/**/*.dmg

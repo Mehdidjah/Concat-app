@@ -187,7 +187,7 @@ export function fromDocument(raw: unknown): Project | null {
             // Clamped, not just defaulted: a hand-edited 2 would export
             // differently from how the preview clamps it on screen.
             opacity: Math.min(1, Math.max(0, number(clip.opacity, 1))),
-            speed: Math.max(0.1, number(clip.speed, 1)),
+            speed: Math.max(0.0625, Math.min(16, number(clip.speed, 1))),
             preservePitch: flag(clip.preservePitch, true),
             muted: flag(clip.muted, false) || undefined,
             detachedFrom: typeof clip.detachedFrom === "string" ? clip.detachedFrom : undefined,

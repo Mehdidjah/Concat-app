@@ -38,8 +38,10 @@ src/
   lib/
     engine.ts          the ONLY file that calls invoke(). Typed IPC boundary.
     project.ts         the provisional edit model and its operations
-    transport.ts       the playback clock
-    audio.ts           audio preview - one media element per audible clip
+    transport.ts       the playback clock (follows the engine's position events)
+    effects.ts         video effect & transition catalogue -> ffmpeg chains + live previews
+    filters.ts         audio filter catalogue -> ffmpeg chains
+    persist.ts         tolerant relay.json reader/writer
     time.ts            display formatting. No time arithmetic lives in the UI.
   styles.css           Tailwind entry point, tokens, and the `surface` utility
 src-tauri/
@@ -68,9 +70,12 @@ src-tauri/
 | `←` `→` | Step one frame (`Shift` for ten) |
 | `Home` `End` | Jump to start / end |
 | `V` `C` | Select tool / razor tool |
-| `S` | Split at playhead |
+| `S` / `Ctrl`+`B` | Split at playhead |
+| `M` | Merge selected clips |
 | `N` | Toggle snapping |
-| `Del` | Delete selected clip |
+| `Del` | Delete selection |
+| `Ctrl`+`S` | Save |
+| `Ctrl`+`E` | Export |
 | `Ctrl`+wheel | Zoom the timeline about the pointer |
 | wheel | Pan the timeline |
 
@@ -86,12 +91,6 @@ Keep them adjacent in the same commit.
 
 ## Not decided yet
 
-- **Content Security Policy** is `null` in `tauri.conf.json`. Fine while
-  everything is local; it needs a real policy before the app loads anything it
-  did not author. See decision 0003.
-- **File import is a path box**, not a native dialog. Adding one means the
-  `dialog` plugin and a capability entry - a decision for whoever builds real
-  import.
 - **No state library.** React state is enough while the engine owns the model.
   If it stops being enough, the answer is a store outside React (so timeline
   updates do not re-render the tree), not more `useState`.

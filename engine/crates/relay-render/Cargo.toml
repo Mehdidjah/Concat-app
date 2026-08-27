@@ -3,6 +3,7 @@ name = "relay-render"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+license.workspace = true
 description = "Turning a timeline plus a timestamp into one finished frame."
 
 [features]

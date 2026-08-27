@@ -1,5 +1,11 @@
 # 0004 - Audio and video preview run in the webview, for now
 
+> **Superseded in part by [0005](0005-audio-playback-in-the-engine.md)** and
+> **amended by [0007](0007-preview-approximation-layer.md):** the "No effects"
+> claim below no longer holds - the monitor now draws every effect and
+> transition live through an approximation layer, and 0007 makes that layer
+> the plan of record rather than scaffolding.
+>
 > **Superseded in part by [0005](0005-audio-playback-in-the-engine.md):**
 > audio playback now lives in the engine - decoded, mixed and clocked in
 > `src-tauri/src/playback.rs`, with the UI following the engine's position

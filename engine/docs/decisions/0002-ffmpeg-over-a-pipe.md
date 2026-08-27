@@ -12,10 +12,10 @@ Split by use case rather than picking one backend for everything.
 |---|---|---|
 | Probe (`ffprobe`) | subprocess | Permanent. Runs once per import; robustness beats latency. |
 | Export / render | subprocess | Permanent unless throughput demands otherwise. |
-| Playback and scrubbing | **FFI** (`rsmpeg` or `ffmpeg-next`) | Not built yet. Required before playback ships. |
+| Playback and scrubbing | **FFI** (`rusty_ffmpeg`) | Built and tested (`FfiDecoder`, `ffi` feature); not yet wired to the app. |
 
-Today only the subprocess backends exist, because nothing scrubs yet. The FFI
-backend arrives with the frame cache and the transport, not before.
+The subprocess backends run everything today; the FFI decoder exists and waits
+on the frame cache and reader pool before playback can use it.
 
 ## Why the subprocess path is genuinely right for probe and export
 - A crashing decoder on malformed input kills a child process, not the editor.

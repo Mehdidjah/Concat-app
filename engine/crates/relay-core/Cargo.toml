@@ -3,6 +3,7 @@ name = "relay-core"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+license.workspace = true
 description = "Time, arenas, frames and the timeline model shared by every other Relay crate."
 
 # Deliberately empty. relay-core is std-only, and should stay that way: it is the

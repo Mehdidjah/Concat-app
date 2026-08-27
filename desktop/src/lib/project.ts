@@ -1103,7 +1103,9 @@ export function setClipSpeed(project: Project, clipId: string, speed: number): P
   const clip = findClip(project, clipId);
   if (!clip) return project;
 
-  const next = Math.max(0.1, Math.min(8, speed));
+  // The engine's SPEED_RANGE (relay-media audio.rs), verbatim. One number,
+  // one truth: a rate the exporter would clamp must not survive in the model.
+  const next = Math.max(0.0625, Math.min(16, speed));
   const sourceCovered = clip.duration * clip.speed;
 
   return updateClip(project, clipId, {

@@ -29,6 +29,37 @@ const FRAME_PRESETS = [
   { label: "21:9", width: 2560, height: 1080 },
 ] as const;
 
+/**
+ * A tiny rectangle in the aspect of a frame size, so "vertical" and
+ * "landscape" read at a glance before the numbers do.
+ *
+ * Normalised so the long side is always the same length - the shapes differ
+ * only in proportion, which is the one thing they exist to show. The current
+ * size fills with accent, making the shape double as the selection mark.
+ */
+function RatioShape({
+  width,
+  height,
+  active = false,
+}: {
+  width: number;
+  height: number;
+  active?: boolean;
+}) {
+  const long = 13;
+  const shapeWidth = width >= height ? long : Math.max(5, Math.round((long * width) / height));
+  const shapeHeight = height >= width ? long : Math.max(5, Math.round((long * height) / width));
+  return (
+    <span
+      aria-hidden
+      className={`inline-block rounded-[2px] border ${
+        active ? "border-accent bg-accent-soft" : "border-current opacity-50"
+      }`}
+      style={{ width: shapeWidth, height: shapeHeight }}
+    />
+  );
+}
+
 /** "16:9" for a preset size, the reduced fraction for anything else. */
 function ratioLabel(width: number, height: number): string {
   const preset = FRAME_PRESETS.find(
@@ -648,25 +679,29 @@ export function Preview({
             align="right"
             direction="up"
             groups={[
-              FRAME_PRESETS.map((preset) => ({
-                label: `${preset.label} — ${preset.width} x ${preset.height}`,
-                icon:
-                  preset.width === frame.width && preset.height === frame.height
-                    ? ("check" as const)
-                    : undefined,
-                onSelect: () => onFrameChange(preset.width, preset.height),
-              })),
+              FRAME_PRESETS.map((preset) => {
+                const active =
+                  preset.width === frame.width && preset.height === frame.height;
+                return {
+                  label: `${preset.label} — ${preset.width} x ${preset.height}`,
+                  leading: (
+                    <RatioShape width={preset.width} height={preset.height} active={active} />
+                  ),
+                  onSelect: () => onFrameChange(preset.width, preset.height),
+                };
+              }),
             ]}
             trigger={(open) => (
               <span
                 title="Output size"
-                className={`flex items-center gap-1 rounded-md px-1.5 py-0.5 font-technical text-[10px]
+                className={`flex items-center gap-1.5 rounded-md px-1.5 py-0.5 font-technical text-[10px]
                             transition-colors ${
                               open
                                 ? "bg-active text-primary"
                                 : "text-tertiary hover:bg-hover hover:text-secondary"
                             }`}
               >
+                <RatioShape width={frame.width} height={frame.height} />
                 {ratioLabel(frame.width, frame.height)} · {frame.width}x{frame.height}
                 <Icon name="chevronDown" size={10} />
               </span>
