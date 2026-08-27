@@ -56,10 +56,18 @@ pub struct ClipSpec {
     pub chain: String,
 }
 
-/// Decoded audio: 16-bit little-endian stereo at [`PCM_RATE`], memory-mapped
-/// from the cache file so the OS decides what stays resident.
+/// Decoded audio: 16-bit little-endian stereo at [`PCM_RATE`] inside a WAV
+/// container, memory-mapped from the cache file so the OS decides what stays
+/// resident.
+///
+/// WAV rather than raw PCM because the bundled FFmpeg is a trimmed build, and
+/// the raw `s16le` muxer is one of the things trimmed away - the `wav` muxer
+/// is not. The header costs a one-time chunk walk here; the samples inside
+/// are the identical bytes.
 struct Pcm {
     map: memmap2::Mmap,
+    /// Byte offset of the first sample - just past the `data` chunk header.
+    start: usize,
     frames: u64,
 }
 
@@ -69,8 +77,10 @@ impl Pcm {
             .map_err(|error| format!("could not open {}: {error}", path.display()))?;
         let map = unsafe { memmap2::Mmap::map(&file) }
             .map_err(|error| format!("could not map {}: {error}", path.display()))?;
-        let frames = (map.len() / 4) as u64;
-        Ok(Pcm { map, frames })
+        let (start, length) = wav_data_range(&map)
+            .ok_or_else(|| format!("{} is not the wav this cache writes", path.display()))?;
+        let frames = (length / 4) as u64;
+        Ok(Pcm { map, start, frames })
     }
 
     /// One sample as a float in [-1, 1]. Out of range reads are silence.
@@ -78,10 +88,46 @@ impl Pcm {
         if frame >= self.frames {
             return 0.0;
         }
-        let at = (frame as usize * 2 + channel) * 2;
+        let at = self.start + (frame as usize * 2 + channel) * 2;
         let raw = i16::from_le_bytes([self.map[at], self.map[at + 1]]);
         f32::from(raw) / 32768.0
     }
+}
+
+/// Finds the samples inside a WAV file: byte offset of the `data` chunk's
+/// payload and its usable length.
+///
+/// A plain chunk walk, not a format library: the file was written by our own
+/// FFmpeg invocation two functions down, so the only variability is which
+/// bookkeeping chunks precede `data`. Sizes written to a pipe are `u32::MAX`
+/// placeholders - the muxer could not seek back to patch them - in which case
+/// the payload is simply the rest of the file.
+fn wav_data_range(bytes: &[u8]) -> Option<(usize, usize)> {
+    if bytes.len() < 12 || &bytes[0..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
+        return None;
+    }
+
+    let mut at = 12;
+    while at + 8 <= bytes.len() {
+        let id = &bytes[at..at + 4];
+        let size = u32::from_le_bytes([bytes[at + 4], bytes[at + 5], bytes[at + 6], bytes[at + 7]]);
+        let payload = at + 8;
+
+        if id == b"data" {
+            let available = bytes.len() - payload;
+            let length = if size == u32::MAX { available } else { (size as usize).min(available) };
+            return Some((payload, length));
+        }
+
+        // A placeholder size on any other chunk means the walk cannot
+        // continue - refuse rather than misread samples as headers.
+        if size == u32::MAX {
+            return None;
+        }
+        // Chunks are word-aligned; an odd size is followed by a pad byte.
+        at = payload + size as usize + (size as usize & 1);
+    }
+    None
 }
 
 /// A clip the mix callback can play: spec fields it needs, plus the audio.
@@ -285,7 +331,9 @@ fn decode(spec: &ClipSpec, project: &Path, key: &str) -> Result<Pcm, String> {
     relay_media::audio::validate_chain(&spec.chain).map_err(|error| error.to_string())?;
 
     let directory = project.join("cache").join("audio");
-    let destination = directory.join(format!("{key}.pcm"));
+    // `.wav`, and `.pcm` before the muxer change - old raw caches are simply
+    // orphaned and re-decoded, because a cache must never need migrating.
+    let destination = directory.join(format!("{key}.wav"));
     if destination.is_file() {
         return Pcm::open(&destination);
     }
@@ -308,7 +356,7 @@ fn decode(spec: &ClipSpec, project: &Path, key: &str) -> Result<Pcm, String> {
     // the exporter trims.
     let window = spec.duration * relay_media::audio::clamp_speed(spec.speed);
 
-    let temporary = directory.join(format!("{key}.pcm.decoding"));
+    let temporary = directory.join(format!("{key}.wav.decoding"));
     let file = std::fs::File::create(&temporary)
         .map_err(|error| format!("could not create {}: {error}", temporary.display()))?;
 
@@ -318,7 +366,9 @@ fn decode(spec: &ClipSpec, project: &Path, key: &str) -> Result<Pcm, String> {
         .args(["-t", &format!("{window:.6}")])
         .args(["-i", &spec.path])
         .args(["-vn", "-af", &filters.join(",")])
-        .args(["-f", "s16le", "pipe:1"])
+        // `wav`, not `s16le`: the bundled FFmpeg is a trimmed build and the
+        // raw muxer is not in it. `Pcm::open` skips the header.
+        .args(["-f", "wav", "pipe:1"])
         .stdout(file)
         .status()
         .map_err(|error| format!("could not run ffmpeg: {error}"))?;
@@ -461,5 +511,56 @@ where
     // The stream lives exactly as long as this thread.
     loop {
         std::thread::sleep(std::time::Duration::from_secs(3600));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::wav_data_range;
+
+    /// A minimal RIFF/WAVE: fmt chunk, then a data chunk with `samples`.
+    fn wav(data_size: u32, samples: &[u8]) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"RIFF");
+        bytes.extend_from_slice(&u32::MAX.to_le_bytes()); // pipe placeholder
+        bytes.extend_from_slice(b"WAVE");
+        bytes.extend_from_slice(b"fmt ");
+        bytes.extend_from_slice(&16u32.to_le_bytes());
+        bytes.extend_from_slice(&[0u8; 16]);
+        bytes.extend_from_slice(b"data");
+        bytes.extend_from_slice(&data_size.to_le_bytes());
+        bytes.extend_from_slice(samples);
+        bytes
+    }
+
+    #[test]
+    fn finds_the_data_chunk_past_the_headers() {
+        let bytes = wav(8, &[1, 2, 3, 4, 5, 6, 7, 8]);
+        let (start, length) = wav_data_range(&bytes).expect("valid wav");
+        assert_eq!(length, 8);
+        assert_eq!(&bytes[start..start + length], &[1, 2, 3, 4, 5, 6, 7, 8]);
+    }
+
+    #[test]
+    fn a_placeholder_data_size_means_the_rest_of_the_file() {
+        // What the wav muxer writes to a pipe: it cannot seek back to patch.
+        let bytes = wav(u32::MAX, &[9, 9, 9, 9]);
+        let (start, length) = wav_data_range(&bytes).expect("valid wav");
+        assert_eq!(length, 4);
+        assert_eq!(start, bytes.len() - 4);
+    }
+
+    #[test]
+    fn a_stated_size_is_clamped_to_the_file() {
+        // A truncated decode must read short, not out of bounds.
+        let bytes = wav(1000, &[1, 2]);
+        assert_eq!(wav_data_range(&bytes).map(|(_, length)| length), Some(2));
+    }
+
+    #[test]
+    fn refuses_files_that_are_not_wav() {
+        assert_eq!(wav_data_range(b""), None);
+        assert_eq!(wav_data_range(b"RIFFxxxxJUNK"), None);
+        assert_eq!(wav_data_range(&[0u8; 64]), None);
     }
 }
