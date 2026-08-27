@@ -7,9 +7,10 @@ import {
   resolveParams,
   type ClipFilter,
   type FilterCategory,
+  type FilterDefinition,
 } from "../lib/filters";
 import type { Clip } from "../lib/project";
-import { Slider } from "./controls";
+import { HelpTip, Slider } from "./controls";
 import { Icon, IconButton } from "./Icon";
 import { Empty } from "./Panel";
 
@@ -22,7 +23,8 @@ import { Empty } from "./Panel";
  *
  * Everything here writes plain numbers onto the clip. The FFmpeg chain is
  * built from those in one place (`lib/filters.ts`) and used by both the
- * preview and the exporter, so what you hear is what gets rendered.
+ * preview and the exporter, so what you hear is what gets rendered - and a
+ * bypassed filter drops out of both through the same single check.
  */
 export function FiltersPanel({
   clip,
@@ -32,6 +34,7 @@ export function FiltersPanel({
   onChange: (filters: ClipFilter[]) => void;
 }) {
   const [category, setCategory] = useState<FilterCategory>("voice");
+  const [query, setQuery] = useState("");
 
   if (!clip) {
     return (
@@ -53,12 +56,10 @@ export function FiltersPanel({
 
   const add = (id: string) => onChange([...applied, { id, params: {} }]);
   const remove = (index: number) => onChange(applied.filter((_, at) => at !== index));
+  const patch = (index: number, change: Partial<ClipFilter>) =>
+    onChange(applied.map((filter, at) => (at === index ? { ...filter, ...change } : filter)));
   const setParam = (index: number, key: string, value: number) =>
-    onChange(
-      applied.map((filter, at) =>
-        at === index ? { ...filter, params: { ...filter.params, [key]: value } } : filter,
-      ),
-    );
+    patch(index, { params: { ...applied[index].params, [key]: value } });
   const move = (index: number, by: number) => {
     const target = index + by;
     if (target < 0 || target >= applied.length) return;
@@ -67,12 +68,22 @@ export function FiltersPanel({
     onChange(next);
   };
 
+  // A search cuts across the categories: when you know the name you should
+  // not have to remember which drawer it lives in.
+  const needle = query.trim().toLowerCase();
+  const matches = (filter: FilterDefinition) =>
+    needle === ""
+      ? filter.category === category
+      : `${filter.label} ${filter.blurb}`.toLowerCase().includes(needle);
+  const browsable = FILTERS.filter(matches);
+
   return (
     <div className="px-3 py-3">
       {applied.length > 0 && (
         <section className="mb-5">
-          <h3 className="mb-2 flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wider text-tertiary">
+          <h3 className="mb-2 flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-tertiary">
             Applied
+            <HelpTip text="Filters run top to bottom, and order is audible. The eye bypasses one without losing its settings - flick it to compare." />
           </h3>
 
           <ul className="flex flex-col gap-2">
@@ -80,13 +91,31 @@ export function FiltersPanel({
               const definition = findFilter(entry.id);
               if (!definition) return null;
               const values = resolveParams(definition, entry.params);
+              const active = entry.enabled !== false;
 
               return (
                 <li key={`${entry.id}-${index}`} className="rounded-lg bg-sunken p-2.5">
                   <div className="mb-2 flex items-center gap-1">
-                    <span className="min-w-0 flex-1 truncate text-xs text-primary">
+                    <span
+                      className={`min-w-0 flex-1 truncate text-xs ${
+                        active ? "text-primary" : "text-tertiary line-through"
+                      }`}
+                    >
                       {definition.label}
                     </span>
+                    <IconButton
+                      icon={active ? "eye" : "eyeOff"}
+                      label={active ? `Bypass ${definition.label}` : `Enable ${definition.label}`}
+                      size={7}
+                      onClick={() => patch(index, { enabled: !active })}
+                    />
+                    <IconButton
+                      icon="chevronUp"
+                      label="Move earlier in the chain"
+                      size={7}
+                      disabled={index === 0}
+                      onClick={() => move(index, -1)}
+                    />
                     <IconButton
                       icon="chevronDown"
                       label="Move later in the chain"
@@ -103,19 +132,23 @@ export function FiltersPanel({
                     />
                   </div>
 
-                  {definition.params.map((param) => (
-                    <Slider
-                      key={param.key}
-                      label={param.label}
-                      value={values[param.key]}
-                      min={param.min}
-                      max={param.max}
-                      step={param.step}
-                      format={param.format}
-                      onReset={() => setParam(index, param.key, param.default)}
-                      onChange={(value) => setParam(index, param.key, value)}
-                    />
-                  ))}
+                  {/* Dimmed but still editable while bypassed, so a setting
+                      can be dialled in before the filter is switched on. */}
+                  <div className={active ? "" : "opacity-50"}>
+                    {definition.params.map((param) => (
+                      <Slider
+                        key={param.key}
+                        label={param.label}
+                        value={values[param.key]}
+                        min={param.min}
+                        max={param.max}
+                        step={param.step}
+                        format={param.format}
+                        onReset={() => setParam(index, param.key, param.default)}
+                        onChange={(value) => setParam(index, param.key, value)}
+                      />
+                    ))}
+                  </div>
                 </li>
               );
             })}
@@ -123,44 +156,74 @@ export function FiltersPanel({
         </section>
       )}
 
-      <div className="mb-3 flex rounded-lg bg-sunken p-0.5">
-        {CATEGORIES.map((entry) => (
+      <div className="mb-2 flex items-center gap-1.5 rounded-lg bg-sunken px-2">
+        <Icon name="search" size={12} className="shrink-0 text-tertiary" />
+        <input
+          value={query}
+          onChange={(event) => setQuery(event.target.value)}
+          placeholder="Search filters"
+          className="h-7 w-full bg-transparent text-xs text-primary outline-none
+                     placeholder:text-tertiary"
+        />
+        {query !== "" && (
           <button
-            key={entry.id}
             type="button"
-            aria-pressed={category === entry.id}
-            onClick={() => setCategory(entry.id)}
-            className={`flex-1 cursor-pointer rounded-[6px] px-2 py-1 text-[12px] transition-colors ${
-              category === entry.id
-                ? "bg-panel text-primary shadow-[0_1px_2px_rgba(0,0,0,0.14)]"
-                : "text-secondary hover:text-primary"
-            }`}
+            aria-label="Clear search"
+            onClick={() => setQuery("")}
+            className="cursor-pointer text-tertiary transition-colors hover:text-primary"
           >
-            {entry.label}
+            <Icon name="close" size={10} />
           </button>
-        ))}
+        )}
       </div>
 
-      <ul className="flex flex-col gap-1">
-        {FILTERS.filter((filter) => filter.category === category).map((filter) => (
-          <li key={filter.id}>
+      {needle === "" && (
+        <div className="mb-3 flex rounded-lg bg-sunken p-0.5">
+          {CATEGORIES.map((entry) => (
             <button
+              key={entry.id}
               type="button"
-              onClick={() => add(filter.id)}
-              className="w-full cursor-pointer rounded-lg px-2 py-2 text-left transition-colors
-                         hover:bg-hover"
+              aria-pressed={category === entry.id}
+              onClick={() => setCategory(entry.id)}
+              className={`flex-1 cursor-pointer rounded-md px-2 py-1 text-[12px] transition-colors ${
+                category === entry.id
+                  ? "bg-panel text-primary shadow-[0_1px_2px_rgba(0,0,0,0.14)]"
+                  : "text-secondary hover:text-primary"
+              }`}
             >
-              <span className="flex items-center gap-2">
-                <Icon name="plus" size={12} className="shrink-0 text-tertiary" />
-                <span className="text-xs text-primary">{filter.label}</span>
-              </span>
-              <span className="mt-0.5 block pl-5 text-[11px] leading-snug text-tertiary">
-                {filter.blurb}
-              </span>
+              {entry.label}
             </button>
-          </li>
-        ))}
-      </ul>
+          ))}
+        </div>
+      )}
+
+      {browsable.length === 0 ? (
+        <p className="px-2 py-3 text-center text-[11px] text-tertiary">
+          Nothing matches "{query.trim()}".
+        </p>
+      ) : (
+        <ul className="flex flex-col gap-0.5">
+          {browsable.map((filter) => (
+            <li key={filter.id}>
+              <button
+                type="button"
+                onClick={() => add(filter.id)}
+                title={filter.blurb}
+                className="flex w-full cursor-pointer items-center gap-2 rounded-lg px-2 py-1.5
+                           text-left transition-colors hover:bg-hover"
+              >
+                <Icon name="plus" size={12} className="shrink-0 text-tertiary" />
+                <span className="min-w-0 flex-1 truncate text-xs text-primary">{filter.label}</span>
+                {needle !== "" && (
+                  <span className="shrink-0 text-[10px] uppercase tracking-wider text-tertiary">
+                    {CATEGORIES.find((entry) => entry.id === filter.category)?.label}
+                  </span>
+                )}
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
     </div>
   );
 }

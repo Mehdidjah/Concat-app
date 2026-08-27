@@ -65,6 +65,8 @@ function overlayClip(title: ExportTitle, path: string): ExportClip {
     offsetX: 0,
     offsetY: 0,
     rotation: 0,
+    // Solid: a title's own transparency is baked into its rasterised PNG.
+    opacity: 1,
     mediaWidth: null,
     mediaHeight: null,
   };

@@ -10,6 +10,7 @@ import type { Clip, ClipMove, Project, Track } from "../lib/project";
 import { snapTime } from "../lib/project";
 import { timecode } from "../lib/time";
 import { Icon, IconButton } from "./Icon";
+import { Menu, type MenuOption } from "./Menu";
 import { Bar, Divider, PANEL_SHELL, Spacer } from "./Panel";
 
 export type Tool = "select" | "razor";
@@ -143,6 +144,7 @@ export function TimelinePanel({
   onRemoveTrack,
   onRenameTrack,
   onClipContextMenu,
+  clipTools,
 }: {
   project: Project;
   playhead: number;
@@ -183,6 +185,11 @@ export function TimelinePanel({
   onRemoveTrack: (trackId: string) => void;
   onRenameTrack: (trackId: string, name: string) => void;
   onClipContextMenu: (clipId: string, x: number, y: number) => void;
+  /**
+   * The audio/video tools dropdown, as menu groups. Built by the app, which
+   * owns the selection logic; this panel only hangs it in the tray.
+   */
+  clipTools: MenuOption[][];
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const drag = useRef<DragState | null>(null);
@@ -738,6 +745,22 @@ export function TimelinePanel({
           label="Snapping (N)"
           active={snap}
           onClick={() => onSnapChange(!snap)}
+        />
+        <Divider />
+        <Menu
+          groups={clipTools}
+          trigger={(open) => (
+            <span
+              title="Audio & video tools"
+              className={`flex h-9 items-center gap-0.5 rounded-lg px-1.5 transition-colors
+                          duration-150 ${
+                            open ? "bg-tool-active-bg text-tool-active" : "text-primary hover:bg-hover"
+                          }`}
+            >
+              <Icon name="waveform" size={16} />
+              <Icon name="chevronDown" size={11} />
+            </span>
+          )}
         />
         <Divider />
         <IconButton icon="plus" label="Add track" onClick={onAddTrack} />

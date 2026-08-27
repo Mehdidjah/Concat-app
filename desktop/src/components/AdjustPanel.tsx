@@ -71,7 +71,10 @@ export function AdjustPanel({
   return (
     <div className="px-3 py-3">
       {hasPicture && (
-        <Group title="Transform">
+        <Group
+          title="Transform"
+          help="You can also drag the picture in the preview - corners scale, the handle above rotates. Double-click any label to reset it, or click a value to type one."
+        >
           <Slider
             label="Scale"
             value={clip.scale}
@@ -112,10 +115,16 @@ export function AdjustPanel({
             onReset={() => onChange({ rotation: 0 })}
             onChange={(rotation) => onChange({ rotation })}
           />
-          <p className="-mt-1 mb-1 text-[11px] leading-snug text-tertiary">
-            Or drag the picture in the preview - corners scale, the handle above
-            rotates.
-          </p>
+          <Slider
+            label="Opacity"
+            value={clip.opacity}
+            min={0}
+            max={1}
+            step={0.01}
+            format={(value) => `${Math.round(value * 100)}%`}
+            onReset={() => onChange({ opacity: 1 })}
+            onChange={(opacity) => onChange({ opacity })}
+          />
         </Group>
       )}
 
@@ -134,8 +143,11 @@ export function AdjustPanel({
       </Group>
       )}
 
-      {clip.kind === "audio" && (
-        <Group title="Speed">
+      {clip.kind !== "image" && (
+        <Group
+          title="Speed"
+          help="The clip covers the same material either way, so its length on the timeline changes to match."
+        >
           <Slider
             label="Rate"
             value={clip.speed}
@@ -152,10 +164,6 @@ export function AdjustPanel({
             checked={!clip.preservePitch}
             onChange={(checked) => onChange({ preservePitch: !checked })}
           />
-          <p className="-mt-1 mb-1 text-[11px] leading-snug text-tertiary">
-            The clip covers the same audio either way, so its length on the timeline
-            changes to match.
-          </p>
         </Group>
       )}
 
@@ -183,10 +191,6 @@ export function AdjustPanel({
         />
       </Group>
       )}
-
-      <p className="text-[11px] leading-relaxed text-tertiary">
-        Double-click a label to reset it.
-      </p>
     </div>
   );
 }

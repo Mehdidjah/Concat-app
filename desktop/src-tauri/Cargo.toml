@@ -33,6 +33,11 @@ rusqlite = { version = "0.40.2", features = ["bundled"] }
 cpal = "0.16"
 memmap2 = "0.9"
 
+# Whisper model downloads. Blocking on purpose: downloads run on a
+# spawn_blocking thread, and an async HTTP stack would be a second runtime's
+# worth of dependencies for one GET.
+ureq = "2"
+
 [profile.release]
 opt-level = 3
 lto = true

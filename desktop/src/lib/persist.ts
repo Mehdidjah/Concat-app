@@ -11,7 +11,7 @@
  */
 
 import type { ProjectSession } from "../components/StartScreen";
-import type { Clip, ClipKind, MediaItem, Project, Track } from "./project";
+import { adoptProject, type Clip, type ClipKind, type MediaItem, type Project, type Track } from "./project";
 import { defaultTextStyle, type CustomFont, type TextStyle } from "./text";
 
 /** Bumped only when a change cannot be absorbed by defaulting. */
@@ -156,6 +156,9 @@ export function fromDocument(raw: unknown): Project | null {
             offsetX: number(clip.offsetX, 0),
             offsetY: number(clip.offsetY, 0),
             rotation: number(clip.rotation, 0),
+            // Clamped, not just defaulted: a hand-edited 2 would export
+            // differently from how the preview clamps it on screen.
+            opacity: Math.min(1, Math.max(0, number(clip.opacity, 1))),
             speed: Math.max(0.1, number(clip.speed, 1)),
             preservePitch: flag(clip.preservePitch, true),
             muted: flag(clip.muted, false) || undefined,
@@ -172,6 +175,8 @@ export function fromDocument(raw: unknown): Project | null {
                         typeof applied.params === "object" && applied.params !== null
                           ? (applied.params as Record<string, number>)
                           : {},
+                      // Absent in files saved before bypass existed: enabled.
+                      enabled: flag(applied.enabled, true),
                     },
                   ];
                 })
@@ -194,7 +199,10 @@ export function fromDocument(raw: unknown): Project | null {
   // A file with no tracks at all is not something to open silently as empty.
   if (tracks.length === 0) return null;
 
-  return { media, tracks, clips, fonts };
+  // The restored ids were minted by an earlier session; the counter must move
+  // past them - and any baked-in duplicates must be re-minted - before
+  // anything new is added, or identities collide.
+  return adoptProject({ media, tracks, clips, fonts });
 }
 
 /**

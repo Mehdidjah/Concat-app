@@ -104,6 +104,15 @@
   --color-selection: #c6f432;
   --color-on-selection: #101014;
 
+  /*
+   * An activated tool button: lime glyph on a slightly darker surface, so the
+   * toolbar reads as "this mode is on" without shouting accent-blue. The lime
+   * is darkened for light mode - a 2px stroke of the selection lime would
+   * wash out on a near-white bar - and is the selection lime itself in dark.
+   */
+  --color-tool-active: #65a30d;
+  --color-tool-active-bg: rgba(0, 0, 0, 0.08);
+
   --color-playhead: #ff3b30;
   --color-clip-video: #0a6cc4;
   --color-clip-video-body: #cfe3f7;
@@ -172,6 +181,9 @@
   --color-accent-hover: #3d9bff;
   --color-accent-soft: rgba(10, 132, 255, 0.18);
   --color-on-accent: #ffffff;
+
+  --color-tool-active: #c6f432;
+  --color-tool-active-bg: rgba(0, 0, 0, 0.32);
 
   --color-danger: #ff453a;
   --color-danger-soft: rgba(255, 69, 58, 0.14);

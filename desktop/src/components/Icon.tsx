@@ -232,6 +232,7 @@ const GLYPHS = {
     </>
   ),
   chevronDown: <path d="m6 9 6 6 6-6" />,
+  chevronUp: <path d="m6 15 6-6 6 6" />,
   chevronRight: <path d="m9 6 6 6-6 6" />,
   search: (
     <>
@@ -251,6 +252,27 @@ const GLYPHS = {
       <circle cx="12" cy="12" r="9" />
       <path d="M12 16v-5" />
       <path d="M12 8h.01" />
+    </>
+  ),
+  help: (
+    <>
+      <circle cx="12" cy="12" r="9" />
+      <path d="M9.4 9.3a2.7 2.7 0 1 1 3.6 2.6c-.7.3-1 .8-1 1.6v.3" />
+      <path d="M12 17h.01" />
+    </>
+  ),
+  // a four-point star with a smaller companion, for "effects"
+  sparkles: (
+    <>
+      <path d="M10 3.5l1.7 4.3 4.3 1.7-4.3 1.7L10 15.5l-1.7-4.3L4 9.5l4.3-1.7z" />
+      <path d="M17.5 14l1 2.5 2.5 1-2.5 1-1 2.5-1-2.5-2.5-1 2.5-1z" />
+    </>
+  ),
+  // a frame split on the diagonal, for "transitions"
+  transition: (
+    <>
+      <rect x="4" y="4" width="16" height="16" rx="2" />
+      <path d="M4.8 19.2 19.2 4.8" />
     </>
   ),
   // crossed arrows, for "fit to window"
@@ -299,8 +321,9 @@ export function Icon({
 /**
  * The standard square icon button.
  *
- * Blue when active, transparent otherwise - the same convention design3d uses,
- * so "this tool is selected" reads identically across both apps.
+ * Active means a lime glyph on a slightly darker surface - quieter than a
+ * filled accent square, and the same lime the timeline uses for selection, so
+ * "this is on" reads as one colour everywhere. Transparent when idle.
  */
 export function IconButton({
   icon,
@@ -327,7 +350,8 @@ export function IconButton({
         ? "text-success hover:bg-hover"
         : "text-primary hover:bg-hover";
 
-  const on = tone === "go" ? "bg-success text-on-accent" : "bg-accent text-on-accent";
+  const on =
+    tone === "go" ? "bg-success text-on-accent" : "bg-tool-active-bg text-tool-active";
 
   return (
     <button

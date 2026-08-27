@@ -39,6 +39,11 @@ export interface FilterDefinition {
 export interface ClipFilter {
   id: string;
   params: Record<string, number>;
+  /**
+   * False bypasses the filter without losing its settings - the A/B switch.
+   * Absent means enabled, so filters saved before this existed stay audible.
+   */
+  enabled?: boolean;
 }
 
 export const CATEGORIES: { id: FilterCategory; label: string }[] = [
@@ -277,6 +282,9 @@ export function resolveParams(
  */
 export function buildChain(filters: readonly ClipFilter[]): string | null {
   const fragments = filters.flatMap((applied) => {
+    // A bypassed filter contributes nothing, so preview and export both fall
+    // out of this one check - there is no second place to forget.
+    if (applied.enabled === false) return [];
     const definition = findFilter(applied.id);
     if (!definition) return [];
     return [definition.chain(resolveParams(definition, applied.params))];

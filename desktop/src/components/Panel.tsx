@@ -45,7 +45,9 @@ export function Panel({
 /** A horizontal group of controls, e.g. the timeline toolbar. */
 export function Bar({ children }: { children: ReactNode }) {
   return (
-    <div className="flex h-10 shrink-0 items-center gap-1 border-b border-hairline bg-panel px-2">
+    // Taller than its buttons on purpose: a 36px button in a 44px bar gets
+    // 4px of air at top and bottom instead of pressing against the edges.
+    <div className="flex h-11 shrink-0 items-center gap-1 border-b border-hairline bg-panel px-2">
       {children}
     </div>
   );

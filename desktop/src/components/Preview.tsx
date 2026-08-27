@@ -45,6 +45,9 @@ export interface PreviewSource {
   path: string;
   /** Where in the source file the playhead sits, in seconds. */
   time: number;
+  /** Playback rate, 1 being normal - the element must run at this rate or it
+      drifts from the transport and stutters on every corrective seek. */
+  speed: number;
   /** A still is shown as an image; there is nothing to seek or play. */
   isStill: boolean;
 }
@@ -174,6 +177,7 @@ export function Preview({
   frameRate,
   frame,
   transform,
+  opacity,
   mediaSize,
   selectedClipId,
   onSelectClip,
@@ -195,6 +199,8 @@ export function Preview({
   frame: { width: number; height: number };
   /** The displayed clip's picture transform. Null when nothing is showing. */
   transform: PreviewTransform | null;
+  /** The displayed clip's blend strength, 1 being solid. */
+  opacity: number;
   /** The source's pixel size, when the probe reported one. */
   mediaSize: { width: number; height: number } | null;
   /** The single selected clip, if there is one - its box shows handles. */
@@ -279,6 +285,9 @@ export function Preview({
           transform: `translate(${transform.offsetX * frameRect.width}px, ${
             transform.offsetY * frameRect.height
           }px) rotate(${transform.rotation}deg) scale(${transform.scale})`,
+          // The same blend the compositor applies on export. On the wrapper
+          // with the transform, so the whole picture fades as one surface.
+          opacity: Math.min(1, Math.max(0, opacity)),
         }
       : undefined;
 
@@ -315,6 +324,11 @@ export function Preview({
   useEffect(() => {
     const element = video.current;
     if (!element || !source || source.isStill) return;
+
+    // The element free-runs between corrections, so it has to free-run at the
+    // clip's rate. Clamped to what media elements reliably accept.
+    const rate = Math.min(16, Math.max(0.0625, source.speed));
+    if (element.playbackRate !== rate) element.playbackRate = rate;
 
     const tolerance = playing ? 0.3 : 0.03;
     if (element.readyState > 0 && Math.abs(element.currentTime - source.time) > tolerance) {

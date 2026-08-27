@@ -70,6 +70,10 @@ pub struct ExportClip {
     /// Clockwise rotation in degrees.
     #[serde(default)]
     pub rotation: f64,
+    /// Blend strength over the layers beneath, 1 being solid. Defaulted for
+    /// requests from a UI that predates it.
+    #[serde(default = "unity")]
+    pub opacity: f64,
     /// The source's pixel size, when the UI knows it. What makes an
     /// aspect-correct decode possible - absent, the frame is filled edge to
     /// edge the way it always was.
@@ -433,6 +437,7 @@ fn build_timeline(
             offset_y: clip.offset_y,
             rotation: clip.rotation,
         };
+        engine_clip.opacity = clip.opacity.clamp(0.0, 1.0) as f32;
 
         if let Some(id) = timeline.add_clip(tracks[clip.track], engine_clip) {
             if clip.kind == "image" {

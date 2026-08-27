@@ -11,6 +11,7 @@ import { ALL_MEDIA, MediaBin, type BinFilter } from "./components/MediaBin";
 import { Preview, type PreviewSource, type TextOverlay } from "./components/Preview";
 import { Resizer } from "./components/Resizer";
 import { RightPanel, type RightTab } from "./components/RightPanel";
+import { SettingsDialog } from "./components/SettingsDialog";
 import { StartScreen, type ProjectSession } from "./components/StartScreen";
 import { TitleBar } from "./components/TitleBar";
 import { TimelinePanel, resolveDrop, type Tool } from "./components/TimelinePanel";
@@ -21,8 +22,10 @@ import {
   probeMedia,
   readMediaBytes,
   saveProject,
+  transcribeClip,
   type ExportClip,
 } from "./lib/engine";
+import { getTranscriberLanguage, getTranscriberModel } from "./lib/settings";
 import {
   addClip,
   addMedia,
@@ -55,6 +58,7 @@ import {
   updateClip,
   trimClip,
   whyNotMerge,
+  type Clip,
   type MediaItem,
   type Project,
 } from "./lib/project";
@@ -337,6 +341,139 @@ function Editor({
     return () => window.clearTimeout(timer);
   }, [toast]);
 
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [transcribing, setTranscribing] = useState(false);
+
+  /**
+   * Transcribes one clip's audio and lays the result out as text clips on a
+   * "Captions" track (created on first use, reused after).
+   *
+   * The clip's identity is captured when the menu item is built, so the
+   * timestamps map is computed against exactly the clip that was clicked -
+   * even if the selection has moved on by the time whisper finishes. Segment
+   * times come back relative to the source window; dividing by speed and
+   * adding the clip's start is the same affine map the preview and exporter
+   * use, run in reverse.
+   */
+  const autoCaption = useCallback(
+    async (clip: Clip, media: MediaItem) => {
+      setTranscribing(true);
+      setToast({ id: Date.now(), message: "Transcribing...", failed: false });
+      try {
+        const segments = await transcribeClip({
+          path: media.path,
+          sourceStart: clip.sourceStart,
+          window: clip.duration * clip.speed,
+          language: getTranscriberLanguage(),
+          modelId: getTranscriberModel(),
+        });
+
+        if (segments.length === 0) {
+          setToast({ id: Date.now(), message: "No speech found", failed: false });
+          return;
+        }
+
+        setProject((current) => {
+          let next = current;
+          let trackId = next.tracks.find((track) => track.name === "Captions")?.id ?? "";
+          if (!trackId) {
+            const grown = addTrack(next);
+            next = renameTrack(grown.project, grown.trackId, "Captions");
+            trackId = grown.trackId;
+          }
+
+          for (const segment of segments) {
+            const start = clip.start + segment.start / clip.speed;
+            const duration = Math.max(0.4, (segment.end - segment.start) / clip.speed);
+            const made = addTextClip(next, {
+              trackId,
+              start,
+              // Caption-sized and lower-third, not title-sized and centred.
+              style: { content: segment.text, fontSize: 0.045 },
+            });
+            next = made.clipId
+              ? updateClip(made.project, made.clipId, { duration, offsetY: 0.38 })
+              : made.project;
+          }
+          return next;
+        });
+        setToast({
+          id: Date.now(),
+          message: `Added ${segments.length} caption${segments.length === 1 ? "" : "s"}`,
+          failed: false,
+        });
+      } catch (cause) {
+        setToast({ id: Date.now(), message: String(cause), failed: true });
+      } finally {
+        setTranscribing(false);
+      }
+    },
+    [],
+  );
+
+  /**
+   * The audio/video tools dropdown in the timeline tray.
+   *
+   * The same operations the clip context menu offers, but discoverable: a
+   * right-click menu only teaches people who already right-click. Items are
+   * disabled rather than hidden, so the tool's existence does not depend on
+   * what happens to be selected.
+   */
+  const clipTools = useMemo(() => {
+    const clip = selectedClipIds.length === 1 ? findClip(project, selectedClipIds[0]) : null;
+    const media = clip ? findMedia(project, clip.mediaId) : null;
+
+    const hasSound = Boolean(
+      clip && (clip.kind === "video" || clip.kind === "audio") && media?.hasAudio,
+    );
+    const canDetach = Boolean(
+      clip &&
+        clip.kind === "video" &&
+        !clip.muted &&
+        media?.hasAudio &&
+        detachedAudioOf(project, clip.id).length === 0,
+    );
+    const canReattach = Boolean(
+      clip &&
+        ((clip.kind === "video" && detachedAudioOf(project, clip.id).length > 0) ||
+          (clip.kind === "audio" && clip.detachedFrom && findClip(project, clip.detachedFrom))),
+    );
+
+    return [
+      [
+        {
+          label: transcribing ? "Transcribing..." : "Auto captions",
+          icon: "type" as const,
+          disabled: !hasSound || transcribing,
+          onSelect: () => {
+            if (clip && media) void autoCaption(clip, media);
+          },
+        },
+      ],
+      [
+        {
+          label: "Detach audio",
+          icon: "waveform" as const,
+          disabled: !canDetach,
+          onSelect: () => {
+            if (clip) setProject((current) => detachAudio(current, clip.id));
+          },
+        },
+        {
+          label: "Reattach audio",
+          icon: "merge" as const,
+          disabled: !canReattach,
+          onSelect: () => {
+            if (clip) {
+              setProject((current) => reattachAudio(current, clip.id));
+              setSelectedClipIds([]);
+            }
+          },
+        },
+      ],
+    ];
+  }, [project, selectedClipIds, transcribing, autoCaption]);
+
   // Autosave, debounced. The edit is the thing people lose; making them
   // remember a keystroke to keep it is a design decision nobody wants.
   useEffect(() => {
@@ -500,7 +637,10 @@ function Editor({
     return {
       clipId: top.id,
       path: media.path,
-      time: top.sourceStart + (playhead - top.start),
+      // A timeline second covers `speed` source seconds - the same map the
+      // exporter's frame plan applies.
+      time: top.sourceStart + (playhead - top.start) * top.speed,
+      speed: top.speed,
       isStill: top.kind === "image",
     };
   }, [project, playhead]);
@@ -642,8 +782,18 @@ function Editor({
   // ── keyboard ─────────────────────────────────────────────────────────────
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
-      // Never steal keys from a text field.
-      if (event.target instanceof HTMLInputElement) return;
+      // Never steal keys from anywhere text is being written: inputs, the
+      // text panel's textarea, and inline editing (contentEditable). Space
+      // must insert a space there, and Backspace must not delete a clip.
+      const target = event.target;
+      if (
+        target instanceof HTMLInputElement ||
+        target instanceof HTMLTextAreaElement ||
+        target instanceof HTMLSelectElement ||
+        (target instanceof HTMLElement && target.isContentEditable)
+      ) {
+        return;
+      }
 
       /*
        * Modified shortcuts are handled separately and then we return.
@@ -755,6 +905,7 @@ function Editor({
             offsetX: clip.offsetX,
             offsetY: clip.offsetY,
             rotation: clip.rotation,
+            opacity: clip.opacity,
             mediaWidth: media.width,
             mediaHeight: media.height,
           },
@@ -849,6 +1000,13 @@ function Editor({
                   icon: "export",
                   disabled: exportClips.length === 0,
                   onSelect: () => setExporting(true),
+                },
+              ],
+              [
+                {
+                  label: "Settings...",
+                  icon: "settings",
+                  onSelect: () => setSettingsOpen(true),
                 },
               ],
               [
@@ -976,6 +1134,7 @@ function Editor({
                     }
                   : null
               }
+              opacity={previewClip?.opacity ?? 1}
               mediaSize={
                 previewMedia && previewMedia.width && previewMedia.height
                   ? { width: previewMedia.width, height: previewMedia.height }
@@ -1087,6 +1246,7 @@ function Editor({
             onTrackFlag={(trackId, flag, value) =>
               setProject((current) => setTrackFlag(current, trackId, flag, value))
             }
+            clipTools={clipTools}
             onAddTrack={() => setProject((current) => addTrack(current).project)}
             onRenameTrack={(trackId, name) =>
               setProject((current) => renameTrack(current, trackId, name))
@@ -1131,6 +1291,25 @@ function Editor({
                     : []),
                   // "Detach audio" and its reverse, offered only where they
                   // mean something: one clip, with a link to make or unmake.
+                  // Captions come from the clip's own sound, so the item only
+                  // appears where there is sound to transcribe - and only one
+                  // transcription runs at a time.
+                  ...(() => {
+                    const media = clip ? findMedia(project, clip.mediaId) : null;
+                    return !many &&
+                      clip &&
+                      (clip.kind === "video" || clip.kind === "audio") &&
+                      media?.hasAudio &&
+                      !transcribing
+                      ? [
+                          {
+                            label: "Auto captions",
+                            icon: "type" as const,
+                            onSelect: () => void autoCaption(clip, media),
+                          },
+                        ]
+                      : [];
+                  })(),
                   ...(!many &&
                   clip?.kind === "video" &&
                   !clip.muted &&
@@ -1190,6 +1369,7 @@ function Editor({
       </div>
 
       {context && <ContextMenu target={context} onClose={() => setContext(null)} />}
+      {settingsOpen && <SettingsDialog onClose={() => setSettingsOpen(false)} />}
 
       {toast && (
         <div

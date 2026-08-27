@@ -1,13 +1,48 @@
-import { useRef } from "react";
-import type { PointerEvent as ReactPointerEvent } from "react";
+import { useRef, useState } from "react";
+import type { KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent } from "react";
+
+import { Icon } from "./Icon";
 
 /**
  * Property controls for the inspector.
  *
  * Pure: value in, callback out. None of them hold state, because the value
  * they show has to be whatever the project says it is - including when it
- * changes from somewhere else, like a drag on the timeline.
+ * changes from somewhere else, like a drag on the timeline. (The Slider's
+ * typing state is the one exception, and it is display state, not a value:
+ * the project is not touched until the entry commits.)
  */
+
+/**
+ * A circled question mark that explains itself on hover.
+ *
+ * Inline help paragraphs cost a permanent line each and read like a manual
+ * pasted into a tool. This keeps the explanation one hover away instead, so
+ * the panel stays controls-first.
+ */
+export function HelpTip({ text }: { text: string }) {
+  return (
+    <span className="group/help relative inline-flex shrink-0">
+      <Icon
+        name="help"
+        size={12}
+        className="cursor-help text-tertiary transition-colors group-hover/help:text-secondary"
+      />
+      <span
+        role="tooltip"
+        className="pointer-events-none invisible absolute right-0 top-full z-20 mt-1.5 w-52
+                   rounded-md border border-hairline bg-panel p-2 text-[11px] font-normal
+                   normal-case leading-snug tracking-normal text-secondary
+                   shadow-[0_4px_14px_rgba(0,0,0,0.25)] group-hover/help:visible"
+      >
+        {text}
+      </span>
+    </span>
+  );
+}
+
+/** How much finer a shift-drag moves than a plain one. */
+const FINE_FACTOR = 0.1;
 
 /**
  * A slider whose whole track is the grab target.
@@ -16,6 +51,10 @@ import type { PointerEvent as ReactPointerEvent } from "react";
  * sliders work in editors rather than the way a browser range input does. The
  * fill doubles as the readout, so there is no separate progress element to
  * keep in step.
+ *
+ * Holding Shift while dragging moves at a tenth of the rate, for dialling in
+ * an exact value; clicking the readout turns it into a text field for typing
+ * one directly.
  */
 export function Slider({
   label,
@@ -39,15 +78,40 @@ export function Slider({
   onReset?: () => void;
 }) {
   const track = useRef<HTMLDivElement>(null);
+  // Where the last pointer event landed, so a shift-drag can be relative to
+  // the previous position rather than jumping to the pointer.
+  const lastX = useRef(0);
+  const [typing, setTyping] = useState<string | null>(null);
+
+  const clampStep = (raw: number) => {
+    const stepped = Math.round(raw / step) * step;
+    // Re-round, or steps accumulate float noise like 0.30000000000000004.
+    return Number(Math.min(max, Math.max(min, stepped)).toFixed(6));
+  };
 
   const commit = (event: ReactPointerEvent<HTMLDivElement>) => {
     const bounds = track.current?.getBoundingClientRect();
     if (!bounds || bounds.width === 0) return;
 
+    if (event.shiftKey) {
+      // Fine mode: the pointer's movement counts for a tenth. Relative to the
+      // last position, so toggling shift mid-drag never jumps the value.
+      const delta = ((event.clientX - lastX.current) / bounds.width) * (max - min) * FINE_FACTOR;
+      lastX.current = event.clientX;
+      onChange(clampStep(value + delta));
+      return;
+    }
+
+    lastX.current = event.clientX;
     const fraction = Math.min(1, Math.max(0, (event.clientX - bounds.left) / bounds.width));
-    const stepped = Math.round((min + fraction * (max - min)) / step) * step;
-    // Re-round, or steps accumulate float noise like 0.30000000000000004.
-    onChange(Number(stepped.toFixed(6)));
+    onChange(clampStep(min + fraction * (max - min)));
+  };
+
+  const commitTyped = () => {
+    if (typing === null) return;
+    const parsed = Number.parseFloat(typing.replace(",", "."));
+    if (Number.isFinite(parsed)) onChange(clampStep(parsed));
+    setTyping(null);
   };
 
   const fill = max === min ? 0 : Math.min(1, Math.max(0, (value - min) / (max - min)));
@@ -62,7 +126,31 @@ export function Slider({
         >
           {label}
         </span>
-        <span className="font-technical text-[11px] text-primary">{format(value)}</span>
+        {typing === null ? (
+          <button
+            type="button"
+            title="Click to type a value"
+            onClick={() => setTyping(String(Number(value.toFixed(4))))}
+            className="cursor-text rounded px-1 font-technical text-[11px] text-primary
+                       transition-colors hover:bg-hover"
+          >
+            {format(value)}
+          </button>
+        ) : (
+          <input
+            autoFocus
+            value={typing}
+            onChange={(event) => setTyping(event.target.value)}
+            onFocus={(event) => event.target.select()}
+            onBlur={commitTyped}
+            onKeyDown={(event: ReactKeyboardEvent<HTMLInputElement>) => {
+              if (event.key === "Enter") commitTyped();
+              if (event.key === "Escape") setTyping(null);
+            }}
+            className="w-16 rounded border border-accent bg-sunken px-1 text-right
+                       font-technical text-[11px] text-primary outline-none"
+          />
+        )}
       </div>
 
       <div
@@ -74,12 +162,17 @@ export function Slider({
         aria-valuemax={max}
         tabIndex={0}
         onKeyDown={(event) => {
-          if (event.key === "ArrowLeft") onChange(Math.max(min, value - step));
-          if (event.key === "ArrowRight") onChange(Math.min(max, value + step));
+          // Shift jumps by ten steps - the keyboard's coarse mode, mirroring
+          // how shift is the pointer's fine mode: both mean "the other rate".
+          const by = event.shiftKey ? step * 10 : step;
+          if (event.key === "ArrowLeft") onChange(clampStep(value - by));
+          if (event.key === "ArrowRight") onChange(clampStep(value + by));
         }}
         onPointerDown={(event) => {
           event.currentTarget.setPointerCapture(event.pointerId);
-          commit(event);
+          lastX.current = event.clientX;
+          // A shift-click means "adjust from here", not "jump here".
+          if (!event.shiftKey) commit(event);
         }}
         onPointerMove={(event) => {
           if (event.currentTarget.hasPointerCapture(event.pointerId)) commit(event);
@@ -121,17 +214,16 @@ export function Toggle({
   onChange,
 }: {
   label: string;
+  /** Shown behind a help icon, not inline - panels stay controls-first. */
   hint?: string;
   checked: boolean;
   onChange: (checked: boolean) => void;
 }) {
   return (
-    <div className="mb-3 flex items-start justify-between gap-3">
-      <span className="min-w-0">
-        <span className="block text-[12px] text-primary">{label}</span>
-        {hint && (
-          <span className="mt-0.5 block text-[11px] leading-snug text-tertiary">{hint}</span>
-        )}
+    <div className="mb-3 flex items-center justify-between gap-3">
+      <span className="flex min-w-0 items-center gap-1.5">
+        <span className="truncate text-[12px] text-primary">{label}</span>
+        {hint && <HelpTip text={hint} />}
       </span>
 
       <button
@@ -140,8 +232,8 @@ export function Toggle({
         aria-checked={checked}
         aria-label={label}
         onClick={() => onChange(!checked)}
-        className={`relative mt-0.5 h-[22px] w-[38px] shrink-0 cursor-pointer rounded-full
-                    p-[3px] transition-colors duration-200 ${
+        className={`relative h-5.5 w-9.5 shrink-0 cursor-pointer rounded-full
+                    p-0.75 transition-colors duration-200 ${
                       checked ? "bg-accent" : "bg-tertiary/40"
                     }`}
       >
@@ -156,12 +248,22 @@ export function Toggle({
   );
 }
 
-/** A labelled group of controls. */
-export function Group({ title, children }: { title: string; children: React.ReactNode }) {
+/** A labelled group of controls, with optional hover help on the heading. */
+export function Group({
+  title,
+  help,
+  children,
+}: {
+  title: string;
+  /** Shown behind a help icon next to the heading. */
+  help?: string;
+  children: React.ReactNode;
+}) {
   return (
     <section className="mb-5">
-      <h3 className="mb-2 text-[11px] font-semibold uppercase tracking-wider text-tertiary">
+      <h3 className="mb-2 flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-tertiary">
         {title}
+        {help && <HelpTip text={help} />}
       </h3>
       {children}
     </section>

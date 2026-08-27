@@ -10,6 +10,7 @@
 pub mod export;
 mod playback;
 mod projects;
+mod transcribe;
 
 use serde::Serialize;
 
@@ -444,6 +445,12 @@ pub fn run() {
             app.manage(ExportState(std::sync::Arc::new(
                 std::sync::atomic::AtomicBool::new(false),
             )));
+            app.manage(transcribe::DownloadState(std::sync::Arc::new(
+                std::sync::atomic::AtomicBool::new(false),
+            )));
+            app.manage(transcribe::TranscribeState(std::sync::Arc::new(
+                std::sync::Mutex::new(None),
+            )));
             Ok(())
         })
         .plugin(tauri_plugin_opener::init())
@@ -466,7 +473,14 @@ pub fn run() {
             recent_projects,
             forget_project,
             export_project,
-            cancel_export
+            cancel_export,
+            transcribe::transcriber_status,
+            transcribe::set_transcriber_binary,
+            transcribe::download_transcriber_model,
+            transcribe::cancel_model_download,
+            transcribe::delete_transcriber_model,
+            transcribe::transcribe_clip,
+            transcribe::cancel_transcribe
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

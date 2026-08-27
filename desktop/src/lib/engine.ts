@@ -143,6 +143,8 @@ export interface ExportClip {
   offsetY: number;
   /** Clockwise rotation in degrees. */
   rotation: number;
+  /** Blend strength over the layers beneath, 1 being solid. */
+  opacity: number;
   /** The source's pixel size, when known - what makes an aspect-correct fit possible. */
   mediaWidth: number | null;
   mediaHeight: number | null;
@@ -199,4 +201,92 @@ export async function onExportProgress(
   handler: (progress: ExportProgress) => void,
 ): Promise<UnlistenFn> {
   return listen<ExportProgress>("export://progress", (event) => handler(event.payload));
+}
+
+// ── transcription ──────────────────────────────────────────────────────────
+
+/** One Whisper model, as the settings panel sees it. */
+export interface TranscriberModel {
+  id: string;
+  label: string;
+  blurb: string;
+  englishOnly: boolean;
+  /** Approximate download size in bytes, for display. */
+  sizeBytes: number;
+  downloaded: boolean;
+}
+
+export interface TranscriberStatus {
+  /** Where `whisper-cli` was found, or null when it was not. */
+  binary: string | null;
+  /** Where models are stored on disk. */
+  modelsDir: string;
+  models: TranscriberModel[];
+}
+
+/** Progress of a model download, via `transcriber://download`. */
+export interface TranscriberDownload {
+  id: string;
+  received: number;
+  total: number;
+  done: boolean;
+}
+
+/** One caption, in seconds relative to the transcribed window's start. */
+export interface TranscribedSegment {
+  start: number;
+  end: number;
+  text: string;
+}
+
+export interface TranscribeRequest {
+  path: string;
+  /** Seconds into the file where the clip's source window begins. */
+  sourceStart: number;
+  /** How much source the clip covers, in seconds (`duration * speed`). */
+  window: number;
+  /** Whisper language code, or "auto". */
+  language: string;
+  modelId: string;
+}
+
+export async function transcriberStatus(): Promise<TranscriberStatus> {
+  return invoke<TranscriberStatus>("transcriber_status");
+}
+
+/** Remembers a user-chosen `whisper-cli`. Throws if the path is not a file. */
+export async function setTranscriberBinary(path: string): Promise<TranscriberStatus> {
+  return invoke<TranscriberStatus>("set_transcriber_binary", { path });
+}
+
+/** Downloads one model. Resolves when the file is complete and renamed. */
+export async function downloadTranscriberModel(id: string): Promise<void> {
+  return invoke<void>("download_transcriber_model", { id });
+}
+
+export async function cancelModelDownload(): Promise<void> {
+  return invoke<void>("cancel_model_download");
+}
+
+export async function deleteTranscriberModel(id: string): Promise<void> {
+  return invoke<void>("delete_transcriber_model", { id });
+}
+
+/** Subscribes to model download progress. Resolves to an unsubscribe function. */
+export async function onTranscriberDownload(
+  handler: (progress: TranscriberDownload) => void,
+): Promise<UnlistenFn> {
+  return listen<TranscriberDownload>("transcriber://download", (event) => handler(event.payload));
+}
+
+/** Transcribes one clip's audio window. Runs until done or cancelled. */
+export async function transcribeClip(
+  request: TranscribeRequest,
+): Promise<TranscribedSegment[]> {
+  return invoke<TranscribedSegment[]>("transcribe_clip", { request });
+}
+
+/** Kills the running transcription, if any. */
+export async function cancelTranscribe(): Promise<void> {
+  return invoke<void>("cancel_transcribe");
 }

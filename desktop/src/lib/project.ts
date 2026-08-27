@@ -124,6 +124,14 @@ export interface Clip {
   offsetY: number;
   /** Clockwise rotation in degrees, about the picture's centre. */
   rotation: number;
+  /**
+   * Blend strength over whatever is beneath, in `0..1`. One is solid.
+   *
+   * The picture-side sibling of `volume`: the preview applies it as CSS
+   * opacity and the exporter hands it to the compositor, both reading this
+   * one number.
+   */
+  opacity: number;
 
   /**
    * Playback rate. 1 is normal, 2 is twice as fast.
@@ -193,6 +201,61 @@ const MIN_CLIP_DURATION = 1 / 60;
 
 let counter = 0;
 const nextId = (prefix: string) => `${prefix}${(counter += 1)}`;
+
+/**
+ * Makes a restored project safe to mint new ids against.
+ *
+ * Ids come from a session-local counter, but a restored project carries ids
+ * minted by an *earlier* session, and the counter starts back at zero on
+ * every launch. Without this, the first thing added after opening a saved
+ * project reuses an id that is already on the timeline - two clips with one
+ * identity. React renders the duplicate keys as a single element (one clip
+ * silently vanishes) and `updateClip` patches both (a title's text style
+ * lands on the footage it collided with).
+ *
+ * Two steps, in this order:
+ *
+ * 1. Advance the counter past every id the file uses.
+ * 2. Re-mint any id that appears twice - a file saved *while* the collision
+ *    was live has the duplicates baked in, and they must not survive the
+ *    reload. The first occurrence keeps the id, because that is the one
+ *    every lookup already resolved to; references to a re-minted duplicate
+ *    therefore keep meaning what they always did.
+ *
+ * Every restore path must run its project through this before anything new
+ * can be added.
+ */
+export function adoptProject(project: Project): Project {
+  let highest = 0;
+  const consider = (id: string) => {
+    const digits = /(\d+)$/.exec(id)?.[1];
+    if (!digits) return;
+    const value = Number.parseInt(digits, 10);
+    if (Number.isFinite(value) && value > highest) highest = value;
+  };
+  for (const item of project.media) consider(item.id);
+  for (const track of project.tracks) consider(track.id);
+  for (const clip of project.clips) consider(clip.id);
+  if (highest > counter) counter = highest;
+
+  const reMint = <T extends { id: string }>(items: T[], prefix: string): T[] => {
+    const seen = new Set<string>();
+    return items.map((item) => {
+      if (!seen.has(item.id)) {
+        seen.add(item.id);
+        return item;
+      }
+      return { ...item, id: nextId(prefix) };
+    });
+  };
+
+  return {
+    ...project,
+    media: reMint(project.media, "m"),
+    tracks: reMint(project.tracks, "t"),
+    clips: reMint(project.clips, "c"),
+  };
+}
 
 /** A project with four empty lanes. */
 export function createProject(): Project {
@@ -295,6 +358,7 @@ export function addClip(
     offsetX: 0,
     offsetY: 0,
     rotation: 0,
+    opacity: 1,
     speed: 1,
     preservePitch: true,
     filters: [],
@@ -344,6 +408,7 @@ export function addTextClip(
     offsetX: 0,
     offsetY: 0,
     rotation: 0,
+    opacity: 1,
     speed: 1,
     preservePitch: true,
     filters: [],
@@ -416,7 +481,9 @@ export function trimClip(
         ...clip,
         start,
         duration: clip.duration - applied,
-        sourceStart: Math.max(0, clip.sourceStart + applied),
+        // A timeline second covers `speed` source seconds, so the in-point
+        // moves that much further on a retimed clip.
+        sourceStart: Math.max(0, clip.sourceStart + applied * clip.speed),
       };
     }),
   };
@@ -596,7 +663,9 @@ export function splitClip(project: Project, clipId: string, time: number): Proje
     id: nextId("c"),
     start: clip.start + offset,
     duration: clip.duration - offset,
-    sourceStart: clip.sourceStart + offset,
+    // Timeline offset times speed is how much source the head consumed - on a
+    // 2x clip the cut is twice as far into the file as it is into the clip.
+    sourceStart: clip.sourceStart + offset * clip.speed,
     filters: [...clip.filters],
   };
 
@@ -700,6 +769,10 @@ export function whyNotMerge(project: Project, clipIds: readonly string[]): strin
   if (clips.some((clip) => clip.mediaId !== clips[0].mediaId)) {
     return "Merged clips must come from the same file.";
   }
+  // One clip has one rate; pieces playing at different rates cannot be one.
+  if (clips.some((clip) => clip.speed !== clips[0].speed)) {
+    return "Merged clips must play at the same speed.";
+  }
 
   const ordered = [...clips].sort((left, right) => left.start - right.start);
   for (let index = 1; index < ordered.length; index += 1) {
@@ -711,9 +784,12 @@ export function whyNotMerge(project: Project, clipIds: readonly string[]): strin
     }
     // The source has to be continuous too. Two halves that were rearranged
     // are adjacent on the timeline but no longer a single run of the file,
-    // and joining them would silently change what plays.
+    // and joining them would silently change what plays. A retimed piece
+    // consumes `duration * speed` of source, so continuity is measured there.
     if (
-      Math.abs(current.sourceStart - (previous.sourceStart + previous.duration)) > JOIN_EPSILON
+      Math.abs(
+        current.sourceStart - (previous.sourceStart + previous.duration * previous.speed),
+      ) > JOIN_EPSILON
     ) {
       return "These pieces are no longer in their original order.";
     }
