@@ -5,13 +5,13 @@
 # them here is harmless even on a machine with no `vendor/` directory.
 #
 # `relative = true` resolves against this file's parent, so the paths follow
-# the repository rather than whoever checked it out. See BUILD.md.
+# the repository rather than whoever checked it out.
 [env]
 # Note the deliberate absence of FFMPEG_DLL_PATH. rusty_ffmpeg turns that one
 # into the linker's /LIBPATH, which sends it hunting for `avcodec.lib` in
 # `bin/` - where only the DLLs live. The import libraries are in `lib/`, so
 # FFMPEG_LIBS_DIR is the one that matters at link time.
 #
-# The DLLs still have to be findable at *run* time; see BUILD.md.
+# The DLLs still have to be findable at *run* time.
 FFMPEG_INCLUDE_DIR = { value = "../vendor/ffmpeg-n8.1-latest-win64-gpl-shared-8.1/include", relative = true }
 FFMPEG_LIBS_DIR = { value = "../vendor/ffmpeg-n8.1-latest-win64-gpl-shared-8.1/lib", relative = true }

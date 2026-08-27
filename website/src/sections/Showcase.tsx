@@ -15,14 +15,6 @@ export default function Showcase() {
             That&rsquo;s why WolfCut stays a few megabytes, opens instantly,
             and scrubs smoothly where web-based editors stutter.
           </p>
-          <a
-            href="https://github.com/jub0t/WolfCut/blob/main/ARCHITECTURE.md"
-            target="_blank"
-            rel="noreferrer"
-            className="mt-6 inline-block text-sm text-accent hover:underline"
-          >
-            Read the architecture &rsaquo;
-          </a>
         </div>
         <img
           src={screenshotDark}

@@ -35,15 +35,13 @@ start cutting, no account, no extra downloads, no setup.
 ## 🚀 Get started
 
 Grab a build from [Releases](https://github.com/jub0t/WolfCut/releases), or
-build it yourself — [BUILD.md](BUILD.md) has everything, and it boils down to:
+build it yourself:
 
 ```sh
 cd desktop
 npm install
 npm run app
 ```
-
-Curious how it works inside? [ARCHITECTURE.md](ARCHITECTURE.md) is the tour.
 
 ## 📈 Growth
 

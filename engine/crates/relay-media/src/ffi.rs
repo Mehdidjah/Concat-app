@@ -6,7 +6,7 @@
 //! export, which is why the subprocess backend is not going anywhere.
 //!
 //! Only compiled with the `ffi` feature. See
-//! `docs/decisions/0002-ffmpeg-over-a-pipe.md` and BUILD.md.
+//! `docs/decisions/0002-ffmpeg-over-a-pipe.md`.
 //!
 //! ## On the unsafe in here
 //!
@@ -478,7 +478,7 @@ mod tests {
         // major version means the struct layouts we compiled against do not
         // match the library that loaded - which corrupts silently rather than
         // failing, so it is worth an explicit check.
-        assert_eq!(avcodec_major(), 62, "linked libavcodec mismatch - see BUILD.md");
+        assert_eq!(avcodec_major(), 62, "linked libavcodec mismatch");
     }
 
     #[test]

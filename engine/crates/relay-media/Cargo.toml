@@ -21,5 +21,5 @@ workspace = true
 # `ffmpeg` on PATH, while this one needs a development build with headers and
 # import libraries. Building the engine must not require that.
 #
-# See BUILD.md and docs/decisions/0002-ffmpeg-over-a-pipe.md.
+# See docs/decisions/0002-ffmpeg-over-a-pipe.md.
 ffi = ["dep:rusty_ffmpeg"]
