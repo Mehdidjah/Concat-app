@@ -49,10 +49,11 @@ const TABS: { id: LibraryTab; label: string }[] = [
  * sidebar on the left, and the browsing area on the right where media, effect
  * previews and so on are shown.
  *
- * Media is the only page that is fully live. Text offers the one title style
- * that exists. Transitions and Effects browse the catalogues in
- * `lib/effects.ts` but cannot yet be applied - the engine has no video effect
- * pipeline - so their cards say "Soon" instead of pretending to drag.
+ * Media is fully live. Text offers the one title style that exists.
+ * Transitions and Effects browse the catalogues in `lib/effects.ts` and apply
+ * to the selected clip; only the motion transitions (wipe, push, zoom) still
+ * say "Soon", waiting on animated transforms in the engine. Templates lists
+ * saved bundles and hands off to the launch screen's fill flow.
  *
  * Media items are drag sources: dragging one onto the timeline places a clip
  * at the drop position. That is the primary way material gets into an edit, so

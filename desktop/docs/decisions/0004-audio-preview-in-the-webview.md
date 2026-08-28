@@ -9,9 +9,10 @@
 > **Superseded in part by [0005](0005-audio-playback-in-the-engine.md):**
 > audio playback now lives in the engine - decoded, mixed and clocked in
 > `src-tauri/src/playback.rs`, with the UI following the engine's position
-> events. What remains true here is the *video* half: the monitor picture is
-> still the webview's `<video>` element, muted, until the engine can present
-> frames.
+> events. `lib/audio.ts` and the blob-URL fallback described below were
+> deleted with that move, exactly as "What replaces it" planned. What remains
+> true here is the *video* half: the monitor picture is still the webview's
+> `<video>` element, muted, until the engine can present frames.
 
 ## Decision
 Playback preview - both the picture in the monitor and the sound - uses the

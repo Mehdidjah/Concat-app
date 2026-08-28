@@ -5,8 +5,9 @@ import { Icon } from "./Icon";
 /**
  * A small blocking confirmation, for actions that destroy work.
  *
- * There is no undo system yet, so "are you sure" is the only line of defence
- * a destructive action has. Kept deliberately plain: a title that names the
+ * Edits are undoable through the engine's history; this sheet guards the
+ * destructions that are not, or that erase enough at once that a stray click
+ * should not get to do it. Kept deliberately plain: a title that names the
  * thing, one sentence of consequence, and a danger-coloured button that
  * repeats the verb - never just "OK", because the button is what people read
  * when they skip the sentence.

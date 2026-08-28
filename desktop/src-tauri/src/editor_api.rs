@@ -3,8 +3,8 @@
 //! One session at a time, held in managed state: open a project and the
 //! engine holds the edit; every mutation arrives as a `relay_project`
 //! [`Command`], is applied with undo recorded, and the new state goes back
-//! over the wire. The UI's provisional model (`lib/project.ts`) is frozen
-//! and being replaced by calls into this module - see
+//! over the wire. This is the API `lib/editor.ts` mirrors; the provisional
+//! TypeScript model it replaced is gone - see
 //! `engine/docs/decisions/0007-engine-owns-the-project.md`.
 //!
 //! Saving reuses `projects::save`'s temp-file-and-rename, so the document on

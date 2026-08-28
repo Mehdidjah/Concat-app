@@ -410,7 +410,7 @@ export function StartScreen({
                     ? `${missing} slot${missing === 1 ? "" : "s"} still need${missing === 1 ? "s" : ""} a clip.`
                     : "Every slot is filled.";
                 })()
-              : "The timeline is not saved to disk yet."}
+              : "The project folder is created now; the edit autosaves into it."}
           </p>
         </div>
 

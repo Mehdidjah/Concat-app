@@ -84,8 +84,8 @@ pub fn create(
     std::fs::create_dir_all(&root)
         .map_err(|error| format!("could not create {}: {error}", root.display()))?;
 
-    // Only the settings for now. The timeline joins them once the engine owns
-    // the edit and there is a canonical form to serialise.
+    // Settings only: a fresh project has no edit yet. The full document -
+    // timelines included - is written by `editor_save` from the first change.
     let document = Manifest {
         relay: env!("CARGO_PKG_VERSION").to_owned(),
         name: name.to_owned(),
@@ -112,10 +112,9 @@ pub fn create(
 /// Writes the whole project document to `relay.json`.
 ///
 /// The document is passed through as opaque JSON rather than being mirrored
-/// into Rust types. The edit model is still provisional and lives in the UI
-/// (see `lib/project.ts`); duplicating it here would mean changing two
-/// definitions in lockstep for no benefit, and the host has no decisions to
-/// make about its contents.
+/// into Rust types: the engine (`relay-project`) owns the canonical model and
+/// produced this document, and the host has no decisions to make about its
+/// contents beyond writing it safely.
 ///
 /// Written to a temporary file and renamed into place, because a save
 /// interrupted halfway is worse than no save at all - a truncated relay.json
