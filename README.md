@@ -8,7 +8,7 @@
 
 [![Build](https://github.com/jub0t/WolfCut/actions/workflows/build.yml/badge.svg)](https://github.com/jub0t/WolfCut/actions/workflows/build.yml)
 [![Platforms](https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-8A2BE2)](https://github.com/jub0t/WolfCut/releases)
-[![Version](https://img.shields.io/badge/version-0.1.0-blue)](https://github.com/jub0t/WolfCut)
+[![Version](https://img.shields.io/badge/version-0.2.0-blue)](https://github.com/jub0t/WolfCut)
 [![Discord](https://img.shields.io/badge/Discord-join%20the%20server-5865F2?logo=discord&logoColor=white)](https://discord.gg/DVuPfpXfqP)
 
 <img src="assets/preview-dark.png" alt="WolfCut editor" width="100%" />

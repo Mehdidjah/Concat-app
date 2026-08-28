@@ -1518,7 +1518,7 @@ dependencies = [
 
 [[package]]
 name = "wolfcut-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "clap",
  "wolfcut-core",
@@ -1528,11 +1528,11 @@ dependencies = [
 
 [[package]]
 name = "wolfcut-core"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "wolfcut-export"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "ts-rs",
@@ -1544,7 +1544,7 @@ dependencies = [
 
 [[package]]
 name = "wolfcut-media"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "rusty_ffmpeg",
  "serde_json",
@@ -1554,7 +1554,7 @@ dependencies = [
 
 [[package]]
 name = "wolfcut-project"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -1564,7 +1564,7 @@ dependencies = [
 
 [[package]]
 name = "wolfcut-render"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "pollster",
  "wgpu",
