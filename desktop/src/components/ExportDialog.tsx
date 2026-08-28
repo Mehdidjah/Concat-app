@@ -4,9 +4,9 @@ import { save } from "@tauri-apps/plugin-dialog";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 
 import type { ExportClip, ExportProgress } from "../lib/engine";
+import type { ExportTitle } from "../lib/monitor";
 import { cancelExport, exportProject, onExportProgress, writeCacheFile } from "../lib/engine";
 import { rasterizeTitle } from "../lib/rasterize";
-import type { TextStyle } from "../lib/text";
 import { shortDuration } from "../lib/time";
 import { ErrorNotice } from "./ErrorNotice";
 import { Icon } from "./Icon";
@@ -23,17 +23,6 @@ const QUALITIES = [
  * dialog rasterises each of these into a full-frame transparent PNG at the
  * output size just before the render starts.
  */
-export interface ExportTitle {
-  clipId: string;
-  style: TextStyle;
-  /** Offset from centred, as a fraction of the frame. */
-  offsetX: number;
-  offsetY: number;
-  start: number;
-  duration: number;
-  /** Index into the track stack, zero being bottom-most. */
-  track: number;
-}
 
 type Phase =
   | { kind: "idle" }

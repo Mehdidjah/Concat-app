@@ -9,9 +9,10 @@ import {
 import { convertFileSrc } from "@tauri-apps/api/core";
 
 import { buildPreviewLook, type AppliedEffect, type CanvasOp } from "../lib/effects";
+import type { PreviewSource, TextOverlay } from "../lib/monitor";
 import { timecode } from "../lib/time";
 import { MAX_SCALE, MIN_SCALE } from "../lib/editor";
-import { textCss, type TextStyle } from "../lib/text";
+import { textCss } from "../lib/text";
 import { Icon, IconButton } from "./Icon";
 import { Menu } from "./Menu";
 import { PANEL_SHELL } from "./Panel";
@@ -72,17 +73,6 @@ function ratioLabel(width: number, height: number): string {
 }
 
 /** The video clip that should be on screen right now, if any. */
-export interface PreviewSource {
-  clipId: string;
-  path: string;
-  /** Where in the source file the playhead sits, in seconds. */
-  time: number;
-  /** Playback rate, 1 being normal - the element must run at this rate or it
-      drifts from the transport and stutters on every corrective seek. */
-  speed: number;
-  /** A still is shown as an image; there is nothing to seek or play. */
-  isStill: boolean;
-}
 
 /** How the displayed clip's picture sits in the frame. Mirrors the engine's
  * `Transform`: scale over the fitted size, offsets as frame fractions from
@@ -94,14 +84,6 @@ export interface PreviewTransform {
   rotation: number;
 }
 
-/** A title to draw over the picture, already positioned. */
-export interface TextOverlay {
-  clipId: string;
-  style: TextStyle;
-  /** Offset from centred, as a fraction of the frame. */
-  offsetX: number;
-  offsetY: number;
-}
 
 /** Alignment guides live while something is being dragged: vertical lines at
  * `x` and horizontal ones at `y`, as fractions of the frame. Lists, because a

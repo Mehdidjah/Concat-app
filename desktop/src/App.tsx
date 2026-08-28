@@ -6,11 +6,20 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 
 import { ConfirmDialog } from "./components/ConfirmDialog";
 import { ContextMenu, type ContextTarget } from "./components/ContextMenu";
-import { ExportDialog, type ExportTitle } from "./components/ExportDialog";
+import { ExportDialog } from "./components/ExportDialog";
 import { Icon } from "./components/Icon";
 import { ALL_MEDIA, MediaBin, type BinFilter } from "./components/MediaBin";
 import type { MenuOption } from "./components/Menu";
-import { Preview, type PreviewSource, type TextOverlay } from "./components/Preview";
+import { Preview } from "./components/Preview";
+import {
+  exportClipsOf,
+  exportTitlesOf,
+  previewGhostAt,
+  previewSourceAt,
+  previewVeilAt,
+  textOverlaysAt,
+  type ExportTitle,
+} from "./lib/monitor";
 import { Resizer } from "./components/Resizer";
 import { RightPanel, type RightTab } from "./components/RightPanel";
 import { SaveTemplateDialog } from "./components/SaveTemplateDialog";
@@ -65,7 +74,7 @@ import {
 } from "./lib/engine";
 import { getTranscriberLanguage, getTranscriberModel } from "./lib/settings";
 import { buildChain } from "./lib/filters";
-import { buildEffectChain, findTransition } from "./lib/effects";
+import { findTransition } from "./lib/effects";
 import { defaultTextStyle, familyForPath, registerFont } from "./lib/text";
 import { useTheme, type Theme } from "./lib/theme";
 import { useTransport } from "./lib/transport";
@@ -1069,151 +1078,39 @@ function Editor({
 
   // ── derived views ────────────────────────────────────────────────────────
 
-  const textOverlays = useMemo<TextOverlay[]>(() => {
-    const depth = (trackId: string) =>
-      timeline.tracks.findIndex((track) => track.id === trackId);
-    return clipsAt(project, playhead)
-      .filter((clip) => clip.kind === "text" && clip.text !== undefined)
-      .filter((clip) => findTrack(project, clip.trackId)?.visible !== false)
-      .sort((a, b) => depth(a.trackId) - depth(b.trackId))
-      .map((clip) => ({
-        clipId: clip.id,
-        style: clip.text!,
-        offsetX: clip.offsetX,
-        offsetY: clip.offsetY,
-      }));
-  }, [project, timeline, playhead]);
+  // Derived views of the monitor and exporter, all pure in lib/monitor.ts -
+  // which is what makes the cross-fade pre-roll and the flattening testable.
+  const textOverlays = useMemo(
+    () => textOverlaysAt(project, timeline, playhead),
+    [project, timeline, playhead],
+  );
 
-  const previewSource = useMemo<PreviewSource | null>(() => {
-    const active = clipsAt(project, playhead).filter(
-      (clip) => clip.kind !== "audio" && clip.kind !== "text",
-    );
-    if (active.length === 0) return null;
-    const depth = (trackId: string) =>
-      timeline.tracks.findIndex((track) => track.id === trackId);
-    const top = active.reduce((best, clip) =>
-      depth(clip.trackId) > depth(best.trackId) ? clip : best,
-    );
-    const media = findMedia(project, top.mediaId);
-    if (!media) return null;
-    return {
-      clipId: top.id,
-      path: media.path,
-      time: top.sourceStart + (playhead - top.start) * top.speed,
-      speed: top.speed,
-      isStill: top.kind === "image",
-    };
-  }, [project, timeline, playhead]);
+  const previewSource = useMemo(
+    () => previewSourceAt(project, timeline, playhead),
+    [project, timeline, playhead],
+  );
 
   const previewClip = previewSource ? findClip(project, previewSource.clipId) : null;
   const previewMedia = previewClip ? findMedia(project, previewClip.mediaId) : null;
 
-  const previewGhost = useMemo(() => {
-    for (const clip of timeline.clips) {
-      const transition = clip.transitionIn;
-      if (!transition || transition.id !== "cross-fade") continue;
-      if (clip.kind !== "video" && clip.kind !== "image") continue;
-      if (!precedingClip(project, clip.id)) continue;
-      const handle =
-        clip.kind === "image" ? Infinity : clip.sourceStart / Math.max(0.0625, clip.speed);
-      const d = Math.min(transition.duration, handle);
-      const cut = clip.start;
-      if (d <= 0 || playhead < cut - d || playhead >= cut) continue;
-      const media = findMedia(project, clip.mediaId);
-      if (!media) continue;
-      return {
-        clipId: clip.id,
-        path: media.path,
-        time: Math.max(0, clip.sourceStart - (cut - playhead) * clip.speed),
-        speed: clip.speed,
-        opacity: 1 - (cut - playhead) / d,
-      };
-    }
-    return null;
-  }, [project, timeline, playhead]);
+  const previewGhost = useMemo(
+    () => previewGhostAt(project, timeline, playhead),
+    [project, timeline, playhead],
+  );
 
-  const previewVeil = useMemo(() => {
-    for (const clip of timeline.clips) {
-      const transition = clip.transitionIn;
-      if (!transition) continue;
-      if (transition.id !== "fade-black" && transition.id !== "fade-white") continue;
-      if (!precedingClip(project, clip.id)) continue;
-      const half = transition.duration / 2;
-      const cut = clip.start;
-      if (playhead < cut - half || playhead > cut + half) continue;
-      const opacity =
-        playhead <= cut ? (playhead - (cut - half)) / half : (cut + half - playhead) / half;
-      return {
-        color: transition.id === "fade-white" ? "#ffffff" : "#000000",
-        opacity: Math.min(1, Math.max(0, opacity)),
-      };
-    }
-    return null;
-  }, [project, timeline, playhead]);
+  const previewVeil = useMemo(
+    () => previewVeilAt(project, timeline, playhead),
+    [project, timeline, playhead],
+  );
 
   // The exporter works from a flat list of the active timeline's clips.
   const exportClips = useMemo<ExportClip[]>(
-    () =>
-      timeline.clips.flatMap((clip) => {
-        if (clip.kind === "text") return [];
-        const media = findMedia(project, clip.mediaId);
-        const track = findTrack(project, clip.trackId);
-        const index = timeline.tracks.findIndex((candidate) => candidate.id === clip.trackId);
-        if (!media || !track || index < 0) return [];
-        return [
-          {
-            path: media.path,
-            kind: clip.kind as "video" | "audio" | "image",
-            start: clip.start,
-            duration: clip.duration,
-            sourceStart: clip.sourceStart,
-            track: index,
-            hidden: !track.visible,
-            muted: track.muted || clip.muted === true,
-            volume: clip.volume,
-            fadeIn: clip.fadeIn,
-            fadeOut: clip.fadeOut,
-            filterChain: buildChain(clip.filters) ?? "",
-            speed: clip.speed,
-            preservePitch: clip.preservePitch,
-            scale: clip.scale,
-            offsetX: clip.offsetX,
-            offsetY: clip.offsetY,
-            rotation: clip.rotation,
-            opacity: clip.opacity,
-            videoFilterChain: buildEffectChain(clip.videoEffects) ?? "",
-            transition:
-              clip.transitionIn && precedingClip(project, clip.id)
-                ? { kind: clip.transitionIn.id, duration: clip.transitionIn.duration }
-                : null,
-            mediaWidth: media.width,
-            mediaHeight: media.height,
-            hasAudio: media.hasAudio,
-          },
-        ];
-      }),
+    () => exportClipsOf(project, timeline),
     [project, timeline],
   );
 
   const exportTitles = useMemo<ExportTitle[]>(
-    () =>
-      timeline.clips.flatMap((clip) => {
-        if (clip.kind !== "text" || !clip.text) return [];
-        const track = findTrack(project, clip.trackId);
-        const index = timeline.tracks.findIndex((candidate) => candidate.id === clip.trackId);
-        if (!track || !track.visible || index < 0) return [];
-        return [
-          {
-            clipId: clip.id,
-            style: clip.text,
-            offsetX: clip.offsetX,
-            offsetY: clip.offsetY,
-            start: clip.start,
-            duration: clip.duration,
-            track: index,
-          },
-        ];
-      }),
+    () => exportTitlesOf(project, timeline),
     [project, timeline],
   );
 
