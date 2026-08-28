@@ -250,7 +250,14 @@ impl Playback {
     }
 
     pub fn seek(&self, position: f64) {
-        let _ = self.tx.send(Msg::Seek(position.max(0.0)));
+        let clamped = position.max(0.0);
+        // The callback owns the clock while playing, but a paused callback
+        // returns before storing - so a paused seek must land the shared
+        // position itself, or the atomic keeps serving the pre-seek time.
+        self.shared
+            .position_micros
+            .store((clamped * 1_000_000.0) as u64, Ordering::Relaxed);
+        let _ = self.tx.send(Msg::Seek(clamped));
     }
 
     /// Replaces the audible clip set.
@@ -455,6 +462,7 @@ where
         .build_output_stream(
             config,
             move |data: &mut [T], _| {
+                let mut sought = false;
                 while let Ok(message) = rx.try_recv() {
                     match message {
                         Msg::SetClips(next) => clips = next,
@@ -463,11 +471,23 @@ where
                             playing = true;
                         }
                         Msg::Pause => playing = false,
-                        Msg::Seek(at) => position = at,
+                        Msg::Seek(at) => {
+                            position = at;
+                            sought = true;
+                        }
                     }
                 }
 
                 if !playing {
+                    // A paused seek must reach the shared clock - the playing
+                    // store below never runs. Only on an actual seek, so this
+                    // silent branch cannot overwrite a fresher play() store
+                    // with its own stale idea of the position.
+                    if sought {
+                        shared
+                            .position_micros
+                            .store((position * 1_000_000.0) as u64, Ordering::Relaxed);
+                    }
                     data.fill(T::from_sample(0.0));
                     return;
                 }
