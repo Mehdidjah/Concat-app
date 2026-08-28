@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { invoke, isTauri } from "@tauri-apps/api/core";
+import { isTauri } from "@tauri-apps/api/core";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -45,7 +45,9 @@ import {
   type TimelineMeta,
 } from "./lib/editor";
 import {
+  audioSetClips,
   editorApply,
+  onAudioError,
   editorClose,
   editorOpen,
   editorRedo,
@@ -388,6 +390,26 @@ function Editor({
     return () => window.clearTimeout(timer);
   }, [toast]);
 
+  // Playback failures surface as the toast instead of dying in the dev
+  // console - a mute app must never be a mystery. Identical messages within
+  // a burst (one per clip of a broken import, say) collapse into one.
+  useEffect(() => {
+    if (!isTauri()) return;
+    let unlisten: (() => void) | null = null;
+    let lastMessage = "";
+    let lastAt = 0;
+    void onAudioError((message) => {
+      const now = Date.now();
+      if (message === lastMessage && now - lastAt < 10_000) return;
+      lastMessage = message;
+      lastAt = now;
+      setToast({ id: now, message, failed: true });
+    }).then((stop) => {
+      unlisten = stop;
+    });
+    return () => unlisten?.();
+  }, []);
+
   // Bring back every font the project names, once, when it opens. A font
   // whose file has moved is marked rather than dropped.
   useEffect(() => {
@@ -563,7 +585,7 @@ function Editor({
   useEffect(() => {
     if (!isTauri()) return;
     const timer = window.setTimeout(() => {
-      void invoke("audio_set_clips", { project: session.path, clips: audibleClips }).catch(
+      void audioSetClips(session.path, audibleClips).catch(
         (cause: unknown) => console.error("WolfCut: could not update the mix", cause),
       );
     }, 150);
@@ -1204,9 +1226,12 @@ function Editor({
   } | null>(null);
   const stillToken = useRef(0);
   useEffect(() => {
+    // While playing, the streaming loop below owns the still; clearing it
+    // here on every playhead tick would fight the stream frame by frame.
+    if (playing) return;
     const token = ++stillToken.current;
     setEngineStill(null);
-    if (playing || !loaded || exportClips.length === 0) return;
+    if (!loaded || exportClips.length === 0) return;
 
     const timer = window.setTimeout(() => {
       // Preview resolution: the frame's aspect, capped for IPC weight. Even
@@ -1232,6 +1257,73 @@ function Editor({
     }, 160);
     return () => window.clearTimeout(timer);
   }, [playing, loaded, playhead, exportClips, frame, session.rateNum, session.rateDen]);
+
+  /**
+   * Streaming truth: while playing, present the engine's real composite
+   * against the transport clock wherever the element preview is wrong.
+   *
+   * The DOM approximation is exact for a single visible layer and cannot
+   * composite a stack, so the loop engages only while two or more visual
+   * layers sit under the playhead - single-clip stretches keep the smooth
+   * element playback. Pull, not push: request the frame at the transport's
+   * current position, present it, request the next the moment it lands. The
+   * loop runs at whatever rate the machine sustains and can never queue
+   * stale frames; the pool's warm readers make consecutive requests rolls,
+   * not seeks. This is the presentation half of engine decision 0002 /
+   * desktop decision 0007 - see desktop decision 0009 for the shape and its
+   * exit (a native surface replaces the transport, not this seam).
+   */
+  const exportClipsRef = useRef(exportClips);
+  exportClipsRef.current = exportClips;
+  useEffect(() => {
+    if (!playing || !loaded) return;
+    let live = true;
+    // Invalidate any paused-dwell fetch still in flight from before play.
+    stillToken.current += 1;
+    // Rate beats resolution while the picture moves; the paused dwell
+    // re-fetches at the full 960 cap the moment the transport stops.
+    const cap = 640;
+    const wait = (ms: number) => new Promise((resolve) => window.setTimeout(resolve, ms));
+    const visualLayers = (time: number) =>
+      clipsAt(latest.current.project, time).filter(
+        (clip) => clip.kind === "video" || clip.kind === "image",
+      ).length;
+
+    const run = async () => {
+      while (live) {
+        const time = latest.current.playhead;
+        if (visualLayers(time) < 2) {
+          setEngineStill(null);
+          await wait(120);
+          continue;
+        }
+        const view = latest.current.frame;
+        const scale = Math.min(1, cap / Math.max(view.width, view.height));
+        const width = Math.max(2, Math.round((view.width * scale) / 2) * 2);
+        const height = Math.max(2, Math.round((view.height * scale) / 2) * 2);
+        try {
+          const bytes = await previewFrame({
+            time,
+            width,
+            height,
+            rateNum: session.rateNum,
+            rateDen: session.rateDen,
+            clips: exportClipsRef.current,
+          });
+          if (live) setEngineStill({ bytes, width, height });
+        } catch {
+          // A failed frame keeps the approximation on screen; back off so a
+          // persistently failing source cannot spin the pool.
+          if (live) setEngineStill(null);
+          await wait(200);
+        }
+      }
+    };
+    void run();
+    return () => {
+      live = false;
+    };
+  }, [playing, loaded, session.rateNum, session.rateDen]);
 
   const selectedClip =
     selectedClipIds.length === 1 ? findClip(project, selectedClipIds[0]) : null;
