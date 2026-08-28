@@ -1,0 +1,21 @@
+[package]
+name = "wolfcut-export"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Rendering a timeline to a file, and one true frame of it to a monitor. The engine's ownership of what the pixels mean."
+
+[features]
+# The GPU compositor for full exports. Off by default for the same reason as
+# wolfcut-render's: engine-only work never pays for the wgpu tree.
+gpu = ["wolfcut-render/gpu"]
+
+[dependencies]
+wolfcut-core.workspace = true
+wolfcut-media.workspace = true
+wolfcut-render.workspace = true
+serde = { version = "1", features = ["derive"] }
+
+[lints]
+workspace = true

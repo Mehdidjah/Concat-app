@@ -28,6 +28,7 @@ wolfcut-core = { path = "../../engine/crates/wolfcut-core" }
 wolfcut-media = { path = "../../engine/crates/wolfcut-media" }
 wolfcut-project = { path = "../../engine/crates/wolfcut-project" }
 wolfcut-render = { path = "../../engine/crates/wolfcut-render", features = ["gpu"] }
+wolfcut-export = { path = "../../engine/crates/wolfcut-export", features = ["gpu"] }
 
 # Engine-owned audio playback: cpal talks to the output device, memmap2 keeps
 # decoded PCM disk-backed instead of resident.

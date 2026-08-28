@@ -5759,8 +5759,19 @@ dependencies = [
  "tauri-plugin-opener",
  "ureq",
  "wolfcut-core",
+ "wolfcut-export",
  "wolfcut-media",
  "wolfcut-project",
+ "wolfcut-render",
+]
+
+[[package]]
+name = "wolfcut-export"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "wolfcut-core",
+ "wolfcut-media",
  "wolfcut-render",
 ]
 

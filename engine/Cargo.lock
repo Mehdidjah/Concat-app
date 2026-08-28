@@ -1509,6 +1509,16 @@ name = "wolfcut-core"
 version = "0.1.0"
 
 [[package]]
+name = "wolfcut-export"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "wolfcut-core",
+ "wolfcut-media",
+ "wolfcut-render",
+]
+
+[[package]]
 name = "wolfcut-media"
 version = "0.1.0"
 dependencies = [
