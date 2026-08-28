@@ -758,17 +758,18 @@ export function Preview({
               }),
             ]}
             trigger={(open) => (
+              // Shape and chevron only: the proportions read at a glance,
+              // and the numbers live in the tooltip and the menu rows -
+              // spelling them out here crowded the tray for nothing.
               <span
-                title="Output size"
-                className={`flex items-center gap-1.5 rounded-md px-1.5 py-0.5 font-technical text-[10px]
-                            transition-colors ${
-                              open
-                                ? "bg-active text-primary"
-                                : "text-tertiary hover:bg-hover hover:text-secondary"
-                            }`}
+                title={`Output size: ${ratioLabel(frame.width, frame.height)} · ${frame.width} x ${frame.height}`}
+                className={`flex items-center gap-1 rounded-md px-1.5 py-1 transition-colors ${
+                  open
+                    ? "bg-active text-primary"
+                    : "text-tertiary hover:bg-hover hover:text-secondary"
+                }`}
               >
                 <RatioShape width={frame.width} height={frame.height} />
-                {ratioLabel(frame.width, frame.height)} · {frame.width}x{frame.height}
                 <Icon name="chevronDown" size={10} />
               </span>
             )}
