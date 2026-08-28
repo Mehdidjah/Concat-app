@@ -42,6 +42,7 @@ Currently in Alpha (pre-release), Download from [Releases](https://github.com/ju
 
 🌟 = important or really desired.
 
+- [ ] 🌟 Total website/ revamp: and a proper deploy website for a Download landing page.
 - [ ] 🌟 Templates: Improve templates, create centralized registry of templates contributed by users (kinda like npm).
 - [ ] Hardware analysis: for device-tier detection, checking how good or potato someone's device is.
 - [ ] Effects: A scaleable way to embed or add hundreds of different Transition styles, Effects, etc to the Library.
