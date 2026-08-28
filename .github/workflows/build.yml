@@ -203,8 +203,11 @@ jobs:
           deb="$(find desktop/src-tauri/target/release/bundle/deb -name '*.deb' | head -1)"
           test -n "$deb" || { echo "no .deb produced"; exit 1; }
           dpkg-deb -x "$deb" unpacked
+          # Tauri's deb puts resources straight under usr/lib/<product>/ -
+          # there is no literal "resources" path component - so match the
+          # binary inside its own ffmpeg/ folder wherever that landed.
           for binary in ffmpeg ffprobe; do
-            staged="$(find unpacked -type f -path '*resources*' -name "$binary" | head -1)"
+            staged="$(find unpacked -type f -path "*/ffmpeg/$binary" | head -1)"
             test -n "$staged" && test -x "$staged" || { echo "$binary missing from the deb or not executable"; exit 1; }
             "$staged" -version | head -1
           done
