@@ -59,7 +59,9 @@
  */
 @theme static {
   /* Surfaces, from furthest back to nearest front. */
-  --color-base: #f0f0f2;
+  /* Deep enough that borderless white panels visibly float, and the
+     resizer gutters read as grooves you can grab. */
+  --color-base: #e6e7eb;
   --color-panel: #ffffff;
   --color-sunken: #e8e8ec;
   --color-elevated: #ffffff;
@@ -92,7 +94,7 @@
    * when the interface does - and black is the only honest backdrop for it.
    * `on-stage` is therefore a fixed value too, since it always sits on black.
    */
-  --color-stage: #000000;
+  --color-stage: #101013;
   --color-on-stage: rgba(255, 255, 255, 0.38);
   /*
    * Selection highlight, the same in both themes.
@@ -171,8 +173,11 @@
  * disorienting, and colour work in particular wants a predictable surround.
  */
 :root[data-theme="dark"] {
-  --color-base: #0a0a0c;
-  --color-panel: #161618;
+  /* Near-black ground for the same reason as light's deeper grey: the
+     borderless panels and their grab-able gutters must self-evidently
+     separate. */
+  --color-base: #050506;
+  --color-panel: #18181b;
   --color-sunken: #050506;
   --color-elevated: #1f1f22;
   --color-hover: rgba(255, 255, 255, 0.07);
