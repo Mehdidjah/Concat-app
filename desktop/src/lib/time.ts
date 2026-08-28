@@ -9,8 +9,14 @@
 export function timecode(seconds: number, frameRate: number): string {
   const safe = Math.max(0, seconds);
   const totalFrames = Math.floor(safe * frameRate);
-  const frames = totalFrames % Math.round(frameRate);
-  const totalSeconds = Math.floor(safe);
+  // Both fields derive from the frame count - non-drop-frame timecode. The
+  // seconds used to come from the wall clock instead, so at 29.97 the frame
+  // field disagreed with its own seconds near boundaries (00:01:40:27 where
+  // :00 belonged). NDF runs slightly behind the wall clock at NTSC rates;
+  // that is the standard trade, not a bug.
+  const fps = Math.max(1, Math.round(frameRate));
+  const frames = totalFrames % fps;
+  const totalSeconds = Math.floor(totalFrames / fps);
 
   const pad = (value: number) => value.toString().padStart(2, "0");
   return [

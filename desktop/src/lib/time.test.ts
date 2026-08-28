@@ -37,6 +37,15 @@ describe("timecode", () => {
   test("negative time clamps to zero rather than going surreal", () => {
     expect(timecode(-5, 30)).toBe("00:00:00:00");
   });
+
+  test("fractional rates keep frames and seconds in one clock", () => {
+    // Non-drop-frame: both fields derive from the frame count. 100s at
+    // 29.97 is frame 2997 exactly - second 99, frame 27 - and the frame
+    // field must roll to :00 exactly when its own seconds increment, never
+    // disagree with them (the old wall-clock seconds read 01:40 here).
+    expect(timecode(100, 29.97)).toBe("00:01:39:27");
+    expect(timecode(100.101, 29.97)).toBe("00:01:40:00");
+  });
 });
 
 describe("shortDuration", () => {
