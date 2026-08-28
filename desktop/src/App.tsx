@@ -1030,6 +1030,13 @@ function Editor({
         case "KeyN":
           setSnap((current) => !current);
           break;
+        case "KeyF": {
+          // The same marker resolveDrop uses to find the timeline canvas -
+          // its width is a layout fact only that element knows.
+          const canvas = document.querySelector<HTMLCanvasElement>("[data-relay-timeline]");
+          if (canvas) fit(canvas.clientWidth);
+          break;
+        }
         case "KeyS":
           splitAtPlayhead();
           break;
@@ -1050,6 +1057,7 @@ function Editor({
   }, [
     deleteSelected,
     duration,
+    fit,
     frameRate,
     mergeSelected,
     redoAction,

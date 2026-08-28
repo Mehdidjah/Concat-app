@@ -4,7 +4,7 @@ import type {
   WheelEvent as ReactWheelEvent,
 } from "react";
 
-import type { MediaAssets, Peaks } from "../lib/assets";
+import { subscribeAssets, type MediaAssets, type Peaks } from "../lib/assets";
 import { themeColor, type Theme } from "../lib/theme";
 import {
   activeTimeline,
@@ -253,6 +253,16 @@ export function TimelinePanel({
   const view = useRef({ project, timeline, playhead, playing, secondsPerPixel, scrollLeft, trackScroll, frameRate, selected, rows, dropTrack, assets, tool });
   view.current = { project, timeline, playhead, playing, secondsPerPixel, scrollLeft, trackScroll, frameRate, selected, rows, dropTrack, assets, tool };
 
+  // Repaint only when something could have changed. Every render marks the
+  // canvas dirty (props are how state reaches it), pointer moves mark it
+  // (the cursor and razor guide draw without a render), artwork arrival
+  // marks it (thumbnails land outside React on purpose), and a live drag
+  // draws every frame regardless - edge auto-scroll happens inside draw.
+  // An idle editor previously repainted at full frame rate forever, which
+  // on a laptop is a battery tax for drawing the same pixels.
+  const dirty = useRef(true);
+  dirty.current = true;
+
   const timeAt = useCallback(
     (clientX: number) => {
       const canvas = canvasRef.current;
@@ -435,12 +445,14 @@ export function TimelinePanel({
       }
     }
 
-    // The selection band, drawn over the clips it is catching.
+    // The selection band, drawn over the clips it is catching. Palette
+    // colours like every other mark on this canvas - these were the only
+    // two that bypassed the theme.
     if (drag.current?.kind === "marquee") {
       const band = normalise(drag.current);
-      context.fillStyle = "rgba(59,130,246,0.15)";
+      context.fillStyle = COLORS.dropZone;
       context.fillRect(band.x, band.y, band.width, band.height);
-      context.strokeStyle = "rgba(59,130,246,0.8)";
+      context.strokeStyle = COLORS.clipSelected;
       context.lineWidth = 1;
       context.strokeRect(
         Math.round(band.x) + 0.5,
@@ -473,18 +485,28 @@ export function TimelinePanel({
   useEffect(() => {
     let frame = 0;
     const tick = () => {
-      draw();
+      if (dirty.current || drag.current !== null || edgeSpeed.current !== 0) {
+        dirty.current = false;
+        draw();
+      }
       frame = requestAnimationFrame(tick);
     };
     frame = requestAnimationFrame(tick);
 
     const canvas = canvasRef.current;
+    // Resize draws immediately: resizing clears the canvas, and waiting for
+    // the next tick would flash a blank frame.
     const observer = new ResizeObserver(() => draw());
     if (canvas) observer.observe(canvas);
+
+    const unsubscribe = subscribeAssets(view.current.assets, () => {
+      dirty.current = true;
+    });
 
     return () => {
       cancelAnimationFrame(frame);
       observer.disconnect();
+      unsubscribe();
     };
   }, [draw]);
 
@@ -648,6 +670,8 @@ export function TimelinePanel({
   const onPointerMove = (event: ReactPointerEvent<HTMLCanvasElement>) => {
     const canvas = event.currentTarget;
     pointer.current = { x: event.clientX, y: event.clientY };
+    // The razor guide follows the pointer without a React render.
+    dirty.current = true;
 
     if (!drag.current) {
       edgeSpeed.current = 0;
@@ -706,6 +730,9 @@ export function TimelinePanel({
 
     drag.current = null;
     edgeSpeed.current = 0;
+    // An empty marquee that changed no selection triggers no render; the
+    // band still has to leave the screen.
+    dirty.current = true;
   };
 
   const onWheel = (event: ReactWheelEvent<HTMLCanvasElement>) => {
