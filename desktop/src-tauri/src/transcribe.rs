@@ -490,10 +490,19 @@ fn run_transcription(
 
     // Unique scratch names, so two clips transcribed back to back (or a
     // crashed run's leftovers) can never collide.
-    let nonce = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|elapsed| elapsed.as_millis())
-        .unwrap_or(0);
+    // Wall-clock millis alone collide when two runs start in the same
+    // instant; the process id and a counter make the name unique without
+    // reaching for a random source.
+    static RUNS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let nonce = format!(
+        "{}-{}-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_millis())
+            .unwrap_or(0),
+        std::process::id(),
+        RUNS.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+    );
     let scratch = std::env::temp_dir();
     let wav = scratch.join(format!("relay-transcribe-{nonce}.wav"));
     let out_base = scratch.join(format!("relay-transcribe-{nonce}"));
