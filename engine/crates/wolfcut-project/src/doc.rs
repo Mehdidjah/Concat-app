@@ -280,10 +280,15 @@ pub fn from_document(document: &Value) -> Option<Project> {
 /// Settings the host manages around the edit: the manifest's identity fields.
 #[derive(Clone, Debug)]
 pub struct DocumentSettings {
+    /// The project's display name, written as the document's `name` field.
     pub name: String,
+    /// Output frame width in pixels.
     pub width: u32,
+    /// Output frame height in pixels.
     pub height: u32,
+    /// Numerator of the output frame rate, e.g. 30000 for 29.97fps.
     pub rate_num: i64,
+    /// Denominator of the output frame rate, e.g. 1001 for 29.97fps.
     pub rate_den: i64,
 }
 

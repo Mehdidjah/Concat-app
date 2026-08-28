@@ -14,6 +14,9 @@ use crate::model::Project;
 
 const UNDO_DEPTH: usize = 200;
 
+/// One editing session: the project, the id mint that keeps its ids unique,
+/// and the undo/redo stacks. This is the object a host holds per open
+/// project; everything else in the crate is reachable through it.
 pub struct Editor {
     project: Project,
     mint: IdMint,
@@ -37,6 +40,8 @@ impl Editor {
         Some(Self { project, mint, undo: Vec::new(), redo: Vec::new() })
     }
 
+    /// The current state, read-only: all mutation goes through
+    /// [`Editor::apply`] so nothing can change without being undoable.
     pub fn project(&self) -> &Project {
         &self.project
     }
@@ -81,10 +86,14 @@ impl Editor {
         }
     }
 
+    /// Whether [`Editor::undo`] would do anything - what the UI's undo
+    /// button greys out on.
     pub fn can_undo(&self) -> bool {
         !self.undo.is_empty()
     }
 
+    /// Whether [`Editor::redo`] would do anything; the redo button's twin
+    /// of [`Editor::can_undo`].
     pub fn can_redo(&self) -> bool {
         !self.redo.is_empty()
     }

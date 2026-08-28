@@ -29,17 +29,25 @@ const MAX_OFFSET: f64 = 3.0;
 /// How far apart two clips may sit and still count as touching, in seconds.
 const JOIN_EPSILON: f64 = 1e-6;
 
+/// Which end of a clip a trim drags. The two are not symmetric: see
+/// [`Command::TrimClip`].
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum TrimEdge {
+    /// The head. Trimming here moves the in-point with the edge, so the
+    /// remaining frames stay where they were on the timeline.
     Start,
+    /// The tail. Trimming here only lengthens or shortens the clip.
     End,
 }
 
+/// Which per-track toggle a [`Command::SetTrackFlag`] flips.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum TrackFlag {
+    /// [`Track::visible`]: whether the track's video reaches the composite.
     Visible,
+    /// [`Track::muted`]: whether the track's audio is silenced.
     Muted,
 }
 
@@ -47,8 +55,13 @@ pub enum TrackFlag {
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ClipMove {
+    /// The clip to move. An unknown id is skipped, not an error - the rest
+    /// of the batch of moves still lands.
     pub clip_id: String,
+    /// New timeline position in seconds, floored at 0.
     pub start: f64,
+    /// Destination track. An unknown id moves the clip in time but leaves it
+    /// on its current track.
     pub track_id: String,
 }
 
@@ -58,16 +71,31 @@ pub struct ClipMove {
 #[derive(Clone, Default, PartialEq, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ClipPatch {
+    /// New display name, taken verbatim. A later `text` patch overwrites it
+    /// with the title's first line.
     pub name: Option<String>,
+    /// New gain; floored at 0, deliberately not capped at 1 - boosting quiet
+    /// footage is legitimate.
     pub volume: Option<f64>,
+    /// New fade-in length in seconds, floored at 0.
     pub fade_in: Option<f64>,
+    /// New fade-out length in seconds, floored at 0.
     pub fade_out: Option<f64>,
+    /// New opacity, clamped into 0..=1.
     pub opacity: Option<f64>,
+    /// New pitch-preservation setting, taken as sent.
     pub preserve_pitch: Option<bool>,
+    /// Wholesale replacement of the audio filter chain - the UI sends the
+    /// full list, not a diff.
     pub filters: Option<Vec<AppliedFilter>>,
+    /// Wholesale replacement of the video effect chain, like `filters`.
     pub video_effects: Option<Vec<AppliedFilter>>,
+    /// The transition on the cut into the clip: absent leaves it alone,
+    /// null clears it, a value replaces it.
     #[serde(default, with = "double_option", skip_serializing_if = "Option::is_none")]
     pub transition_in: Option<Option<Transition>>,
+    /// The title styling, same three-way wire semantics as `transition_in`.
+    /// Setting a style also renames the clip after its first line.
     #[serde(default, with = "double_option", skip_serializing_if = "Option::is_none")]
     pub text: Option<Option<TextStyle>>,
 }
@@ -97,32 +125,106 @@ mod double_option {
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NewMedia {
+    /// Absolute path on disk. Adding a path already in the bin is a no-op,
+    /// so re-imports cannot duplicate media.
     pub path: String,
+    /// Display name for the bin, normally the file's basename.
     pub name: String,
+    /// Seconds, or None when the container did not report one - clips of
+    /// such media get a five-second fallback length.
     pub duration: Option<f64>,
+    /// What the host's probe decided the file is.
     pub kind: MediaKind,
+    /// Pixel width, when the probe found one.
     pub width: Option<u32>,
+    /// Pixel height, same terms as `width`.
     pub height: Option<u32>,
+    /// Frames per second as a decimal, for display.
     pub frame_rate: Option<f64>,
+    /// The exact rate fraction the engine works in, e.g. "30000/1001".
     pub frame_rate_fraction: Option<String>,
+    /// Codec name as probed, e.g. "h264". Informational.
     pub video_codec: Option<String>,
+    /// Codec of the embedded audio, when there is any.
     pub audio_codec: Option<String>,
+    /// Whether the file carries an audio stream.
     pub has_audio: bool,
 }
 
+/// Every edit, as the UI sends it over IPC: a tagged `op` plus camelCase
+/// fields. [`apply`] is the single place each variant's meaning lives; the
+/// notes here state the contract - clamps, tolerances, what gets minted -
+/// so a caller need not read `apply` to know what a command will do.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum Command {
-    AddMedia { item: NewMedia },
-    RemoveMedia { media_id: String },
-    SetMediaPlaceholder { media_id: String, placeholder: bool },
-    FillSlot { media_id: String, item: NewMedia },
-    Batch { commands: Vec<Command> },
-    AddClip { media_id: String, track_id: String, start: f64 },
-    AddClipAtFirstFree { media_id: String, start: f64 },
-    AddTextClip {
-        track_id: Option<String>,
+    /// Imports a file into the bin, minting an "m" id. A path already
+    /// present is a tolerated no-op that mints nothing.
+    AddMedia {
+        /// The probed file, as described by the host.
+        item: NewMedia,
+    },
+    /// Removes a bin item and every clip referencing it, on *all* timelines
+    /// - a clip whose media is gone would linger as a dead reference.
+    RemoveMedia {
+        /// The bin item to remove. An unknown id is a no-op.
+        media_id: String,
+    },
+    /// Marks a bin item as a template slot (or back to ordinary media),
+    /// which is what [`Command::FillSlot`] requires of its target.
+    SetMediaPlaceholder {
+        /// The bin item to mark. An unknown id is a no-op.
+        media_id: String,
+        /// True to make it a slot, false to make it ordinary media again.
+        placeholder: bool,
+    },
+    /// Swaps the user's file into a template slot in place. The slot keeps
+    /// its id so clips keep working; start, duration and speed stay the
+    /// template's, while the in-point resets and each clip's kind and name
+    /// follow the new file, across all timelines. Errs if the id is unknown
+    /// or the item is not a placeholder.
+    FillSlot {
+        /// The slot being filled - must have `placeholder` set.
+        media_id: String,
+        /// The user's file that takes the slot's place.
+        item: NewMedia,
+    },
+    /// Several commands as one atomic edit: applied to a staged copy and
+    /// committed only if every one succeeds, then recorded as a single undo
+    /// step. The outcome carries the last id minted inside.
+    Batch {
+        /// The commands, applied in order. Nesting is legal.
+        commands: Vec<Command>,
+    },
+    /// Places a clip of `media_id` on a named track, minting a "c" id.
+    /// Duration comes from the media (five seconds for a still or unknown
+    /// length); errs if the media or track no longer exists.
+    AddClip {
+        /// The bin item to cut from.
+        media_id: String,
+        /// The lane to place it on.
+        track_id: String,
+        /// Timeline position in seconds, floored at 0.
         start: f64,
+    },
+    /// [`Command::AddClip`] without naming a lane: lands on the lowest
+    /// track with nothing in the clip's span, falling back to the bottom
+    /// track (overlap and all) rather than refusing.
+    AddClipAtFirstFree {
+        /// The bin item to cut from.
+        media_id: String,
+        /// Timeline position in seconds, floored at 0.
+        start: f64,
+    },
+    /// Places a title: a clip with no media behind it, named after the
+    /// text's first line, minting a "c" id.
+    AddTextClip {
+        /// The lane to place it on. None picks the first free track like
+        /// [`Command::AddClipAtFirstFree`]; naming a vanished track errs.
+        track_id: Option<String>,
+        /// Timeline position in seconds, floored at 0.
+        start: f64,
+        /// The words and their look. None means [`TextStyle::default`].
         style: Option<TextStyle>,
         /// Seconds on the timeline; the editorial default when absent. Here
         /// so a caption run can land as one batch instead of add-then-trim
@@ -134,32 +236,158 @@ pub enum Command {
         #[serde(default)]
         offset_y: Option<f64>,
     },
-    MoveClips { moves: Vec<ClipMove> },
-    TrimClip { clip_id: String, edge: TrimEdge, delta: f64 },
-    SplitClips { clip_ids: Vec<String>, time: f64 },
-    MergeClips { clip_ids: Vec<String> },
-    RemoveClips { clip_ids: Vec<String> },
-    UpdateClip { clip_id: String, patch: ClipPatch },
-    SetClipSpeed { clip_id: String, speed: f64 },
-    SetClipTransform {
+    /// Repositions any number of clips in one edit - one undo step for a
+    /// whole multi-selection drag. Unknown clips and tracks are tolerated
+    /// per [`ClipMove`].
+    MoveClips {
+        /// Where each clip is going.
+        moves: Vec<ClipMove>,
+    },
+    /// Drags one edge of a clip. A head trim moves the in-point with the
+    /// edge (scaled by speed) so the remaining pixels do not slide; either
+    /// edge stops at the sixtieth-of-a-second minimum duration. An unknown
+    /// clip is a no-op.
+    TrimClip {
+        /// The clip to trim.
         clip_id: String,
+        /// Which edge is being dragged.
+        edge: TrimEdge,
+        /// Signed seconds of timeline the edge moves: positive drags the
+        /// head right (shortening) or the tail right (lengthening).
+        delta: f64,
+    },
+    /// Cuts each named clip in two at one playhead time. The head keeps the
+    /// id and the transition; the tail is minted fresh and stays
+    /// source-continuous. A clip the time misses (or grazes within the
+    /// minimum duration) is skipped.
+    SplitClips {
+        /// The clips under the playhead - normally the selection.
+        clip_ids: Vec<String>,
+        /// The cut point, in timeline seconds.
+        time: f64,
+    },
+    /// Rejoins split pieces into the earliest piece, which keeps its id.
+    /// Errs with a user-facing sentence ([`why_not_merge`]) unless the
+    /// pieces sit on one track, come from one file at one speed, touch
+    /// within a microsecond, and are still in source order.
+    MergeClips {
+        /// The pieces to rejoin, any order.
+        clip_ids: Vec<String>,
+    },
+    /// Deletes clips from the active timeline. Unknown ids are ignored.
+    RemoveClips {
+        /// The clips to delete.
+        clip_ids: Vec<String>,
+    },
+    /// Applies a [`ClipPatch`]: only the fields present change, with the
+    /// clamps documented on the patch. An unknown clip is a no-op.
+    UpdateClip {
+        /// The clip to patch.
+        clip_id: String,
+        /// Which properties change, and to what.
+        patch: ClipPatch,
+    },
+    /// Changes playback rate while holding the amount of source covered
+    /// constant - the clip's timeline duration is what stretches, which is
+    /// what makes this a speed change rather than a trim.
+    SetClipSpeed {
+        /// The clip to retime. An unknown id is a no-op.
+        clip_id: String,
+        /// The new rate, clamped into 0.0625..=16 (the engine's range).
+        speed: f64,
+    },
+    /// Adjusts the picture's placement. Each field is optional so a drag
+    /// can send just the axis it moved; absent fields stay put.
+    SetClipTransform {
+        /// The clip to place. An unknown id is a no-op.
+        clip_id: String,
+        /// New scale, clamped into 0.05..=8.
         scale: Option<f64>,
+        /// New horizontal offset as a frame-width fraction, clamped to ±3.
         offset_x: Option<f64>,
+        /// New vertical offset as a frame-height fraction, clamped to ±3.
         offset_y: Option<f64>,
+        /// New rotation in degrees, wrapped into (-180, 180] so a full drag
+        /// never accumulates turns.
         rotation: Option<f64>,
     },
-    DetachAudio { clip_id: String },
-    ReattachAudio { clip_id: String },
+    /// Pulls a video clip's sound out into its own audio clip on a free
+    /// lane (minting one if none is free), muting the video and moving its
+    /// audio filters to the sound. A no-op unless the clip is an unmuted
+    /// video whose media has audio and is not already detached.
+    DetachAudio {
+        /// The video clip to detach from.
+        clip_id: String,
+    },
+    /// Undoes a detach: deletes the detached sound clip(s), unmutes the
+    /// video and hands the sound's filters back. Accepts either the video's
+    /// id or the sound's; a no-op when either side is gone.
+    ReattachAudio {
+        /// The video clip - or its detached sound.
+        clip_id: String,
+    },
+    /// Appends a lane named after the highest "Track N" in use, minting a
+    /// "t" id.
     AddTrack,
-    RemoveTrack { track_id: String },
-    RenameTrack { track_id: String, name: String },
-    SetTrackFlag { track_id: String, flag: TrackFlag, value: bool },
+    /// Deletes a lane and every clip on it. Errs at the floor of one track.
+    RemoveTrack {
+        /// The lane to delete.
+        track_id: String,
+    },
+    /// Renames a lane. Whitespace-only names are ignored so a track can
+    /// never end up blank; unknown ids are tolerated.
+    RenameTrack {
+        /// The lane to rename.
+        track_id: String,
+        /// The new label; trimmed before it lands.
+        name: String,
+    },
+    /// Flips one of a track's two toggles. An unknown id is a no-op.
+    SetTrackFlag {
+        /// The lane to change.
+        track_id: String,
+        /// Which toggle: visibility or mute.
+        flag: TrackFlag,
+        /// The new setting.
+        value: bool,
+    },
+    /// Adds a fresh timeline - four new lanes, "Timeline N" after the
+    /// highest in use - and makes it active. Mints a "tl" id.
     AddTimeline,
-    RemoveTimeline { timeline_id: String },
-    RenameTimeline { timeline_id: String, name: String },
-    SelectTimeline { timeline_id: String },
-    AddFont { family: String, path: String },
-    RemoveFont { family: String },
+    /// Deletes a timeline, moving the active tab to a neighbour if it was
+    /// this one. Errs at the floor of one timeline.
+    RemoveTimeline {
+        /// The timeline to delete. An unknown id is a no-op.
+        timeline_id: String,
+    },
+    /// Renames a timeline tab, with the same trim-and-ignore-blank rule as
+    /// [`Command::RenameTrack`].
+    RenameTimeline {
+        /// The timeline to rename.
+        timeline_id: String,
+        /// The new tab label; trimmed before it lands.
+        name: String,
+    },
+    /// Switches which timeline subsequent commands act on. An unknown id
+    /// leaves the selection where it was.
+    SelectTimeline {
+        /// The timeline to switch to.
+        timeline_id: String,
+    },
+    /// Registers a font file for titles. A path already registered is a
+    /// no-op, so re-adding cannot duplicate.
+    AddFont {
+        /// The family name titles will refer to.
+        family: String,
+        /// Where the font file lives on disk.
+        path: String,
+    },
+    /// Unregisters a font family. Clips keep the family name: the face may
+    /// come back when the file does.
+    RemoveFont {
+        /// The family to unregister.
+        family: String,
+    },
 }
 
 /// What a command produced, beyond the new state: the ids it minted, so the
@@ -167,6 +395,9 @@ pub enum Command {
 #[derive(Clone, Default, PartialEq, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Outcome {
+    /// The id of what the command created - a clip, track, timeline, or
+    /// media item - or, for a batch, the last id minted inside it. Absent
+    /// when nothing was created, including tolerated no-ops.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub created_id: Option<String>,
 }
@@ -180,6 +411,8 @@ pub struct IdMint {
 }
 
 impl IdMint {
+    /// The next fresh id: the prefix ("c", "t", "tl", "m") plus a counter
+    /// shared across all prefixes, so no two ids ever share a number.
     pub fn next(&mut self, prefix: &str) -> String {
         self.counter += 1;
         format!("{prefix}{}", self.counter)
@@ -200,6 +433,8 @@ impl IdMint {
         }
     }
 
+    /// Adopts every id a restored project uses - media, timelines, tracks,
+    /// clips - so nothing minted afterwards can collide with the file.
     pub fn adopt_project(&mut self, project: &Project) {
         for item in &project.media {
             self.adopt(&item.id);
