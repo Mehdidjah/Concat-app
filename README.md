@@ -56,3 +56,4 @@ Currently in Alpha (pre-release), Download from [Releases](https://github.com/ju
 ## Rules
 
 - No Third Party API/Cloud integration such as voice generators, image generators, video generators, etc.
+- No code-changes or pull-request out of the blue.
