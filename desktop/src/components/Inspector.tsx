@@ -7,9 +7,8 @@ import { shortDuration, timecode } from "../lib/time";
  * Properties of the current selection - a clip if one is selected, otherwise
  * the highlighted bin item, otherwise the project itself.
  *
- * Read-only for now. When these become editable the edits go to the engine as
- * commands and come back as new state; the panel stays dumb. That is what
- * makes undo possible later without unpicking it.
+ * The rows are read-only; edits go through Modify, whose changes reach the
+ * engine and come back as new state - the panel stays dumb.
  */
 export function Inspector({
   clip,
@@ -20,6 +19,7 @@ export function Inspector({
   projectPath,
   frame,
   duration,
+  onModify,
 }: {
   clip: Clip | null;
   media: MediaItem | null;
@@ -31,24 +31,38 @@ export function Inspector({
   frame: { width: number; height: number };
   /** Timeline length in seconds. */
   duration: number;
+  /** Opens the project-details editor (name, output frame). */
+  onModify: () => void;
 }) {
   return (
-    <div>
+    <div className="flex min-h-full flex-col">
       {!clip && !media ? (
-        <div className="selectable px-3 py-2">
-          <Section title="Project">
-            <Row label="Name" value={projectName} />
-            <Row label="Folder" value={projectPath} mono wrap />
-            <Row label="Output" value={`${frame.width} x ${frame.height}`} mono />
-            <Row label="Rate" value={`${frameRate.toFixed(2)} fps`} mono />
-            <Row label="Duration" value={timecode(duration, frameRate)} mono />
-          </Section>
-          <Section title="Contents">
-            <Row label="Media" value={`${project.media.length}`} mono />
-            <Row label="Tracks" value={`${activeTimeline(project).tracks.length}`} mono />
-            <Row label="Clips" value={`${activeTimeline(project).clips.length}`} mono />
-          </Section>
-        </div>
+        <>
+          <div className="selectable flex-1 px-3 py-2">
+            <Section title="Project">
+              <Row label="Name" value={projectName} />
+              <Row label="Folder" value={projectPath} mono wrap />
+              <Row label="Output" value={`${frame.width} x ${frame.height}`} mono />
+              <Row label="Rate" value={`${frameRate.toFixed(2)} fps`} mono />
+              <Row label="Duration" value={timecode(duration, frameRate)} mono />
+            </Section>
+            <Section title="Contents">
+              <Row label="Media" value={`${project.media.length}`} mono />
+              <Row label="Tracks" value={`${activeTimeline(project).tracks.length}`} mono />
+              <Row label="Clips" value={`${activeTimeline(project).clips.length}`} mono />
+            </Section>
+          </div>
+          <div className="flex justify-end border-t border-hairline px-3 py-2">
+            <button
+              type="button"
+              onClick={onModify}
+              className="cursor-pointer rounded-lg bg-hover px-3.5 py-1.5 text-xs font-medium
+                         text-primary transition-colors hover:bg-active"
+            >
+              Modify
+            </button>
+          </div>
+        </>
       ) : (
         <div className="selectable px-3 py-2">
           {clip && (

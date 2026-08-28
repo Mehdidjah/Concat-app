@@ -174,14 +174,22 @@ pub fn editor_state(state: tauri::State<'_, EditorState>) -> Result<EditorView, 
 }
 
 /// Writes the session's document to its project folder. The output size can
-/// have been edited in the preview footer, so it rides along here.
+/// have been edited in the preview footer and the name in the project
+/// details dialog, so both ride along here.
 #[tauri::command]
 pub fn editor_save(
     state: tauri::State<'_, EditorState>,
+    name: Option<String>,
     width: Option<u32>,
     height: Option<u32>,
 ) -> Result<(), String> {
     with_session(&state, |session| {
+        if let Some(name) = name {
+            let trimmed = name.trim();
+            if !trimmed.is_empty() {
+                session.settings.name = trimmed.to_owned();
+            }
+        }
         if let Some(width) = width {
             session.settings.width = width;
         }

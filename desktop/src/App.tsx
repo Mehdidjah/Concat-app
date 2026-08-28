@@ -10,6 +10,7 @@ import { ExportDialog } from "./components/ExportDialog";
 import { Icon } from "./components/Icon";
 import { ALL_MEDIA, MediaBin, type BinFilter } from "./components/MediaBin";
 import type { MenuOption } from "./components/Menu";
+import { ModifyProjectDialog } from "./components/ModifyProjectDialog";
 import { Preview } from "./components/Preview";
 import {
   exportClipsOf,
@@ -172,6 +173,11 @@ function Editor({
       [pushToast],
     ),
   });
+
+  // The project's display name. Seeded from the session, editable through
+  // the Details panel's Modify dialog; the engine persists it on save.
+  const [projectName, setProjectName] = useState(session.name);
+  const [modifyingProject, setModifyingProject] = useState<null | { busy: boolean }>(null);
 
   const [selectedClipIds, setSelectedClipIds] = useState<string[]>([]);
   const [selectedMediaId, setSelectedMediaId] = useState<string | null>(null);
@@ -867,7 +873,7 @@ function Editor({
   return (
     <div className="flex h-full flex-col overflow-hidden">
       <TitleBar
-        projectName={session.name}
+        projectName={projectName}
         status={
           saveState === "saving"
             ? "saving..."
@@ -1127,7 +1133,7 @@ function Editor({
               media={inspectorMedia}
               project={project}
               fonts={fontsForUi}
-              projectName={session.name}
+              projectName={projectName}
               projectPath={session.path}
               frame={frame}
               duration={duration}
@@ -1137,6 +1143,7 @@ function Editor({
               onChangeClip={changeClip}
               onCommitClip={commitEcho}
               onSpeedChange={changeSpeed}
+              onModifyProject={() => setModifyingProject({ busy: false })}
             />
           </div>
         </div>
@@ -1315,9 +1322,33 @@ function Editor({
       {context && <ContextMenu target={context} onClose={() => setContext(null)} />}
       {settingsOpen && <SettingsDialog onClose={() => setSettingsOpen(false)} />}
 
+      {modifyingProject && (
+        <ModifyProjectDialog
+          name={projectName}
+          frame={frame}
+          frameRate={frameRate}
+          busy={modifyingProject.busy}
+          onSave={({ name, width, height }) => {
+            setModifyingProject({ busy: true });
+            setFrame({ width, height });
+            editorSave({ width, height, name })
+              .then(() => {
+                setProjectName(name);
+                setModifyingProject(null);
+                pushToast("Project details saved", false);
+              })
+              .catch((cause: unknown) => {
+                setModifyingProject({ busy: false });
+                pushToast(String(cause), true);
+              });
+          }}
+          onCancel={() => setModifyingProject(null)}
+        />
+      )}
+
       {templateDialog && (
         <SaveTemplateDialog
-          defaultName={session.name}
+          defaultName={projectName}
           slotCount={project.media.filter((item) => item.placeholder).length}
           busy={templateDialog.busy}
           onSave={(name) => {
@@ -1376,7 +1407,7 @@ function Editor({
 
       {exporting && (
         <ExportDialog
-          projectName={session.name}
+          projectName={projectName}
           projectPath={session.path}
           width={frame.width}
           height={frame.height}

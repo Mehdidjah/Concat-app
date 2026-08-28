@@ -240,11 +240,15 @@ const GLYPHS = {
       <path d="m20 20-3.5-3.5" />
     </>
   ),
+  // settings: three sliders with staggered knobs. Deliberately not a cog:
+  // the old ring-and-rays cog was a sun in all but name, and it sat right
+  // next to the actual sun of the theme toggle.
   settings: (
     <>
-      <circle cx="12" cy="12" r="3.2" />
-      <path d="M12 2.5v2.2M12 19.3v2.2M21.5 12h-2.2M4.7 12H2.5" />
-      <path d="m18.7 5.3-1.6 1.6M6.9 17.1l-1.6 1.6M18.7 18.7l-1.6-1.6M6.9 6.9 5.3 5.3" />
+      <path d="M4 6.5h16M4 12h16M4 17.5h16" />
+      <circle cx="9.5" cy="6.5" r="2" fill="currentColor" stroke="none" />
+      <circle cx="15" cy="12" r="2" fill="currentColor" stroke="none" />
+      <circle cx="7.5" cy="17.5" r="2" fill="currentColor" stroke="none" />
     </>
   ),
   info: (

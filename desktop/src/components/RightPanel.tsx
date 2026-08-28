@@ -67,6 +67,7 @@ export function RightPanel({
   onSpeedChange,
   onAddFont,
   onRemoveFont,
+  onModifyProject,
 }: {
   tab: RightTab;
   onTab: (tab: RightTab) => void;
@@ -86,6 +87,8 @@ export function RightPanel({
   onSpeedChange: (speed: number) => void;
   onAddFont: () => void;
   onRemoveFont: (family: string) => void;
+  /** Opens the project-details editor (name, output frame). */
+  onModifyProject: () => void;
 }) {
   const isText = clip?.kind === "text";
   const tabs = clip
@@ -99,28 +102,33 @@ export function RightPanel({
   // A selection change can leave the strip showing a tab that is no longer
   // offered, so the active tab falls back to the first one that exists.
   const active = tabs.some((entry) => entry.id === tab) ? tab : tabs[0].id;
+  // A segmented control with one segment is a label wearing a costume; a
+  // lone tab renders as the panel's plain heading instead.
+  const single = tabs.length === 1;
 
   return (
-    <Panel>
-      <div className="sticky top-0 z-10 border-b border-hairline bg-panel px-2 pb-2 pt-2">
-        <div className="flex rounded-lg bg-sunken p-0.5">
-          {tabs.map((entry) => (
-            <button
-              key={entry.id}
-              type="button"
-              aria-pressed={active === entry.id}
-              onClick={() => onTab(entry.id)}
-              className={`flex-1 cursor-pointer rounded-[6px] px-2 py-1 text-[12px] transition-colors ${
-                active === entry.id
-                  ? "bg-panel text-primary shadow-[0_1px_2px_rgba(0,0,0,0.14)]"
-                  : "text-secondary hover:text-primary"
-              }`}
-            >
-              {entry.label}
-            </button>
-          ))}
+    <Panel title={single ? tabs[0].label : undefined}>
+      {!single && (
+        <div className="sticky top-0 z-10 border-b border-hairline bg-panel px-2 pb-2 pt-2">
+          <div className="flex rounded-lg bg-sunken p-0.5">
+            {tabs.map((entry) => (
+              <button
+                key={entry.id}
+                type="button"
+                aria-pressed={active === entry.id}
+                onClick={() => onTab(entry.id)}
+                className={`flex-1 cursor-pointer rounded-[6px] px-2 py-1 text-[12px] transition-colors ${
+                  active === entry.id
+                    ? "bg-panel text-primary shadow-[0_1px_2px_rgba(0,0,0,0.14)]"
+                    : "text-secondary hover:text-primary"
+                }`}
+              >
+                {entry.label}
+              </button>
+            ))}
+          </div>
         </div>
-      </div>
+      )}
 
       {active === "details" && (
         <Inspector
@@ -132,6 +140,7 @@ export function RightPanel({
           projectPath={projectPath}
           frame={frame}
           duration={duration}
+          onModify={onModifyProject}
         />
       )}
       {active === "text" && (

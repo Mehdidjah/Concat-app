@@ -219,11 +219,17 @@ export async function editorState(): Promise<EditorView> {
 }
 
 /** Writes the session's document to disk. The output size rides along
- * because the preview footer can edit it. */
-export async function editorSave(frame?: { width: number; height: number }): Promise<void> {
+ * because the preview footer can edit it; the name because the project
+ * details dialog can. */
+export async function editorSave(update?: {
+  width: number;
+  height: number;
+  name?: string;
+}): Promise<void> {
   return invoke<void>("editor_save", {
-    width: frame?.width ?? null,
-    height: frame?.height ?? null,
+    name: update?.name ?? null,
+    width: update?.width ?? null,
+    height: update?.height ?? null,
   });
 }
 
