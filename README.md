@@ -43,7 +43,7 @@ Currently in Alpha (pre-release), Download from [Releases](https://github.com/ju
 > [!IMPORTANT]
 > The best way to contribute is to grab a build from the [Release](https://github.com/jub0t/WolfCut/releases) page and test the application to see where it breaks or how it can be improved.
 
-After reading the rules above, to learn more about contributing to this project please refer to [this Discussion announcement](https://github.com/jub0t/WolfCut/discussions/3).
+To learn more about contributing to this project please refer to [this Discussion announcement](https://github.com/jub0t/WolfCut/discussions/3).
 
 ## Roadmap (or ideas)
 
