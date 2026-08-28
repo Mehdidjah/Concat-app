@@ -22,20 +22,48 @@
 //!   receives `transport` position events and interpolates between them;
 //!   there is no second clock to drift against.
 //!
-//! The mix callback owns its state and receives changes as messages, so it
-//! takes no locks on the audio thread. Decodes run on worker threads and the
-//! clip set is re-sent to the callback as each one lands.
+//! - The stream is *supervised*: pulled headphones, a changed default
+//!   device, or a device that was missing at launch all rebuild the stream
+//!   rather than leaving the session silent until restart. The supervisor
+//!   re-seeds the new stream from the shared clock and the last clip set,
+//!   so a rebuild sounds like a hiccup, not a reset.
+//!
+//! The mix callback owns its state and receives changes as messages; the
+//! only lock it touches is an uncontended try-lock on the message channel
+//! (contended solely during a rebuild, when the callback is being replaced
+//! anyway). Decodes run on a small worker pool, newest request first - a
+//! scrubbed trim queues many spans and the one under the playhead matters
+//! most - and the clip set is re-sent to the callback as each one lands.
+//!
+//! Both caches are bounded. In memory, mappings not referenced by the
+//! current clip set are dropped beyond a cap, oldest use first. On disk,
+//! `cache/audio` keeps a byte budget: least-recently-modified files beyond
+//! it are removed, never one the current clip set is using.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{mpsc, Arc, Condvar, Mutex};
 
 use serde::Deserialize;
 use tauri::Emitter;
 
 /// Every clip is decoded to this rate; the callback resamples to the device.
 const PCM_RATE: u32 = 48_000;
+
+/// Decoded spans kept mapped beyond the current clip set. Enough that
+/// undo/redo across a few edits never re-decodes; small enough that a long
+/// session cannot accumulate hundreds of mappings.
+const MEMORY_CACHE_CAP: usize = 64;
+
+/// Byte budget for `cache/audio` on disk. Stereo 16-bit 48k is ~11 MB a
+/// minute, so this keeps hours of decoded material before anything is
+/// evicted.
+const DISK_CACHE_BUDGET: u64 = 2 * 1024 * 1024 * 1024;
+
+/// Concurrent FFmpeg decode processes. Two keeps a dual-span edit prompt
+/// without letting a scrubbed trim fan out a dozen full-file decodes.
+const DECODE_WORKERS: usize = 2;
 
 /// One audible clip, as the frontend describes it.
 #[derive(Clone, Deserialize)]
@@ -132,6 +160,9 @@ fn wav_data_range(bytes: &[u8]) -> Option<(usize, usize)> {
 }
 
 /// A clip the mix callback can play: spec fields it needs, plus the audio.
+/// Clone is cheap - the samples are behind an `Arc` - and the supervisor
+/// uses it to seed a rebuilt stream with the set the old one was playing.
+#[derive(Clone)]
 struct ActiveClip {
     start: f64,
     duration: f64,
@@ -171,16 +202,46 @@ struct Shared {
     playing: AtomicBool,
 }
 
+/// One decode waiting for a worker.
+struct DecodeJob {
+    spec: ClipSpec,
+    project: PathBuf,
+    key: String,
+}
+
+/// The decode queue: newest job first, because a scrub over a trim handle
+/// enqueues a span per pause and the latest is the one under the playhead.
+struct DecodeQueue {
+    jobs: Mutex<VecDeque<DecodeJob>>,
+    available: Condvar,
+}
+
+/// A mapped span plus when it was last part of the clip set, for eviction.
+struct CacheEntry {
+    pcm: Arc<Pcm>,
+    last_used: u64,
+}
+
 pub struct Playback {
     tx: mpsc::Sender<Msg>,
     shared: Arc<Shared>,
     /// For surfacing failures; a mute app must never be a mystery.
     app: tauri::AppHandle,
-    /// Decoded clips by decode key, for the lifetime of the app.
-    cache: Mutex<HashMap<String, Arc<Pcm>>>,
+    /// Decoded clips by decode key. Bounded: see [`MEMORY_CACHE_CAP`].
+    cache: Mutex<HashMap<String, CacheEntry>>,
+    /// Monotonic use counter feeding `CacheEntry::last_used`.
+    tick: AtomicU64,
     decoding: Mutex<HashSet<String>>,
     /// What the timeline currently wants audible.
     specs: Mutex<Vec<ClipSpec>>,
+    /// The project whose cache the disk GC sweeps; set by `set_clips`.
+    project: Mutex<Option<PathBuf>>,
+    /// True while a disk sweep runs, so sweeps never pile up.
+    sweeping: AtomicBool,
+    queue: Arc<DecodeQueue>,
+    /// The set most recently sent to the callback, for re-seeding a rebuilt
+    /// stream. The supervisor reads it; `resync` writes it.
+    last_active: Arc<Mutex<Vec<ActiveClip>>>,
 }
 
 /// A playback failure the user would otherwise experience as unexplained
@@ -198,13 +259,15 @@ impl Playback {
             position_micros: AtomicU64::new(0),
             playing: AtomicBool::new(false),
         });
+        let last_active: Arc<Mutex<Vec<ActiveClip>>> = Arc::new(Mutex::new(Vec::new()));
 
         {
             let shared = Arc::clone(&shared);
             let app = app.clone();
+            let last_active = Arc::clone(&last_active);
             std::thread::Builder::new()
                 .name("audio-output".into())
-                .spawn(move || audio_thread(rx, shared, app))
+                .spawn(move || supervise_stream(rx, shared, app, last_active))
                 .expect("could not spawn the audio thread");
         }
 
@@ -226,14 +289,32 @@ impl Playback {
                 .expect("could not spawn the transport event thread");
         }
 
-        Arc::new(Playback {
+        let playback = Arc::new(Playback {
             tx,
             shared,
             app,
             cache: Mutex::new(HashMap::new()),
+            tick: AtomicU64::new(0),
             decoding: Mutex::new(HashSet::new()),
             specs: Mutex::new(Vec::new()),
-        })
+            project: Mutex::new(None),
+            sweeping: AtomicBool::new(false),
+            queue: Arc::new(DecodeQueue {
+                jobs: Mutex::new(VecDeque::new()),
+                available: Condvar::new(),
+            }),
+            last_active,
+        });
+
+        for index in 0..DECODE_WORKERS {
+            let this = Arc::clone(&playback);
+            std::thread::Builder::new()
+                .name(format!("audio-decode-{index}"))
+                .spawn(move || decode_worker(&this))
+                .expect("could not spawn a decode worker");
+        }
+
+        playback
     }
 
     pub fn play(&self, position: f64) {
@@ -262,11 +343,12 @@ impl Playback {
 
     /// Replaces the audible clip set.
     ///
-    /// Anything already decoded plays immediately; anything new decodes on a
-    /// worker and joins the mix when it lands. `project` is the project
-    /// folder, whose cache holds the PCM files.
+    /// Anything already decoded plays immediately; anything new joins the
+    /// decode queue and joins the mix when it lands. `project` is the
+    /// project folder, whose cache holds the PCM files.
     pub fn set_clips(self: &Arc<Self>, project: PathBuf, specs: Vec<ClipSpec>) {
         *self.specs.lock().unwrap() = specs.clone();
+        *self.project.lock().unwrap() = Some(project.clone());
 
         for spec in specs {
             let key = decode_key(&spec);
@@ -276,50 +358,192 @@ impl Playback {
             if !self.decoding.lock().unwrap().insert(key.clone()) {
                 continue;
             }
-
-            let this = Arc::clone(self);
-            let project = project.clone();
-            std::thread::Builder::new()
-                .name("audio-decode".into())
-                .spawn(move || {
-                    match decode(&spec, &project, &key) {
-                        Ok(pcm) => {
-                            this.cache.lock().unwrap().insert(key.clone(), Arc::new(pcm));
-                        }
-                        Err(error) => report(
-                            &this.app,
-                            format!("audio decode failed for {}: {error}", spec.path),
-                        ),
-                    }
-                    this.decoding.lock().unwrap().remove(&key);
-                    this.resync();
-                })
-                .expect("could not spawn a decode thread");
+            let mut jobs = self.queue.jobs.lock().unwrap();
+            jobs.push_back(DecodeJob { spec, project: project.clone(), key });
+            self.queue.available.notify_one();
         }
 
         self.resync();
+        self.evict_memory();
+        self.sweep_disk(project);
     }
 
-    /// Sends the mix callback everything currently wanted *and* decoded.
+    /// Sends the mix callback everything currently wanted *and* decoded, and
+    /// remembers the set so a rebuilt stream can be seeded with it.
     fn resync(&self) {
         let specs = self.specs.lock().unwrap();
-        let cache = self.cache.lock().unwrap();
-        let active = specs
+        let now = self.tick.fetch_add(1, Ordering::Relaxed) + 1;
+        let mut cache = self.cache.lock().unwrap();
+        let active: Vec<ActiveClip> = specs
             .iter()
             .filter_map(|spec| {
-                let pcm = cache.get(&decode_key(spec))?;
+                let entry = cache.get_mut(&decode_key(spec))?;
+                entry.last_used = now;
                 Some(ActiveClip {
                     start: spec.start,
                     duration: spec.duration,
                     volume: spec.volume,
                     fade_in: spec.fade_in,
                     fade_out: spec.fade_out,
-                    pcm: Arc::clone(pcm),
+                    pcm: Arc::clone(&entry.pcm),
                 })
             })
             .collect();
+        drop(cache);
+        *self.last_active.lock().unwrap() = active.clone();
         let _ = self.tx.send(Msg::SetClips(active));
     }
+
+    /// Drops mapped spans beyond [`MEMORY_CACHE_CAP`], oldest use first,
+    /// never one the current clip set references. The mapping is address
+    /// space and page cache, not copies - but a long session accumulates a
+    /// mapping per edit of every trimmed span, and those add up.
+    fn evict_memory(&self) {
+        let live: HashSet<String> =
+            self.specs.lock().unwrap().iter().map(decode_key).collect();
+        let mut cache = self.cache.lock().unwrap();
+        while cache.len() > MEMORY_CACHE_CAP {
+            let doomed = cache
+                .iter()
+                .filter(|(key, _)| !live.contains(*key))
+                .min_by_key(|(_, entry)| entry.last_used)
+                .map(|(key, _)| key.clone());
+            match doomed {
+                Some(key) => cache.remove(&key),
+                // Everything over the cap is live: a genuinely enormous clip
+                // set. Keeping it is correct; evicting live spans would just
+                // re-decode them on the next resync.
+                None => break,
+            };
+        }
+    }
+
+    /// Sweeps `cache/audio` down to [`DISK_CACHE_BUDGET`] on a worker
+    /// thread: least-recently-modified first, never a file the current clip
+    /// set is using. Old `.decoding` leftovers from crashed runs go too.
+    fn sweep_disk(self: &Arc<Self>, project: PathBuf) {
+        if self.sweeping.swap(true, Ordering::Relaxed) {
+            return;
+        }
+        let this = Arc::clone(self);
+        std::thread::Builder::new()
+            .name("audio-cache-sweep".into())
+            .spawn(move || {
+                let live: HashSet<String> =
+                    this.specs.lock().unwrap().iter().map(decode_key).collect();
+                let directory = project.join("cache").join("audio");
+                if let Some(doomed) = sweep_plan(&directory, &live, DISK_CACHE_BUDGET) {
+                    for path in doomed {
+                        let _ = std::fs::remove_file(path);
+                    }
+                }
+                this.sweeping.store(false, Ordering::Relaxed);
+            })
+            .expect("could not spawn the cache sweep thread");
+    }
+}
+
+/// One decode worker: takes the newest queued job, skips jobs whose span the
+/// timeline no longer wants, decodes, lands the result, resyncs.
+fn decode_worker(playback: &Arc<Playback>) {
+    loop {
+        let job = {
+            let mut jobs = playback.queue.jobs.lock().unwrap();
+            loop {
+                // Newest first: pop from the back where set_clips pushes.
+                match jobs.pop_back() {
+                    Some(job) => break job,
+                    None => jobs = playback.queue.available.wait(jobs).unwrap(),
+                }
+            }
+        };
+
+        // A span queued by an edit that has since been edited again is dead
+        // weight; skip it before paying for FFmpeg.
+        let wanted = playback
+            .specs
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|spec| decode_key(spec) == job.key);
+        if !wanted {
+            playback.decoding.lock().unwrap().remove(&job.key);
+            continue;
+        }
+
+        match decode(&job.spec, &job.project, &job.key) {
+            Ok(pcm) => {
+                let now = playback.tick.fetch_add(1, Ordering::Relaxed) + 1;
+                playback.cache.lock().unwrap().insert(
+                    job.key.clone(),
+                    CacheEntry { pcm: Arc::new(pcm), last_used: now },
+                );
+            }
+            Err(error) => report(
+                &playback.app,
+                format!("audio decode failed for {}: {error}", job.spec.path),
+            ),
+        }
+        playback.decoding.lock().unwrap().remove(&job.key);
+        playback.resync();
+    }
+}
+
+/// Which files a sweep of `directory` should delete to fit `budget` bytes:
+/// least-recently-modified first, never a `.wav` whose key is in `live`,
+/// plus any `.decoding` leftover older than a day. Returns `None` when the
+/// directory cannot be read (not created yet - nothing to sweep).
+fn sweep_plan(
+    directory: &Path,
+    live: &HashSet<String>,
+    budget: u64,
+) -> Option<Vec<PathBuf>> {
+    let entries = std::fs::read_dir(directory).ok()?;
+    let now = std::time::SystemTime::now();
+
+    let mut doomed: Vec<PathBuf> = Vec::new();
+    let mut candidates: Vec<(std::time::SystemTime, u64, PathBuf)> = Vec::new();
+    let mut total: u64 = 0;
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let Ok(meta) = entry.metadata() else { continue };
+
+        // A `.decoding` file is a crashed or torn run once it is old enough
+        // that no live decode can still be writing it.
+        if name.ends_with(".decoding") {
+            let stale = meta
+                .modified()
+                .ok()
+                .and_then(|modified| now.duration_since(modified).ok())
+                .is_some_and(|age| age.as_secs() > 24 * 3600);
+            if stale {
+                doomed.push(path);
+            }
+            continue;
+        }
+
+        let Some(key) = name.strip_suffix(".wav") else { continue };
+        total += meta.len();
+        if live.contains(key) {
+            continue;
+        }
+        let modified = meta.modified().unwrap_or(now);
+        candidates.push((modified, meta.len(), path));
+    }
+
+    if total > budget {
+        candidates.sort_by_key(|(modified, ..)| *modified);
+        for (_, size, path) in candidates {
+            if total <= budget {
+                break;
+            }
+            total = total.saturating_sub(size);
+            doomed.push(path);
+        }
+    }
+    Some(doomed)
 }
 
 /// Identity of one decoded span: everything that changes the samples.
@@ -408,44 +632,123 @@ fn decode(spec: &ClipSpec, project: &Path, key: &str) -> Result<Pcm, String> {
     Pcm::open(&destination)
 }
 
-/// Owns the output stream for the life of the app.
+/// Owns the output stream for the life of the app, rebuilding it whenever
+/// it dies or the default device changes.
 ///
-/// The stream's callback owns all mix state and drains the message channel
-/// itself, so no lock is ever taken on the audio thread.
-fn audio_thread(rx: mpsc::Receiver<Msg>, shared: Arc<Shared>, app: tauri::AppHandle) {
-    use cpal::traits::{DeviceTrait, HostTrait};
-
-    let host = cpal::default_host();
-    let Some(device) = host.default_output_device() else {
-        report(&app, "no audio output device; playback will be silent".to_owned());
-        return;
-    };
-    let Ok(config) = device.default_output_config() else {
-        report(&app, "no default audio output config; playback will be silent".to_owned());
-        return;
-    };
-
-    let sample_format = config.sample_format();
-    let config: cpal::StreamConfig = config.into();
-
-    let result = match sample_format {
-        cpal::SampleFormat::F32 => run_stream::<f32>(&device, &config, rx, shared, app.clone()),
-        cpal::SampleFormat::I16 => run_stream::<i16>(&device, &config, rx, shared, app.clone()),
-        cpal::SampleFormat::U16 => run_stream::<u16>(&device, &config, rx, shared, app.clone()),
-        other => Err(format!("unsupported sample format {other:?}")),
-    };
-    if let Err(error) = result {
-        report(&app, format!("audio output failed: {error}; playback will be silent"));
-    }
-}
-
-fn run_stream<T>(
-    device: &cpal::Device,
-    config: &cpal::StreamConfig,
+/// Setup failure is a retry with backoff, not a permanent return: a machine
+/// that boots WolfCut before its audio device is ready, or loses its only
+/// device mid-session, gets sound back when the device does. A rebuilt
+/// stream is seeded from the shared clock and the last clip set, so playback
+/// carries straight on.
+fn supervise_stream(
     rx: mpsc::Receiver<Msg>,
     shared: Arc<Shared>,
     app: tauri::AppHandle,
-) -> Result<(), String>
+    last_active: Arc<Mutex<Vec<ActiveClip>>>,
+) {
+    use cpal::traits::{DeviceTrait, HostTrait};
+
+    // The callback drains this through a try-lock: uncontended in steady
+    // state (the supervisor only takes it between streams), and a missed
+    // drain on a contended tick is caught on the next callback.
+    let rx = Arc::new(Mutex::new(rx));
+    let mut backoff = std::time::Duration::from_secs(1);
+    let mut reported_missing = false;
+
+    loop {
+        let host = cpal::default_host();
+        let built = host
+            .default_output_device()
+            .ok_or_else(|| "no audio output device".to_owned())
+            .and_then(|device| {
+                let name = device.name().unwrap_or_default();
+                build_stream(&device, &rx, &shared, &app, &last_active).map(|s| (s, name))
+            });
+
+        match built {
+            Ok((stream, device_name)) => {
+                backoff = std::time::Duration::from_secs(1);
+                reported_missing = false;
+
+                // Watch for the two reasons to rebuild: the stream reported
+                // an error, or the default device is no longer the one the
+                // stream was built on (headphones unplugged, output switched
+                // in system settings).
+                let failed = stream.failed;
+                let _stream = stream.stream;
+                loop {
+                    std::thread::sleep(std::time::Duration::from_millis(1000));
+                    if failed.load(Ordering::Relaxed) {
+                        report(&app, "audio stream failed; rebuilding".to_owned());
+                        break;
+                    }
+                    let current = cpal::default_host()
+                        .default_output_device()
+                        .and_then(|device| device.name().ok());
+                    if let Some(current) = current {
+                        if current != device_name {
+                            // Informational only - switching outputs is a
+                            // normal act, not an error toast.
+                            eprintln!("wolfcut: audio device changed to {current}; rebuilding");
+                            break;
+                        }
+                    }
+                }
+                // `_stream` drops here, releasing the device before rebuild.
+            }
+            Err(error) => {
+                // Once, not every retry: a machine with no sound card would
+                // otherwise toast every backoff tick forever.
+                if !reported_missing {
+                    report(&app, format!("audio output unavailable: {error}; will keep trying"));
+                    reported_missing = true;
+                }
+                std::thread::sleep(backoff);
+                backoff = (backoff * 2).min(std::time::Duration::from_secs(30));
+            }
+        }
+    }
+}
+
+/// A built, playing stream plus its error flag.
+struct BuiltStream {
+    stream: cpal::Stream,
+    failed: Arc<AtomicBool>,
+}
+
+/// Builds and starts one output stream on `device`, seeded with the current
+/// clip set and clock so a rebuild resumes where the last stream stopped.
+fn build_stream(
+    device: &cpal::Device,
+    rx: &Arc<Mutex<mpsc::Receiver<Msg>>>,
+    shared: &Arc<Shared>,
+    app: &tauri::AppHandle,
+    last_active: &Arc<Mutex<Vec<ActiveClip>>>,
+) -> Result<BuiltStream, String> {
+    use cpal::traits::DeviceTrait;
+
+    let config = device
+        .default_output_config()
+        .map_err(|error| format!("no default output config: {error}"))?;
+    let sample_format = config.sample_format();
+    let config: cpal::StreamConfig = config.into();
+
+    match sample_format {
+        cpal::SampleFormat::F32 => stream_for::<f32>(device, &config, rx, shared, app, last_active),
+        cpal::SampleFormat::I16 => stream_for::<i16>(device, &config, rx, shared, app, last_active),
+        cpal::SampleFormat::U16 => stream_for::<u16>(device, &config, rx, shared, app, last_active),
+        other => Err(format!("unsupported sample format {other:?}")),
+    }
+}
+
+fn stream_for<T>(
+    device: &cpal::Device,
+    config: &cpal::StreamConfig,
+    rx: &Arc<Mutex<mpsc::Receiver<Msg>>>,
+    shared: &Arc<Shared>,
+    app: &tauri::AppHandle,
+    last_active: &Arc<Mutex<Vec<ActiveClip>>>,
+) -> Result<BuiltStream, String>
 where
     T: cpal::SizedSample + cpal::FromSample<f32>,
 {
@@ -454,26 +757,37 @@ where
     let channels = config.channels as usize;
     let step = 1.0 / f64::from(config.sample_rate.0);
 
-    let mut clips: Vec<ActiveClip> = Vec::new();
-    let mut playing = false;
-    let mut position = 0.0f64;
+    // Seed from the world as it is, not from zero: a stream rebuilt mid-
+    // playback resumes the same clips at the shared clock's position.
+    let mut clips: Vec<ActiveClip> = last_active.lock().unwrap().clone();
+    let mut playing = shared.playing.load(Ordering::Relaxed);
+    let mut position = shared.position_micros.load(Ordering::Relaxed) as f64 / 1_000_000.0;
+
+    let failed = Arc::new(AtomicBool::new(false));
+    let rx = Arc::clone(rx);
+    let shared = Arc::clone(shared);
 
     let stream = device
         .build_output_stream(
             config,
             move |data: &mut [T], _| {
                 let mut sought = false;
-                while let Ok(message) = rx.try_recv() {
-                    match message {
-                        Msg::SetClips(next) => clips = next,
-                        Msg::Play(at) => {
-                            position = at;
-                            playing = true;
-                        }
-                        Msg::Pause => playing = false,
-                        Msg::Seek(at) => {
-                            position = at;
-                            sought = true;
+                // try_lock, not lock: the audio callback must never block.
+                // Contention only exists while the supervisor swaps streams,
+                // and then this callback is on its way out anyway.
+                if let Ok(receiver) = rx.try_lock() {
+                    while let Ok(message) = receiver.try_recv() {
+                        match message {
+                            Msg::SetClips(next) => clips = next,
+                            Msg::Play(at) => {
+                                position = at;
+                                playing = true;
+                            }
+                            Msg::Pause => playing = false,
+                            Msg::Seek(at) => {
+                                position = at;
+                                sought = true;
+                            }
                         }
                     }
                 }
@@ -538,7 +852,16 @@ where
                     .position_micros
                     .store((position * 1_000_000.0) as u64, Ordering::Relaxed);
             },
-            move |error| report(&app, format!("audio stream error: {error}")),
+            {
+                let app = app.clone();
+                let failed = Arc::clone(&failed);
+                move |error| {
+                    // The supervisor rebuilds on this flag; the report says
+                    // why the sound hiccuped.
+                    report(&app, format!("audio stream error: {error}"));
+                    failed.store(true, Ordering::Relaxed);
+                }
+            },
             None,
         )
         .map_err(|error| format!("could not build the output stream: {error}"))?;
@@ -547,15 +870,12 @@ where
         .play()
         .map_err(|error| format!("could not start the output stream: {error}"))?;
 
-    // The stream lives exactly as long as this thread.
-    loop {
-        std::thread::sleep(std::time::Duration::from_secs(3600));
-    }
+    Ok(BuiltStream { stream, failed })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::wav_data_range;
+    use super::{sweep_plan, wav_data_range};
 
     /// A minimal RIFF/WAVE: fmt chunk, then a data chunk with `samples`.
     fn wav(data_size: u32, samples: &[u8]) -> Vec<u8> {
@@ -601,5 +921,46 @@ mod tests {
         assert_eq!(wav_data_range(b""), None);
         assert_eq!(wav_data_range(b"RIFFxxxxJUNK"), None);
         assert_eq!(wav_data_range(&[0u8; 64]), None);
+    }
+
+    #[test]
+    fn the_sweep_removes_the_oldest_dead_files_first_and_never_live_ones() {
+        use std::collections::HashSet;
+
+        let directory = std::env::temp_dir().join(format!(
+            "wolfcut-sweep-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|elapsed| elapsed.as_nanos())
+                .unwrap_or(0),
+        ));
+        std::fs::create_dir_all(&directory).expect("scratch dir");
+
+        // Three 4-byte caches, written oldest-first so mtimes order them.
+        for name in ["old", "live", "new"] {
+            std::fs::write(directory.join(format!("{name}.wav")), [0u8; 4]).expect("writes");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+
+        let live: HashSet<String> = ["live".to_owned()].into();
+
+        // Budget for two files: only the oldest dead file goes; the live one
+        // survives despite being older than "new".
+        let doomed = sweep_plan(&directory, &live, 8).expect("plans");
+        let names: Vec<_> = doomed
+            .iter()
+            .filter_map(|path| path.file_name().map(|name| name.to_string_lossy().into_owned()))
+            .collect();
+        assert_eq!(names, vec!["old.wav"]);
+
+        // Inside budget: nothing goes.
+        assert_eq!(sweep_plan(&directory, &live, 1024).expect("plans"), Vec::<std::path::PathBuf>::new());
+
+        // A directory that does not exist yet is nothing to sweep, not a
+        // panic - the first decode has simply not happened.
+        assert!(sweep_plan(&directory.join("missing"), &live, 8).is_none());
+
+        let _ = std::fs::remove_dir_all(&directory);
     }
 }
