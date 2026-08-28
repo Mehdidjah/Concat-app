@@ -21,7 +21,7 @@ use std::collections::HashMap;
 
 use wolfcut_core::frame::Frame;
 
-use crate::compositor::{Compositor, Layer};
+use crate::compositor::{Compositor, CpuCompositor, Layer};
 
 /// Bytes per row must be a multiple of this for a texture-to-buffer copy.
 const ROW_ALIGN: usize = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT as usize;
@@ -114,6 +114,10 @@ pub struct WgpuCompositor {
     pool: HashMap<(u32, u32), Vec<PooledTexture>>,
     used: HashMap<(u32, u32), usize>,
     target: Option<Target>,
+    /// Set when a readback fails - a lost or reset device. The compositor
+    /// then answers every composite from the CPU reference instead: slower,
+    /// always correct, and never a panic in the middle of an export.
+    dead: bool,
 }
 
 impl WgpuCompositor {
@@ -238,6 +242,7 @@ impl WgpuCompositor {
             pool: HashMap::new(),
             used: HashMap::new(),
             target: None,
+            dead: false,
         })
     }
 
@@ -373,7 +378,12 @@ impl WgpuCompositor {
     }
 
     /// Copies the rendered target back into a [`Frame`], forcing it opaque.
-    fn read_back(&mut self) -> Frame {
+    ///
+    /// `None` means the mapping failed - a lost or reset device, the one GPU
+    /// failure the constructor's never-panic policy cannot rule out up
+    /// front. The caller falls back to the CPU compositor rather than
+    /// panicking mid-export.
+    fn read_back(&mut self) -> Option<Frame> {
         let target = self.target.as_ref().expect("composite rendered first");
         let (width, height, padded_row) = (target.width, target.height, target.padded_row);
 
@@ -383,7 +393,7 @@ impl WgpuCompositor {
 
         let mut frame = Frame::transparent(width, height);
         {
-            let data = slice.get_mapped_range().expect("buffer mapped after wait");
+            let data = slice.get_mapped_range().ok()?;
             let row_bytes = width as usize * 4;
             let pixels = frame.pixels_mut();
             for row in 0..height as usize {
@@ -397,12 +407,18 @@ impl WgpuCompositor {
             }
         }
         target.staging.unmap();
-        frame
+        Some(frame)
     }
 }
 
 impl Compositor for WgpuCompositor {
     fn composite(&mut self, width: u32, height: u32, layers: &[Layer<'_>]) -> Frame {
+        // A dead device never comes back for this instance; the CPU
+        // reference is the same pixels, slower - never a mid-export panic.
+        if self.dead {
+            return CpuCompositor.composite(width, height, layers);
+        }
+
         self.used.values_mut().for_each(|used| *used = 0);
 
         // Upload every visible layer and build its quad.
@@ -485,7 +501,13 @@ impl Compositor for WgpuCompositor {
         );
 
         self.queue.submit([encoder.finish()]);
-        self.read_back()
+        match self.read_back() {
+            Some(frame) => frame,
+            None => {
+                self.dead = true;
+                CpuCompositor.composite(width, height, layers)
+            }
+        }
     }
 }
 
