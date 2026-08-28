@@ -36,6 +36,12 @@ jobs:
       # public item without documentation fails here, not in review.
       - run: cargo clippy --workspace --all-targets -- -D warnings
         working-directory: engine
+      # The committed TypeScript IPC types must match the Rust source of
+      # truth: regenerate the engine-owned bindings and fail on any drift.
+      - name: IPC type freshness (engine)
+        run: |
+          scripts/generate-ipc-types.sh engine
+          git diff --exit-code desktop/src/lib/generated
 
   app:
     name: App (${{ matrix.platform }})
@@ -193,6 +199,15 @@ jobs:
         if: matrix.platform == 'macos'
         run: cargo clippy --all-targets -- -D warnings
         working-directory: desktop/src-tauri
+
+      # The host half of the IPC type freshness gate (EditorView and
+      # friends). Here rather than in engine-tests because compiling the
+      # host needs Tauri's system libraries, which this job already has.
+      - name: IPC type freshness (host)
+        if: matrix.platform == 'macos'
+        run: |
+          scripts/generate-ipc-types.sh host
+          git diff --exit-code desktop/src/lib/generated
 
       # Full release build - LTO and codegen-units=1 make this the slow step.
       - run: npm run app:build

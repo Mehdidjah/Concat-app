@@ -18,73 +18,35 @@
  * the echo never survives past its commit.
  */
 
-import type { AppliedEffect, ClipTransition } from "./effects";
-import type { ClipFilter } from "./filters";
-import type { TextStyle } from "./text";
+import type { Clip } from "./generated/Clip";
+import type { ClipPatch } from "./generated/ClipPatch";
+import type { Command as EditorCommand } from "./generated/Command";
+import type { CustomFont as EngineFont } from "./generated/CustomFont";
+import type { EditorView as EngineEditorView } from "./generated/EditorView";
+import type { MediaItem } from "./generated/MediaItem";
+import type { Project } from "./generated/Project";
+import type { Timeline as TimelineData } from "./generated/Timeline";
+import type { Track } from "./generated/Track";
 
-// ── the engine's types, mirrored ─────────────────────────────────────────────
+// ── the engine's types, generated ────────────────────────────────────────────
+// These used to be hand-mirrored interfaces the compiler could not check
+// against serde. They are now generated from the Rust source of truth by
+// ts-rs (see ./generated/README.md) and re-exported here under the names the
+// UI has always used, so a wire change on the Rust side is a type error on
+// this one. `EditorCommand` is the engine's `Command`; `TimelineData` its
+// `Timeline`; `EditorSettings` the host's `SettingsView`.
 
-export type MediaKind = "video" | "audio" | "image";
-export type ClipKind = MediaKind | "text";
-
-export interface MediaItem {
-  id: string;
-  path: string;
-  name: string;
-  duration: number | null;
-  kind: MediaKind;
-  width: number | null;
-  height: number | null;
-  frameRate: number | null;
-  frameRateFraction: string | null;
-  videoCodec: string | null;
-  audioCodec: string | null;
-  hasAudio: boolean;
-  /** True when this item is a template slot awaiting the user's own media.
-   * Absent from documents that predate templates, which means false. */
-  placeholder?: boolean;
-}
-
-export interface Track {
-  id: string;
-  name: string;
-  visible: boolean;
-  muted: boolean;
-}
-
-export interface Clip {
-  id: string;
-  trackId: string;
-  mediaId: string;
-  name: string;
-  kind: ClipKind;
-  start: number;
-  duration: number;
-  sourceStart: number;
-  volume: number;
-  fadeIn: number;
-  fadeOut: number;
-  scale: number;
-  offsetX: number;
-  offsetY: number;
-  rotation: number;
-  opacity: number;
-  speed: number;
-  preservePitch: boolean;
-  filters: ClipFilter[];
-  videoEffects: AppliedEffect[];
-  muted?: boolean;
-  detachedFrom?: string;
-  transitionIn?: ClipTransition;
-  text?: TextStyle;
-}
-
-export interface TimelineData {
-  id: string;
-  name: string;
-  tracks: Track[];
-  clips: Clip[];
-}
+export type { MediaKind } from "./generated/MediaKind";
+export type { ClipKind } from "./generated/ClipKind";
+export type { MediaItem } from "./generated/MediaItem";
+export type { Track } from "./generated/Track";
+export type { Clip } from "./generated/Clip";
+export type { Timeline as TimelineData } from "./generated/Timeline";
+export type { SettingsView as EditorSettings } from "./generated/SettingsView";
+export type { ClipPatch } from "./generated/ClipPatch";
+export type { ClipMove } from "./generated/ClipMove";
+export type { NewMedia } from "./generated/NewMedia";
+export type { Command as EditorCommand } from "./generated/Command";
 
 /** A timeline's identity, for the tab strip. */
 export type TimelineMeta = Pick<TimelineData, "id" | "name">;
@@ -93,121 +55,19 @@ export type TimelineMeta = Pick<TimelineData, "id" | "name">;
 export const MIN_SCALE = 0.05;
 export const MAX_SCALE = 8;
 
-export interface CustomFont {
-  family: string;
-  path: string;
+/** The engine's font entry plus the one field that is legitimately the
+ * UI's - whether loading the face failed on this machine. */
+export type CustomFont = EngineFont & {
   /** UI-only: a load attempt failed. Never sent to or from the engine. */
   missing?: boolean;
-}
+};
 
-export interface EditorProject {
-  media: MediaItem[];
-  fonts: CustomFont[];
-  timelines: TimelineData[];
-  activeTimelineId: string;
-}
-
-export interface EditorSettings {
-  name: string;
-  width: number;
-  height: number;
-  rateNum: number;
-  rateDen: number;
-}
+/** The engine's project, with fonts widened to carry the UI-only
+ * `missing` flag. Everything else is exactly what serde wrote. */
+export type EditorProject = Omit<Project, "fonts"> & { fonts: CustomFont[] };
 
 /** What every editor call returns: the authoritative state. */
-export interface EditorView {
-  project: EditorProject;
-  canUndo: boolean;
-  canRedo: boolean;
-  settings: EditorSettings;
-  createdId?: string;
-}
-
-// ── commands: the whole edit vocabulary ──────────────────────────────────────
-
-/** A partial clip update. `null` clears `transitionIn`/`text`; absent leaves
- * a field untouched - the wire distinction the engine's double-options keep. */
-export interface ClipPatch {
-  name?: string;
-  volume?: number;
-  fadeIn?: number;
-  fadeOut?: number;
-  opacity?: number;
-  preservePitch?: boolean;
-  filters?: ClipFilter[];
-  videoEffects?: AppliedEffect[];
-  transitionIn?: ClipTransition | null;
-  text?: TextStyle | null;
-}
-
-export interface ClipMove {
-  clipId: string;
-  start: number;
-  trackId: string;
-}
-
-export interface NewMedia {
-  path: string;
-  name: string;
-  duration: number | null;
-  kind: MediaKind;
-  width: number | null;
-  height: number | null;
-  frameRate: number | null;
-  frameRateFraction: string | null;
-  videoCodec: string | null;
-  audioCodec: string | null;
-  hasAudio: boolean;
-}
-
-export type EditorCommand =
-  | { op: "addMedia"; item: NewMedia }
-  | { op: "removeMedia"; mediaId: string }
-  | { op: "setMediaPlaceholder"; mediaId: string; placeholder: boolean }
-  | { op: "fillSlot"; mediaId: string; item: NewMedia }
-  | { op: "batch"; commands: EditorCommand[] }
-  | { op: "addClip"; mediaId: string; trackId: string; start: number }
-  | { op: "addClipAtFirstFree"; mediaId: string; start: number }
-  | {
-      op: "addTextClip";
-      trackId: string | null;
-      start: number;
-      style: TextStyle | null;
-      /** Seconds on the timeline; the editorial default when absent. Lets a
-       * caption run land as one batch - a batch cannot trim ids it cannot
-       * know yet. */
-      duration?: number;
-      /** Vertical placement as a frame-height fraction; lower thirds. */
-      offsetY?: number;
-    }
-  | { op: "moveClips"; moves: ClipMove[] }
-  | { op: "trimClip"; clipId: string; edge: "start" | "end"; delta: number }
-  | { op: "splitClips"; clipIds: string[]; time: number }
-  | { op: "mergeClips"; clipIds: string[] }
-  | { op: "removeClips"; clipIds: string[] }
-  | { op: "updateClip"; clipId: string; patch: ClipPatch }
-  | { op: "setClipSpeed"; clipId: string; speed: number }
-  | {
-      op: "setClipTransform";
-      clipId: string;
-      scale?: number;
-      offsetX?: number;
-      offsetY?: number;
-      rotation?: number;
-    }
-  | { op: "detachAudio"; clipId: string }
-  | { op: "reattachAudio"; clipId: string }
-  | { op: "addTrack" }
-  | { op: "removeTrack"; trackId: string }
-  | { op: "renameTrack"; trackId: string; name: string }
-  | { op: "setTrackFlag"; trackId: string; flag: "visible" | "muted"; value: boolean }
-  | { op: "addTimeline" }
-  | { op: "removeTimeline"; timelineId: string }
-  | { op: "renameTimeline"; timelineId: string; name: string }
-  | { op: "selectTimeline"; timelineId: string }
-  | { op: "addFont"; family: string; path: string }
-  | { op: "removeFont"; family: string };
+export type EditorView = Omit<EngineEditorView, "project"> & { project: EditorProject };
 
 // ── selectors ────────────────────────────────────────────────────────────────
 

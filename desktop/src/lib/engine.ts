@@ -5,13 +5,18 @@
  * `@tauri-apps/api/core` for commands, so when a command's shape changes there
  * is exactly one place to fix and the compiler finds every call site.
  *
- * The types here mirror the serde structs in `src-tauri/src/lib.rs`. Keep them
- * in step - the IPC boundary is JSON, so TypeScript cannot check it for you.
+ * The engine-owned wire types (`EditorView`, `EditorCommand`, `ExportClip`,
+ * ...) are generated from the Rust serde structs by ts-rs and re-exported
+ * from `./generated/` - see the README there - so the compiler checks the
+ * IPC boundary against the source of truth. The smaller host-only shapes
+ * (probe results, template info, transcriber status) are still hand-mirrored
+ * here; keep those in step with `src-tauri/src/*.rs`.
  */
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 import type { EditorCommand, EditorView, NewMedia } from "./editor";
+import type { ExportClip } from "./generated/export/ExportClip";
 
 export interface VideoStreamInfo {
   index: number;
@@ -325,48 +330,12 @@ export async function templatePoster(path: string): Promise<ArrayBuffer> {
   return invoke<ArrayBuffer>("template_poster", { path });
 }
 
-/** One clip, flattened for the exporter. */
-export interface ExportClip {
-  path: string;
-  kind: "video" | "audio" | "image";
-  start: number;
-  duration: number;
-  sourceStart: number;
-  /** Index into the track stack, zero being bottom-most. */
-  track: number;
-  hidden: boolean;
-  muted: boolean;
-  /** Linear gain, 1 being unity. */
-  volume: number;
-  fadeIn: number;
-  fadeOut: number;
-  /** FFmpeg filter chain, or empty for none. */
-  filterChain: string;
-  /** Playback rate, 1 being normal. */
-  speed: number;
-  preservePitch: boolean;
-  /** Multiplier over the fitted size. 1 fills the frame, preserving aspect. */
-  scale: number;
-  /** Offset of the picture's centre from frame centre, frame-width fraction. */
-  offsetX: number;
-  /** Offset as a frame-height fraction. */
-  offsetY: number;
-  /** Clockwise rotation in degrees. */
-  rotation: number;
-  /** Blend strength over the layers beneath, 1 being solid. */
-  opacity: number;
-  /** FFmpeg video filter chain from the Effects tab, or empty for none. */
-  videoFilterChain: string;
-  /** The transition on the cut into this clip, or null. The host resolves the
-   * pair by adjacency and does all the overlap arithmetic. */
-  transition: { kind: string; duration: number } | null;
-  /** The source's pixel size, when known - what makes an aspect-correct fit possible. */
-  mediaWidth: number | null;
-  mediaHeight: number | null;
-  /** Whether the file carries an audio stream - the document knows from
-   * import, and sending it saves the exporter a probe per file. */
-  hasAudio: boolean;
-}
+/**
+ * One clip, flattened for the exporter - generated from the engine's own
+ * `wolfcut_export::ExportClip` (see ./generated/README.md), so the UI's
+ * rasterised title overlays are typed by the struct that deserialises them.
+ */
+export type { ExportClip } from "./generated/export/ExportClip";
 
 export interface ExportRequest {
   output: string;

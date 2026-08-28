@@ -74,3 +74,8 @@ desktop/src-tauri/ffmpeg/*
 # Guard against staging-script cwd mistakes: a `desktop/...`-relative copy run
 # from inside desktop/ once committed a whisper-cli binary to git history.
 desktop/desktop/
+
+# ts-rs's default export directory. The real output goes to
+# desktop/src/lib/generated/ via scripts/generate-ipc-types.sh; this appears
+# only when the `types` feature's tests run without TS_RS_EXPORT_DIR set.
+desktop/src-tauri/bindings/
