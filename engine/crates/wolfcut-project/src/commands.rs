@@ -6,6 +6,8 @@
 //! because during the migration both sides must agree about every edit, and
 //! after it this file is simply the only copy.
 
+use std::collections::HashSet;
+
 use serde::{Deserialize, Serialize};
 
 use crate::model::{
@@ -391,7 +393,7 @@ pub enum Command {
 }
 
 /// What a command produced, beyond the new state: the ids it minted, so the
-/// UI can select what it just created.
+/// UI can select what it just created, and whether anything changed at all.
 #[derive(Clone, Default, PartialEq, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Outcome {
@@ -400,6 +402,48 @@ pub struct Outcome {
     /// when nothing was created, including tolerated no-ops.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub created_id: Option<String>,
+    /// Whether the command actually changed the project. A tolerated no-op -
+    /// a missing id, a field set to the value it already had - succeeds but
+    /// reports false, which is how the editor knows not to record an undo
+    /// snapshot for it. For a batch: whether any member changed anything.
+    #[serde(default)]
+    pub applied: bool,
+}
+
+/// Why a command was refused. Every variant renders through `Display` as the
+/// exact user-facing sentence the UI shows - byte for byte the strings
+/// `desktop/src/lib/editor.ts` treats as the contract; the enum only gives
+/// those sentences names a host can match on.
+#[derive(Clone, PartialEq, Eq, Debug, thiserror::Error)]
+pub enum CommandError {
+    /// [`Command::FillSlot`] named a media id no longer in the bin.
+    #[error("That template slot no longer exists.")]
+    SlotGone,
+    /// [`Command::FillSlot`] targeted ordinary media rather than a slot.
+    #[error("That media is not a template slot.")]
+    NotASlot,
+    /// A clip-placing command named media no longer in the bin.
+    #[error("That media is no longer in the bin.")]
+    MediaGone,
+    /// A clip-placing command named a track no longer on the timeline.
+    #[error("That track no longer exists.")]
+    TrackGone,
+    /// A first-free-track placement found a timeline with no tracks at all.
+    #[error("There are no tracks.")]
+    NoTracks,
+    /// [`Command::MergeClips`] was refused, for whichever [`why_not_merge`]
+    /// reason applied.
+    #[error("{reason}")]
+    CannotMerge {
+        /// The [`why_not_merge`] sentence, verbatim.
+        reason: String,
+    },
+    /// [`Command::RemoveTrack`] would have deleted the last track.
+    #[error("A timeline needs at least one track.")]
+    LastTrack,
+    /// [`Command::RemoveTimeline`] would have deleted the last timeline.
+    #[error("A project needs at least one timeline.")]
+    LastTimeline,
 }
 
 /// Mints ids. Owned by the editor so restored projects advance it past every
@@ -563,10 +607,29 @@ pub fn why_not_merge(timeline: &Timeline, clip_ids: &[String]) -> Option<String>
     None
 }
 
-/// Applies one command. Errors are user-meaningful sentences; a command that
-/// legitimately does nothing (a no-op rename, an out-of-range split) returns
-/// Ok with no created id, matching the tolerant TS operations it replaces.
-pub fn apply(project: &mut Project, mint: &mut IdMint, command: Command) -> Result<Outcome, String> {
+/// Assigns `value` into `slot`, reporting whether that changed anything.
+/// This is how command arms notice a field being set to the value it already
+/// holds - which must count as "nothing happened" ([`Outcome::applied`]
+/// false), or the undo history would record phantom edits.
+fn assign<T: PartialEq>(slot: &mut T, value: T) -> bool {
+    if *slot == value {
+        false
+    } else {
+        *slot = value;
+        true
+    }
+}
+
+/// Applies one command. Errors are [`CommandError`]s, each rendering as a
+/// user-meaningful sentence; a command that legitimately does nothing (a
+/// no-op rename, an out-of-range split) returns Ok with no created id and
+/// [`Outcome::applied`] false, matching the tolerant TS operations it
+/// replaces.
+pub fn apply(
+    project: &mut Project,
+    mint: &mut IdMint,
+    command: Command,
+) -> Result<Outcome, CommandError> {
     match command {
         Command::AddMedia { item } => {
             if project.media.iter().any(|existing| existing.path == item.path) {
@@ -588,14 +651,16 @@ pub fn apply(project: &mut Project, mint: &mut IdMint, command: Command) -> Resu
                 has_audio: item.has_audio,
                 placeholder: false,
             });
-            Ok(Outcome { created_id: Some(id) })
+            Ok(Outcome { created_id: Some(id), applied: true })
         }
 
         Command::SetMediaPlaceholder { media_id, placeholder } => {
-            if let Some(item) = project.media.iter_mut().find(|item| item.id == media_id) {
-                item.placeholder = placeholder;
-            }
-            Ok(Outcome::default())
+            let applied = project
+                .media
+                .iter_mut()
+                .find(|item| item.id == media_id)
+                .is_some_and(|item| assign(&mut item.placeholder, placeholder));
+            Ok(Outcome { created_id: None, applied })
         }
 
         Command::FillSlot { media_id, item } => {
@@ -603,9 +668,9 @@ pub fn apply(project: &mut Project, mint: &mut IdMint, command: Command) -> Resu
                 .media
                 .iter_mut()
                 .find(|existing| existing.id == media_id)
-                .ok_or("That template slot no longer exists.")?;
+                .ok_or(CommandError::SlotGone)?;
             if !media.placeholder {
-                return Err("That media is not a template slot.".to_owned());
+                return Err(CommandError::NotASlot);
             }
 
             // The slot keeps its id, so every clip that references it keeps
@@ -643,7 +708,9 @@ pub fn apply(project: &mut Project, mint: &mut IdMint, command: Command) -> Resu
                     }
                 }
             }
-            Ok(Outcome::default())
+            // Filling always changes the project: the target was a
+            // placeholder and is one no longer.
+            Ok(Outcome { created_id: None, applied: true })
         }
 
         Command::Batch { commands } => {
@@ -652,44 +719,50 @@ pub fn apply(project: &mut Project, mint: &mut IdMint, command: Command) -> Resu
             // batch behind (and the editor records it as one undo step).
             let mut staged = project.clone();
             let mut created = None;
+            let mut applied = false;
             for command in commands {
                 let outcome = apply(&mut staged, mint, command)?;
                 if outcome.created_id.is_some() {
                     created = outcome.created_id;
                 }
+                applied |= outcome.applied;
             }
             *project = staged;
-            Ok(Outcome { created_id: created })
+            Ok(Outcome { created_id: created, applied })
         }
 
         Command::RemoveMedia { media_id } => {
             // All timelines, not just the active one: a shelved clip whose
             // media is gone would linger as a dead reference.
+            let media_count = project.media.len();
             project.media.retain(|item| item.id != media_id);
+            let mut applied = project.media.len() != media_count;
             for timeline in &mut project.timelines {
+                let clip_count = timeline.clips.len();
                 timeline.clips.retain(|clip| clip.media_id != media_id);
+                applied |= timeline.clips.len() != clip_count;
             }
-            Ok(Outcome::default())
+            Ok(Outcome { created_id: None, applied })
         }
 
         Command::AddClip { media_id, track_id, start } => {
             let media = project
                 .media_by_id(&media_id)
-                .ok_or("That media is no longer in the bin.")?
+                .ok_or(CommandError::MediaGone)?
                 .clone();
             let timeline = project.active_mut();
             if timeline.track(&track_id).is_none() {
-                return Err("That track no longer exists.".to_owned());
+                return Err(CommandError::TrackGone);
             }
             let id = mint.next("c");
             timeline.clips.push(default_clip(id.clone(), track_id, &media, start));
-            Ok(Outcome { created_id: Some(id) })
+            Ok(Outcome { created_id: Some(id), applied: true })
         }
 
         Command::AddClipAtFirstFree { media_id, start } => {
             let media = project
                 .media_by_id(&media_id)
-                .ok_or("That media is no longer in the bin.")?
+                .ok_or(CommandError::MediaGone)?
                 .clone();
             let duration = match media.kind {
                 MediaKind::Image => DEFAULT_IMAGE_DURATION,
@@ -697,10 +770,10 @@ pub fn apply(project: &mut Project, mint: &mut IdMint, command: Command) -> Resu
             };
             let timeline = project.active_mut();
             let track_id =
-                first_free_track(timeline, start, duration).ok_or("There are no tracks.")?;
+                first_free_track(timeline, start, duration).ok_or(CommandError::NoTracks)?;
             let id = mint.next("c");
             timeline.clips.push(default_clip(id.clone(), track_id, &media, start));
-            Ok(Outcome { created_id: Some(id) })
+            Ok(Outcome { created_id: Some(id), applied: true })
         }
 
         Command::AddTextClip { track_id, start, style, duration, offset_y } => {
@@ -709,9 +782,9 @@ pub fn apply(project: &mut Project, mint: &mut IdMint, command: Command) -> Resu
             let timeline = project.active_mut();
             let track_id = match track_id {
                 Some(id) if timeline.track(&id).is_some() => id,
-                Some(_) => return Err("That track no longer exists.".to_owned()),
+                Some(_) => return Err(CommandError::TrackGone),
                 None => first_free_track(timeline, start, duration)
-                    .ok_or("There are no tracks.")?,
+                    .ok_or(CommandError::NoTracks)?,
             };
             let id = mint.next("c");
             timeline.clips.push(Clip {
@@ -740,22 +813,23 @@ pub fn apply(project: &mut Project, mint: &mut IdMint, command: Command) -> Resu
                 transition_in: None,
                 text: Some(style),
             });
-            Ok(Outcome { created_id: Some(id) })
+            Ok(Outcome { created_id: Some(id), applied: true })
         }
 
         Command::MoveClips { moves } => {
             let timeline = project.active_mut();
-            let track_ids: Vec<String> =
+            let track_ids: HashSet<String> =
                 timeline.tracks.iter().map(|track| track.id.clone()).collect();
+            let mut applied = false;
             for wanted in moves {
                 if let Some(clip) = timeline.clip_mut(&wanted.clip_id) {
-                    clip.start = wanted.start.max(0.0);
+                    applied |= assign(&mut clip.start, wanted.start.max(0.0));
                     if track_ids.contains(&wanted.track_id) {
-                        clip.track_id = wanted.track_id;
+                        applied |= assign(&mut clip.track_id, wanted.track_id);
                     }
                 }
             }
-            Ok(Outcome::default())
+            Ok(Outcome { created_id: None, applied })
         }
 
         Command::TrimClip { clip_id, edge, delta } => {
@@ -763,22 +837,26 @@ pub fn apply(project: &mut Project, mint: &mut IdMint, command: Command) -> Resu
             let Some(clip) = timeline.clip_mut(&clip_id) else {
                 return Ok(Outcome::default());
             };
-            match edge {
+            let applied = match edge {
                 TrimEdge::End => {
-                    clip.duration = (clip.duration + delta).max(MIN_CLIP_DURATION);
+                    let duration = (clip.duration + delta).max(MIN_CLIP_DURATION);
+                    assign(&mut clip.duration, duration)
                 }
                 TrimEdge::Start => {
                     // Dragging the head moves the in-point too, so the pixels
                     // under the remaining part of the clip do not slide.
                     let shift = delta.min(clip.duration - MIN_CLIP_DURATION);
                     let start = (clip.start + shift).max(0.0);
-                    let applied = start - clip.start;
-                    clip.start = start;
-                    clip.duration -= applied;
-                    clip.source_start = (clip.source_start + applied * clip.speed).max(0.0);
+                    let moved = start - clip.start;
+                    let duration = clip.duration - moved;
+                    let source_start = (clip.source_start + moved * clip.speed).max(0.0);
+                    // Bitwise so no assignment is short-circuited away.
+                    assign(&mut clip.start, start)
+                        | assign(&mut clip.duration, duration)
+                        | assign(&mut clip.source_start, source_start)
                 }
-            }
-            Ok(Outcome::default())
+            };
+            Ok(Outcome { created_id: None, applied })
         }
 
         Command::SplitClips { clip_ids, time } => {
@@ -806,13 +884,16 @@ pub fn apply(project: &mut Project, mint: &mut IdMint, command: Command) -> Resu
                 timeline.clips[index].duration = offset;
                 timeline.clips.insert(index + 1, tail);
             }
-            Ok(Outcome { created_id: created })
+            // A split always mints the tail, so "minted anything" and
+            // "changed anything" are the same fact here.
+            let applied = created.is_some();
+            Ok(Outcome { created_id: created, applied })
         }
 
         Command::MergeClips { clip_ids } => {
             let timeline = project.active_mut();
             if let Some(reason) = why_not_merge(timeline, &clip_ids) {
-                return Err(reason);
+                return Err(CommandError::CannotMerge { reason });
             }
             let mut ordered: Vec<Clip> =
                 clip_ids.iter().filter_map(|id| timeline.clip(id).cloned()).collect();
@@ -821,19 +902,25 @@ pub fn apply(project: &mut Project, mint: &mut IdMint, command: Command) -> Resu
             let last = ordered.last().expect("validated above");
             let merged_duration = last.start + last.duration - first.start;
 
-            let doomed: Vec<String> =
+            // A set, not a Vec: the retain below tests every clip on the
+            // timeline against it.
+            let doomed: HashSet<String> =
                 ordered.iter().skip(1).map(|clip| clip.id.clone()).collect();
             timeline.clips.retain(|clip| !doomed.contains(&clip.id));
             let survivor =
                 timeline.clip_mut(&first.id).expect("the first piece survives the retain");
             survivor.duration = merged_duration;
-            Ok(Outcome { created_id: Some(first.id) })
+            // A validated merge always absorbs at least one piece.
+            Ok(Outcome { created_id: Some(first.id), applied: true })
         }
 
         Command::RemoveClips { clip_ids } => {
             let timeline = project.active_mut();
-            timeline.clips.retain(|clip| !clip_ids.contains(&clip.id));
-            Ok(Outcome::default())
+            let doomed: HashSet<&str> = clip_ids.iter().map(String::as_str).collect();
+            let clip_count = timeline.clips.len();
+            timeline.clips.retain(|clip| !doomed.contains(clip.id.as_str()));
+            let applied = timeline.clips.len() != clip_count;
+            Ok(Outcome { created_id: None, applied })
         }
 
         Command::UpdateClip { clip_id, patch } => {
@@ -841,41 +928,42 @@ pub fn apply(project: &mut Project, mint: &mut IdMint, command: Command) -> Resu
             let Some(clip) = timeline.clip_mut(&clip_id) else {
                 return Ok(Outcome::default());
             };
+            let mut applied = false;
             if let Some(name) = patch.name {
-                clip.name = name;
+                applied |= assign(&mut clip.name, name);
             }
             if let Some(volume) = patch.volume {
-                clip.volume = volume.max(0.0);
+                applied |= assign(&mut clip.volume, volume.max(0.0));
             }
             if let Some(fade_in) = patch.fade_in {
-                clip.fade_in = fade_in.max(0.0);
+                applied |= assign(&mut clip.fade_in, fade_in.max(0.0));
             }
             if let Some(fade_out) = patch.fade_out {
-                clip.fade_out = fade_out.max(0.0);
+                applied |= assign(&mut clip.fade_out, fade_out.max(0.0));
             }
             if let Some(opacity) = patch.opacity {
-                clip.opacity = opacity.clamp(0.0, 1.0);
+                applied |= assign(&mut clip.opacity, opacity.clamp(0.0, 1.0));
             }
             if let Some(preserve) = patch.preserve_pitch {
-                clip.preserve_pitch = preserve;
+                applied |= assign(&mut clip.preserve_pitch, preserve);
             }
             if let Some(filters) = patch.filters {
-                clip.filters = filters;
+                applied |= assign(&mut clip.filters, filters);
             }
             if let Some(effects) = patch.video_effects {
-                clip.video_effects = effects;
+                applied |= assign(&mut clip.video_effects, effects);
             }
             if let Some(transition) = patch.transition_in {
-                clip.transition_in = transition;
+                applied |= assign(&mut clip.transition_in, transition);
             }
             if let Some(text) = patch.text {
                 // The name follows the words, like addTextClip snapshots it.
                 if let Some(style) = &text {
-                    clip.name = first_line(&style.content);
+                    applied |= assign(&mut clip.name, first_line(&style.content));
                 }
-                clip.text = text;
+                applied |= assign(&mut clip.text, text);
             }
-            Ok(Outcome::default())
+            Ok(Outcome { created_id: None, applied })
         }
 
         Command::SetClipSpeed { clip_id, speed } => {
@@ -887,9 +975,10 @@ pub fn apply(project: &mut Project, mint: &mut IdMint, command: Command) -> Resu
             // makes this a speed change rather than a trim.
             let next = speed.clamp(MIN_SPEED, MAX_SPEED);
             let source_covered = clip.duration * clip.speed;
-            clip.speed = next;
-            clip.duration = (source_covered / next).max(MIN_CLIP_DURATION);
-            Ok(Outcome::default())
+            // Bitwise so no assignment is short-circuited away.
+            let applied = assign(&mut clip.speed, next)
+                | assign(&mut clip.duration, (source_covered / next).max(MIN_CLIP_DURATION));
+            Ok(Outcome { created_id: None, applied })
         }
 
         Command::SetClipTransform { clip_id, scale, offset_x, offset_y, rotation } => {
@@ -897,21 +986,23 @@ pub fn apply(project: &mut Project, mint: &mut IdMint, command: Command) -> Resu
             let Some(clip) = timeline.clip_mut(&clip_id) else {
                 return Ok(Outcome::default());
             };
+            let mut applied = false;
             if let Some(scale) = scale {
-                clip.scale = scale.clamp(MIN_SCALE, MAX_SCALE);
+                applied |= assign(&mut clip.scale, scale.clamp(MIN_SCALE, MAX_SCALE));
             }
             if let Some(offset) = offset_x {
-                clip.offset_x = offset.clamp(-MAX_OFFSET, MAX_OFFSET);
+                applied |= assign(&mut clip.offset_x, offset.clamp(-MAX_OFFSET, MAX_OFFSET));
             }
             if let Some(offset) = offset_y {
-                clip.offset_y = offset.clamp(-MAX_OFFSET, MAX_OFFSET);
+                applied |= assign(&mut clip.offset_y, offset.clamp(-MAX_OFFSET, MAX_OFFSET));
             }
             if let Some(rotation) = rotation {
                 // Kept in (-180, 180] so a full drag never accumulates turns.
                 let wrapped = ((rotation % 360.0) + 540.0) % 360.0 - 180.0;
-                clip.rotation = if wrapped == -180.0 { 180.0 } else { wrapped };
+                let next = if wrapped == -180.0 { 180.0 } else { wrapped };
+                applied |= assign(&mut clip.rotation, next);
             }
-            Ok(Outcome::default())
+            Ok(Outcome { created_id: None, applied })
         }
 
         Command::DetachAudio { clip_id } => {
@@ -979,7 +1070,7 @@ pub fn apply(project: &mut Project, mint: &mut IdMint, command: Command) -> Resu
             let video = timeline.clip_mut(&clip_id).expect("still present");
             video.muted = Some(true);
             video.filters = Vec::new();
-            Ok(Outcome { created_id: Some(sound_id) })
+            Ok(Outcome { created_id: Some(sound_id), applied: true })
         }
 
         Command::ReattachAudio { clip_id } => {
@@ -1003,12 +1094,15 @@ pub fn apply(project: &mut Project, mint: &mut IdMint, command: Command) -> Resu
             if sounds.is_empty() {
                 return Ok(Outcome::default());
             }
-            let doomed: Vec<String> = sounds.iter().map(|sound| sound.id.clone()).collect();
+            // A set, not a Vec: the retain below tests every clip on the
+            // timeline against it.
+            let doomed: HashSet<String> = sounds.iter().map(|sound| sound.id.clone()).collect();
             timeline.clips.retain(|other| !doomed.contains(&other.id));
             let video = timeline.clip_mut(&video_id).expect("checked above");
             video.muted = None;
             video.filters = sounds[0].filters.clone();
-            Ok(Outcome::default())
+            // Reaching here means at least one sound clip was deleted.
+            Ok(Outcome { created_id: None, applied: true })
         }
 
         Command::AddTrack => {
@@ -1017,17 +1111,21 @@ pub fn apply(project: &mut Project, mint: &mut IdMint, command: Command) -> Resu
             let name =
                 next_numbered("Track", timeline.tracks.iter().map(|track| track.name.clone()));
             timeline.tracks.push(Track { id: id.clone(), name, visible: true, muted: false });
-            Ok(Outcome { created_id: Some(id) })
+            Ok(Outcome { created_id: Some(id), applied: true })
         }
 
         Command::RemoveTrack { track_id } => {
             let timeline = project.active_mut();
             if timeline.tracks.len() <= 1 {
-                return Err("A timeline needs at least one track.".to_owned());
+                return Err(CommandError::LastTrack);
             }
+            let track_count = timeline.tracks.len();
             timeline.tracks.retain(|track| track.id != track_id);
             timeline.clips.retain(|clip| clip.track_id != track_id);
-            Ok(Outcome::default())
+            // Clips only ever sit on existing tracks, so an unknown id - the
+            // tolerated no-op - removes neither.
+            let applied = timeline.tracks.len() != track_count;
+            Ok(Outcome { created_id: None, applied })
         }
 
         Command::RenameTrack { track_id, name } => {
@@ -1036,21 +1134,25 @@ pub fn apply(project: &mut Project, mint: &mut IdMint, command: Command) -> Resu
                 return Ok(Outcome::default());
             }
             let timeline = project.active_mut();
-            if let Some(track) = timeline.tracks.iter_mut().find(|track| track.id == track_id) {
-                track.name = trimmed.to_owned();
-            }
-            Ok(Outcome::default())
+            let applied = timeline
+                .tracks
+                .iter_mut()
+                .find(|track| track.id == track_id)
+                .is_some_and(|track| assign(&mut track.name, trimmed.to_owned()));
+            Ok(Outcome { created_id: None, applied })
         }
 
         Command::SetTrackFlag { track_id, flag, value } => {
             let timeline = project.active_mut();
-            if let Some(track) = timeline.tracks.iter_mut().find(|track| track.id == track_id) {
-                match flag {
-                    TrackFlag::Visible => track.visible = value,
-                    TrackFlag::Muted => track.muted = value,
-                }
-            }
-            Ok(Outcome::default())
+            let applied = timeline
+                .tracks
+                .iter_mut()
+                .find(|track| track.id == track_id)
+                .is_some_and(|track| match flag {
+                    TrackFlag::Visible => assign(&mut track.visible, value),
+                    TrackFlag::Muted => assign(&mut track.muted, value),
+                });
+            Ok(Outcome { created_id: None, applied })
         }
 
         Command::AddTimeline => {
@@ -1069,12 +1171,12 @@ pub fn apply(project: &mut Project, mint: &mut IdMint, command: Command) -> Resu
                 .collect();
             project.timelines.push(Timeline { id: id.clone(), name, tracks, clips: Vec::new() });
             project.active_timeline_id = id.clone();
-            Ok(Outcome { created_id: Some(id) })
+            Ok(Outcome { created_id: Some(id), applied: true })
         }
 
         Command::RemoveTimeline { timeline_id } => {
             if project.timelines.len() <= 1 {
-                return Err("A project needs at least one timeline.".to_owned());
+                return Err(CommandError::LastTimeline);
             }
             let Some(index) =
                 project.timelines.iter().position(|timeline| timeline.id == timeline_id)
@@ -1086,7 +1188,7 @@ pub fn apply(project: &mut Project, mint: &mut IdMint, command: Command) -> Resu
                 project.active_timeline_id = project.timelines[neighbour].id.clone();
             }
             project.timelines.remove(index);
-            Ok(Outcome::default())
+            Ok(Outcome { created_id: None, applied: true })
         }
 
         Command::RenameTimeline { timeline_id, name } => {
@@ -1094,33 +1196,37 @@ pub fn apply(project: &mut Project, mint: &mut IdMint, command: Command) -> Resu
             if trimmed.is_empty() {
                 return Ok(Outcome::default());
             }
-            if let Some(timeline) =
-                project.timelines.iter_mut().find(|timeline| timeline.id == timeline_id)
-            {
-                timeline.name = trimmed.to_owned();
-            }
-            Ok(Outcome::default())
+            let applied = project
+                .timelines
+                .iter_mut()
+                .find(|timeline| timeline.id == timeline_id)
+                .is_some_and(|timeline| assign(&mut timeline.name, trimmed.to_owned()));
+            Ok(Outcome { created_id: None, applied })
         }
 
         Command::SelectTimeline { timeline_id } => {
-            if project.timelines.iter().any(|timeline| timeline.id == timeline_id) {
-                project.active_timeline_id = timeline_id;
-            }
-            Ok(Outcome::default())
+            // Short-circuiting is right here: an unknown id must not touch
+            // the selection at all.
+            let applied = project.timelines.iter().any(|timeline| timeline.id == timeline_id)
+                && assign(&mut project.active_timeline_id, timeline_id);
+            Ok(Outcome { created_id: None, applied })
         }
 
         Command::AddFont { family, path } => {
-            if !project.fonts.iter().any(|font| font.path == path) {
-                project.fonts.push(CustomFont { family, path });
+            if project.fonts.iter().any(|font| font.path == path) {
+                return Ok(Outcome::default());
             }
-            Ok(Outcome::default())
+            project.fonts.push(CustomFont { family, path });
+            Ok(Outcome { created_id: None, applied: true })
         }
 
         Command::RemoveFont { family } => {
             // Clips keep the family name: the face may come back when the
             // file does.
+            let font_count = project.fonts.len();
             project.fonts.retain(|font| font.family != family);
-            Ok(Outcome::default())
+            let applied = project.fonts.len() != font_count;
+            Ok(Outcome { created_id: None, applied })
         }
     }
 }

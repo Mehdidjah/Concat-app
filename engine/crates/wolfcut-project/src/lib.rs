@@ -23,7 +23,7 @@ pub mod doc;
 pub mod editor;
 pub mod model;
 
-pub use commands::{Command, Outcome, why_not_merge};
+pub use commands::{Command, CommandError, Outcome, why_not_merge};
 pub use doc::{DocumentSettings, from_document, to_document};
 pub use editor::Editor;
 pub use model::Project;
@@ -32,7 +32,7 @@ pub use model::Project;
 mod tests {
     use serde_json::json;
 
-    use crate::commands::{ClipMove, ClipPatch, Command, TrimEdge};
+    use crate::commands::{ClipMove, ClipPatch, Command, TrackFlag, TrimEdge};
     use crate::doc::DocumentSettings;
     use crate::editor::Editor;
     use crate::model::{ClipKind, MediaKind, TextStyle};
@@ -133,7 +133,7 @@ mod tests {
             })
             .expect("moves");
         let refused = editor.apply(Command::MergeClips { clip_ids: vec![tail_id, clip_id] });
-        assert!(refused.unwrap_err().contains("no longer in their original order"));
+        assert!(refused.unwrap_err().to_string().contains("no longer in their original order"));
     }
 
     #[test]
@@ -427,7 +427,7 @@ mod tests {
                 has_audio: false,
             },
         });
-        assert!(refused.unwrap_err().contains("not a template slot"));
+        assert!(refused.unwrap_err().to_string().contains("not a template slot"));
     }
 
     #[test]
@@ -533,5 +533,567 @@ mod tests {
         let document = editor.to_document(&settings());
         let restored = Editor::from_document(&document).expect("loads");
         assert_eq!(restored.project(), editor.project());
+    }
+
+    #[test]
+    fn a_tolerated_no_op_records_no_undo_entry() {
+        // The applied flag replaced a deep state compare; if a missing-id
+        // command ever reported true, undo would gain phantom steps.
+        let (mut editor, _, _) = fixture();
+        let outcome = editor
+            .apply(Command::TrimClip {
+                clip_id: "nope".to_owned(),
+                edge: TrimEdge::End,
+                delta: 1.0,
+            })
+            .expect("tolerated");
+        assert!(!outcome.applied);
+
+        assert!(editor.undo(), "history still holds the fixture's edits");
+        assert_eq!(
+            editor.project().active().clips.len(),
+            0,
+            "the first undo steps over the add-clip, not a phantom no-op"
+        );
+    }
+
+    #[test]
+    fn setting_a_value_already_in_place_records_no_undo_entry() {
+        let (mut editor, _, clip_id) = fixture();
+        // Volume is already 1.0; the old deep-compare saw no change here and
+        // pushed nothing - the applied flag must agree exactly.
+        let outcome = editor
+            .apply(Command::UpdateClip {
+                clip_id,
+                patch: ClipPatch { volume: Some(1.0), ..ClipPatch::default() },
+            })
+            .expect("tolerated");
+        assert!(!outcome.applied);
+        assert!(editor.undo());
+        assert!(editor.project().active().clips.is_empty(), "straight back past the add-clip");
+    }
+
+    #[test]
+    fn a_batch_reports_applied_only_when_a_member_changed_something() {
+        let (mut editor, _, clip_id) = fixture();
+        let track_id = editor.project().active().tracks[0].id.clone();
+        // Visible is already true; only the speed change is real.
+        let outcome = editor
+            .apply(Command::Batch {
+                commands: vec![
+                    Command::SetTrackFlag {
+                        track_id: track_id.clone(),
+                        flag: TrackFlag::Visible,
+                        value: true,
+                    },
+                    Command::SetClipSpeed { clip_id, speed: 2.0 },
+                ],
+            })
+            .expect("applies");
+        assert!(outcome.applied);
+        assert!(editor.undo());
+        assert_eq!(editor.project().active().clips[0].speed, 1.0, "one undo undoes the batch");
+
+        // A batch of nothing-but-no-ops is itself a no-op: no undo entry.
+        let outcome = editor
+            .apply(Command::Batch {
+                commands: vec![
+                    Command::SetTrackFlag { track_id, flag: TrackFlag::Visible, value: true },
+                    Command::TrimClip {
+                        clip_id: "nope".to_owned(),
+                        edge: TrimEdge::End,
+                        delta: 1.0,
+                    },
+                ],
+            })
+            .expect("tolerated");
+        assert!(!outcome.applied);
+        assert!(editor.undo());
+        assert!(
+            editor.project().active().clips.is_empty(),
+            "the next undo steps over the add-clip, not a phantom batch"
+        );
+    }
+
+    #[test]
+    fn undo_depth_evicts_the_oldest_snapshot_first() {
+        // The cap used to remove(0) on a Vec; the VecDeque must keep the
+        // same outward behaviour - the newest 200 steps stay undoable.
+        let (mut editor, _, clip_id) = fixture();
+        for step in 0..205 {
+            editor
+                .apply(Command::SetClipTransform {
+                    clip_id: clip_id.clone(),
+                    scale: None,
+                    offset_x: Some(f64::from(step) / 1000.0 + 0.001),
+                    offset_y: None,
+                    rotation: None,
+                })
+                .expect("applies");
+        }
+        let mut undos = 0;
+        while editor.undo() {
+            undos += 1;
+        }
+        assert_eq!(undos, 200);
+    }
+
+    #[test]
+    fn moves_to_a_vanished_track_keep_the_time_change_and_drop_the_track_change() {
+        // Pinned deliberately: a drag that races a track deletion still
+        // lands its horizontal half, exactly as the TS operation tolerated.
+        let (mut editor, _, clip_id) = fixture();
+        let outcome = editor
+            .apply(Command::MoveClips {
+                moves: vec![ClipMove {
+                    clip_id: clip_id.clone(),
+                    start: 3.0,
+                    track_id: "gone".to_owned(),
+                }],
+            })
+            .expect("tolerated");
+        assert!(outcome.applied, "the start change is real");
+        let clip = editor.project().active().clip(&clip_id).expect("exists");
+        assert_eq!(clip.start, 3.0);
+        assert_eq!(clip.track_id, "T1", "the vanished destination is ignored");
+    }
+
+    #[test]
+    fn a_multi_move_skips_unknown_clips_and_floors_start_at_zero() {
+        let (mut editor, _, clip_id) = fixture();
+        let target = editor.project().active().tracks[1].id.clone();
+        editor
+            .apply(Command::MoveClips {
+                moves: vec![
+                    // The unknown clip is skipped; the rest still lands.
+                    ClipMove { clip_id: "nope".to_owned(), start: 9.0, track_id: target.clone() },
+                    ClipMove { clip_id: clip_id.clone(), start: -2.0, track_id: target.clone() },
+                ],
+            })
+            .expect("tolerated");
+        let clip = editor.project().active().clip(&clip_id).expect("exists");
+        assert_eq!(clip.start, 0.0, "negative starts clamp to the timeline head");
+        assert_eq!(clip.track_id, target);
+    }
+
+    #[test]
+    fn a_tail_trim_stretches_only_the_duration_and_stops_at_the_minimum() {
+        let (mut editor, _, clip_id) = fixture();
+        editor
+            .apply(Command::TrimClip { clip_id: clip_id.clone(), edge: TrimEdge::End, delta: -4.0 })
+            .expect("trims");
+        let clip = editor.project().active().clip(&clip_id).expect("exists");
+        assert_eq!(clip.duration, 6.0);
+        assert_eq!(clip.start, 0.0, "the head does not move");
+        assert_eq!(clip.source_start, 0.0, "nor the in-point");
+
+        // Dragging far past the head floors at a sixtieth of a second
+        // rather than inverting the clip.
+        editor
+            .apply(Command::TrimClip {
+                clip_id: clip_id.clone(),
+                edge: TrimEdge::End,
+                delta: -100.0,
+            })
+            .expect("trims");
+        assert_eq!(
+            editor.project().active().clip(&clip_id).expect("exists").duration,
+            1.0 / 60.0
+        );
+    }
+
+    #[test]
+    fn add_at_first_free_takes_the_lowest_empty_lane_or_the_bottom_one() {
+        let (mut editor, media_id, _) = fixture();
+        // Track one is occupied for [0, 10), so the same span lands on two.
+        let second = editor
+            .apply(Command::AddClipAtFirstFree { media_id: media_id.clone(), start: 0.0 })
+            .expect("adds")
+            .created_id
+            .expect("id");
+        assert_eq!(
+            editor.project().active().clip(&second).expect("exists").track_id,
+            editor.project().active().tracks[1].id
+        );
+
+        // Fill the remaining lanes, then ask again: rather than refusing,
+        // the clip overlaps on the first track.
+        editor
+            .apply(Command::AddClipAtFirstFree { media_id: media_id.clone(), start: 0.0 })
+            .expect("adds");
+        editor
+            .apply(Command::AddClipAtFirstFree { media_id: media_id.clone(), start: 0.0 })
+            .expect("adds");
+        let overflow = editor
+            .apply(Command::AddClipAtFirstFree { media_id: media_id.clone(), start: 0.0 })
+            .expect("adds")
+            .created_id
+            .expect("id");
+        assert_eq!(
+            editor.project().active().clip(&overflow).expect("exists").track_id,
+            editor.project().active().tracks[0].id,
+            "a full timeline falls back to the first track, overlap and all"
+        );
+
+        // A clear span later in time finds track one free again.
+        let clear = editor
+            .apply(Command::AddClipAtFirstFree { media_id, start: 20.0 })
+            .expect("adds")
+            .created_id
+            .expect("id");
+        assert_eq!(
+            editor.project().active().clip(&clear).expect("exists").track_id,
+            editor.project().active().tracks[0].id
+        );
+    }
+
+    #[test]
+    fn removing_a_track_takes_its_clips_and_stops_at_the_floor_of_one() {
+        let (mut editor, _, _) = fixture();
+        let track_id = editor.project().active().tracks[0].id.clone();
+        editor.apply(Command::RemoveTrack { track_id: track_id.clone() }).expect("removes");
+        let timeline = editor.project().active();
+        assert_eq!(timeline.tracks.len(), 3);
+        assert!(timeline.clips.is_empty(), "the clip on the removed track went with it");
+
+        // An unknown id is the tolerated no-op, not an error.
+        let outcome = editor.apply(Command::RemoveTrack { track_id }).expect("tolerated");
+        assert!(!outcome.applied);
+
+        while editor.project().active().tracks.len() > 1 {
+            let next = editor.project().active().tracks[0].id.clone();
+            editor.apply(Command::RemoveTrack { track_id: next }).expect("removes");
+        }
+        let last = editor.project().active().tracks[0].id.clone();
+        let refused = editor.apply(Command::RemoveTrack { track_id: last });
+        assert_eq!(refused.unwrap_err().to_string(), "A timeline needs at least one track.");
+    }
+
+    #[test]
+    fn removing_media_sweeps_its_clips_from_every_timeline() {
+        let (mut editor, media_id, _) = fixture();
+        editor.apply(Command::AddTimeline).expect("adds");
+        let track_id = editor.project().active().tracks[0].id.clone();
+        editor
+            .apply(Command::AddClip { media_id: media_id.clone(), track_id, start: 0.0 })
+            .expect("adds");
+
+        editor.apply(Command::RemoveMedia { media_id: media_id.clone() }).expect("removes");
+        assert!(editor.project().media.is_empty());
+        assert!(
+            editor.project().timelines.iter().all(|timeline| timeline.clips.is_empty()),
+            "the inactive timeline's clip is swept too, not left dangling"
+        );
+
+        // Removing what is already gone is a tolerated no-op.
+        let outcome = editor.apply(Command::RemoveMedia { media_id }).expect("tolerated");
+        assert!(!outcome.applied);
+    }
+
+    #[test]
+    fn renames_trim_whitespace_and_refuse_to_blank_a_name() {
+        let (mut editor, _, _) = fixture();
+        let track_id = editor.project().active().tracks[0].id.clone();
+        editor
+            .apply(Command::RenameTrack {
+                track_id: track_id.clone(),
+                name: "  Cutaways  ".to_owned(),
+            })
+            .expect("renames");
+        assert_eq!(editor.project().active().tracks[0].name, "Cutaways");
+
+        // Whitespace-only would leave the lane unlabelled, so it is ignored.
+        let outcome = editor
+            .apply(Command::RenameTrack { track_id, name: "   ".to_owned() })
+            .expect("tolerated");
+        assert!(!outcome.applied);
+        assert_eq!(editor.project().active().tracks[0].name, "Cutaways");
+
+        editor
+            .apply(Command::RenameTimeline {
+                timeline_id: "TL1".to_owned(),
+                name: "\tCut A\n".to_owned(),
+            })
+            .expect("renames");
+        assert_eq!(editor.project().timelines[0].name, "Cut A");
+        let outcome = editor
+            .apply(Command::RenameTimeline { timeline_id: "TL1".to_owned(), name: String::new() })
+            .expect("tolerated");
+        assert!(!outcome.applied);
+        assert_eq!(editor.project().timelines[0].name, "Cut A");
+    }
+
+    #[test]
+    fn track_flags_flip_independently_and_report_no_ops_honestly() {
+        let (mut editor, _, _) = fixture();
+        let track_id = editor.project().active().tracks[0].id.clone();
+        editor
+            .apply(Command::SetTrackFlag {
+                track_id: track_id.clone(),
+                flag: TrackFlag::Visible,
+                value: false,
+            })
+            .expect("sets");
+        editor
+            .apply(Command::SetTrackFlag {
+                track_id: track_id.clone(),
+                flag: TrackFlag::Muted,
+                value: true,
+            })
+            .expect("sets");
+        let track = &editor.project().active().tracks[0];
+        assert!(!track.visible);
+        assert!(track.muted);
+
+        // Setting the value already in place is a no-op, exactly as the old
+        // deep-compare judged it.
+        let outcome = editor
+            .apply(Command::SetTrackFlag { track_id, flag: TrackFlag::Muted, value: true })
+            .expect("tolerated");
+        assert!(!outcome.applied);
+    }
+
+    #[test]
+    fn rotation_wraps_into_the_half_open_degree_range() {
+        // (-180, 180]: a knob dragged through full turns must not carry the
+        // turns with it, and the boundary itself belongs to +180.
+        let (mut editor, _, clip_id) = fixture();
+        let cases = [
+            (361.0, 1.0),
+            (-1.0, -1.0),
+            (720.0, 0.0),
+            (180.0, 180.0),
+            (-180.0, 180.0),
+            (540.0, 180.0),
+        ];
+        for (sent, landed) in cases {
+            editor
+                .apply(Command::SetClipTransform {
+                    clip_id: clip_id.clone(),
+                    scale: None,
+                    offset_x: None,
+                    offset_y: None,
+                    rotation: Some(sent),
+                })
+                .expect("sets");
+            assert_eq!(
+                editor.project().active().clip(&clip_id).expect("exists").rotation,
+                landed,
+                "{sent} degrees should land at {landed}"
+            );
+        }
+    }
+
+    #[test]
+    fn removing_a_timeline_moves_the_active_tab_to_a_neighbour() {
+        let mut editor = Editor::new();
+        let second = editor.apply(Command::AddTimeline).expect("adds").created_id.expect("id");
+        let third = editor.apply(Command::AddTimeline).expect("adds").created_id.expect("id");
+        assert_eq!(editor.project().active_timeline_id, third);
+
+        // An unknown id is a tolerated no-op while the floor allows it.
+        let outcome = editor
+            .apply(Command::RemoveTimeline { timeline_id: "ghost".to_owned() })
+            .expect("tolerated");
+        assert!(!outcome.applied);
+
+        // Removing the active last tab falls back to the previous one.
+        editor.apply(Command::RemoveTimeline { timeline_id: third }).expect("removes");
+        assert_eq!(editor.project().active_timeline_id, second);
+
+        // Removing an active middle tab prefers the neighbour to its right.
+        let third = editor.apply(Command::AddTimeline).expect("adds").created_id.expect("id");
+        editor
+            .apply(Command::SelectTimeline { timeline_id: second.clone() })
+            .expect("selects");
+        editor.apply(Command::RemoveTimeline { timeline_id: second }).expect("removes");
+        assert_eq!(editor.project().active_timeline_id, third);
+
+        // Removing an inactive tab leaves the selection alone.
+        editor.apply(Command::RemoveTimeline { timeline_id: "TL1".to_owned() }).expect("removes");
+        assert_eq!(editor.project().active_timeline_id, third);
+    }
+
+    #[test]
+    fn fonts_deduplicate_by_path_and_removal_leaves_titles_alone() {
+        let mut editor = Editor::new();
+        editor
+            .apply(Command::AddFont {
+                family: "Inter".to_owned(),
+                path: "/fonts/inter.ttf".to_owned(),
+            })
+            .expect("adds");
+        // Same path again: a re-import must not duplicate the entry.
+        let outcome = editor
+            .apply(Command::AddFont {
+                family: "Inter Again".to_owned(),
+                path: "/fonts/inter.ttf".to_owned(),
+            })
+            .expect("tolerated");
+        assert!(!outcome.applied);
+        assert_eq!(editor.project().fonts.len(), 1);
+
+        let clip_id = editor
+            .apply(Command::AddTextClip {
+                track_id: None,
+                start: 0.0,
+                style: Some(TextStyle { font_family: "Inter".to_owned(), ..TextStyle::default() }),
+                duration: None,
+                offset_y: None,
+            })
+            .expect("adds")
+            .created_id
+            .expect("id");
+
+        editor.apply(Command::RemoveFont { family: "Inter".to_owned() }).expect("removes");
+        assert!(editor.project().fonts.is_empty());
+        let clip = editor.project().active().clip(&clip_id).expect("exists");
+        assert_eq!(
+            clip.text.as_ref().expect("text").font_family,
+            "Inter",
+            "the title keeps the family name so the face can come back"
+        );
+
+        // Removing what is already gone is a tolerated no-op.
+        let outcome =
+            editor.apply(Command::RemoveFont { family: "Inter".to_owned() }).expect("tolerated");
+        assert!(!outcome.applied);
+    }
+
+    #[test]
+    fn every_command_round_trips_through_serde() {
+        // One of each variant. Grow this list with the enum, or a new
+        // command ships without proof its wire shape survives a round trip.
+        let item = match media("/a.mp4", 10.0, true) {
+            Command::AddMedia { item } => item,
+            _ => unreachable!("the helper builds AddMedia"),
+        };
+        let commands = vec![
+            Command::AddMedia { item: item.clone() },
+            Command::RemoveMedia { media_id: "m1".to_owned() },
+            Command::SetMediaPlaceholder { media_id: "m1".to_owned(), placeholder: true },
+            Command::FillSlot { media_id: "m1".to_owned(), item },
+            Command::Batch { commands: vec![Command::AddTrack] },
+            Command::AddClip { media_id: "m1".to_owned(), track_id: "T1".to_owned(), start: 1.0 },
+            Command::AddClipAtFirstFree { media_id: "m1".to_owned(), start: 2.0 },
+            Command::AddTextClip {
+                track_id: Some("T1".to_owned()),
+                start: 0.0,
+                style: Some(TextStyle::default()),
+                duration: Some(2.0),
+                offset_y: Some(0.4),
+            },
+            Command::MoveClips {
+                moves: vec![ClipMove {
+                    clip_id: "c1".to_owned(),
+                    start: 0.0,
+                    track_id: "T2".to_owned(),
+                }],
+            },
+            Command::TrimClip { clip_id: "c1".to_owned(), edge: TrimEdge::End, delta: -0.5 },
+            Command::SplitClips { clip_ids: vec!["c1".to_owned()], time: 3.0 },
+            Command::MergeClips { clip_ids: vec!["c1".to_owned(), "c2".to_owned()] },
+            Command::RemoveClips { clip_ids: vec!["c1".to_owned()] },
+            Command::UpdateClip {
+                clip_id: "c1".to_owned(),
+                patch: ClipPatch {
+                    volume: Some(0.5),
+                    transition_in: Some(None),
+                    ..ClipPatch::default()
+                },
+            },
+            Command::SetClipSpeed { clip_id: "c1".to_owned(), speed: 2.0 },
+            Command::SetClipTransform {
+                clip_id: "c1".to_owned(),
+                scale: Some(1.5),
+                offset_x: None,
+                offset_y: Some(-0.25),
+                rotation: Some(90.0),
+            },
+            Command::DetachAudio { clip_id: "c1".to_owned() },
+            Command::ReattachAudio { clip_id: "c1".to_owned() },
+            Command::AddTrack,
+            Command::RemoveTrack { track_id: "T1".to_owned() },
+            Command::RenameTrack { track_id: "T1".to_owned(), name: "Cutaways".to_owned() },
+            Command::SetTrackFlag {
+                track_id: "T1".to_owned(),
+                flag: TrackFlag::Muted,
+                value: true,
+            },
+            Command::AddTimeline,
+            Command::RemoveTimeline { timeline_id: "TL1".to_owned() },
+            Command::RenameTimeline { timeline_id: "TL1".to_owned(), name: "Cut A".to_owned() },
+            Command::SelectTimeline { timeline_id: "TL1".to_owned() },
+            Command::AddFont { family: "Inter".to_owned(), path: "/fonts/inter.ttf".to_owned() },
+            Command::RemoveFont { family: "Inter".to_owned() },
+        ];
+        for command in commands {
+            let wire = serde_json::to_value(&command).expect("serialises");
+            let back: Command = serde_json::from_value(wire).expect("parses");
+            assert_eq!(back, command);
+        }
+    }
+
+    #[test]
+    fn clips_for_vanished_tracks_or_media_are_dropped_on_load() {
+        // A hand-edited or truncated file must degrade to something
+        // openable: a clip with nowhere to live (or nothing to show) is
+        // dropped, while a text clip - which needs no media - survives.
+        let document = json!({
+            "name": "Damaged", "version": 1,
+            "media": [{ "id": "m1", "path": "/a.mp4", "name": "a.mp4", "kind": "video",
+                        "hasAudio": false }],
+            "tracks": [{ "id": "T1", "name": "Track 1", "visible": true, "muted": false }],
+            "clips": [
+                { "id": "c1", "trackId": "ghost", "mediaId": "m1", "kind": "video",
+                  "start": 0.0, "duration": 1.0 },
+                { "id": "c2", "trackId": "T1", "mediaId": "ghost", "kind": "video",
+                  "start": 0.0, "duration": 1.0 },
+                { "id": "c3", "trackId": "T1", "mediaId": "m1", "kind": "video",
+                  "start": 0.0, "duration": 1.0 },
+                { "id": "c4", "trackId": "T1", "kind": "text", "start": 0.0, "duration": 1.0 }
+            ]
+        });
+        let editor = Editor::from_document(&document).expect("loads");
+        let ids: Vec<&str> =
+            editor.project().active().clips.iter().map(|clip| clip.id.as_str()).collect();
+        assert_eq!(ids, ["c3", "c4"]);
+    }
+
+    #[test]
+    fn hand_edited_values_are_clamped_on_load() {
+        // The reader trusts nothing: values that would render invisibly or
+        // fall outside the engine's ranges are pulled back in, not obeyed.
+        let document = json!({
+            "name": "Edited", "version": 1,
+            "media": [{ "id": "m1", "path": "/a.mp4", "name": "a.mp4", "kind": "video",
+                        "hasAudio": false }],
+            "tracks": [{ "id": "T1", "name": "Track 1", "visible": true, "muted": false }],
+            "clips": [
+                { "id": "c1", "trackId": "T1", "mediaId": "m1", "kind": "video",
+                  "start": -4.0, "duration": -3.0, "sourceStart": -1.0,
+                  "volume": -2.0, "opacity": 2.0, "speed": 100.0, "scale": 0.0,
+                  "transitionIn": { "id": "cross-fade", "duration": 0.0 } },
+                { "id": "c2", "trackId": "T1", "kind": "text", "start": 0.0, "duration": 1.0,
+                  "text": { "content": "Hi", "fontSize": 0.0, "fontWeight": 9999.0,
+                            "lineHeight": 0.1, "opacity": 5.0 } }
+            ]
+        });
+        let editor = Editor::from_document(&document).expect("loads");
+        let clip = &editor.project().active().clips[0];
+        assert_eq!(clip.start, 0.0);
+        assert_eq!(clip.duration, 0.01);
+        assert_eq!(clip.source_start, 0.0);
+        assert_eq!(clip.volume, 0.0);
+        assert_eq!(clip.opacity, 1.0);
+        assert_eq!(clip.speed, 16.0);
+        assert_eq!(clip.scale, 0.05);
+        assert_eq!(clip.transition_in.as_ref().expect("kept").duration, 0.1);
+
+        let text = editor.project().active().clips[1].text.as_ref().expect("text");
+        assert_eq!(text.font_size, 0.01, "a zero size would render an invisible title");
+        assert_eq!(text.font_weight, 900.0);
+        assert_eq!(text.line_height, 0.5, "lines cannot collapse onto each other");
+        assert_eq!(text.opacity, 1.0);
     }
 }

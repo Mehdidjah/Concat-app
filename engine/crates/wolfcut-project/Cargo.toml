@@ -9,6 +9,7 @@ description = "The edit itself: the project document, its operations, and undo. 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json.workspace = true
+thiserror.workspace = true
 
 [lints]
 workspace = true

@@ -162,7 +162,7 @@ pub fn editor_apply(
     command: Command,
 ) -> Result<EditorView, String> {
     with_session(&state, |session| {
-        let outcome = session.editor.apply(command)?;
+        let outcome = session.editor.apply(command).map_err(|error| error.to_string())?;
         Ok(view(session, outcome.created_id))
     })
 }
