@@ -177,13 +177,13 @@ export function Slider({
                      overflow-hidden rounded-md bg-sunken"
         >
           <div
-            className="absolute inset-y-0 left-0 bg-accent-soft"
+            className="absolute inset-y-0 left-0 bg-tool-active-soft"
             style={{ width: `${fill * 100}%` }}
           />
           {/* The knob subtracts its own width as it travels, so it stays inside
               the track at both ends instead of hanging over the edge. */}
           <div
-            className="absolute top-0 h-full w-1 rounded bg-accent"
+            className="absolute top-0 h-full w-1 rounded bg-tool-active"
             style={{ left: `calc(${fill * 100}% - ${fill * 4}px)` }}
           />
         </div>
@@ -265,7 +265,7 @@ export function Toggle({
         onClick={() => onChange(!checked)}
         className={`relative h-5.5 w-9.5 shrink-0 cursor-pointer rounded-full
                     p-0.75 transition-colors duration-200 ${
-                      checked ? "bg-accent" : "bg-tertiary/40"
+                      checked ? "bg-tool-active" : "bg-tertiary/40"
                     }`}
       >
         <span

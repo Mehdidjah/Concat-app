@@ -114,6 +114,8 @@
    */
   --color-tool-active: #65a30d;
   --color-tool-active-bg: rgba(0, 0, 0, 0.08);
+  /* The lime's translucent fill, for slider tracks and control fills. */
+  --color-tool-active-soft: rgba(101, 163, 13, 0.18);
 
   --color-playhead: #ff3b30;
   /*
@@ -197,6 +199,7 @@
 
   --color-tool-active: #c6f432;
   --color-tool-active-bg: rgba(0, 0, 0, 0.32);
+  --color-tool-active-soft: rgba(198, 244, 50, 0.16);
 
   --color-danger: #ff453a;
   --color-danger-soft: rgba(255, 69, 58, 0.14);
