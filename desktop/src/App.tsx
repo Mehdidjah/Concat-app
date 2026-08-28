@@ -31,11 +31,9 @@ import { createAssets, requestAssets, requestVideoPeaks } from "./lib/assets";
 import {
   activeTimeline,
   clipsAt,
-  commandsForEcho,
   detachedAudioOf,
   findClip,
   findMedia,
-  findTrack,
   precedingClip,
   projectDuration,
   snapTime,
@@ -44,63 +42,31 @@ import {
   transformPatch,
   trimPatch,
   whyNotMerge,
-  withEcho,
   type Clip,
-  type Echo,
-  type EditorCommand,
-  type EditorProject,
-  type EditorView,
   type MediaItem,
   type TimelineMeta,
 } from "./lib/editor";
 import {
-  audioSetClips,
-  editorApply,
-  onAudioError,
-  editorClose,
-  editorOpen,
-  editorRedo,
   editorSave,
-  editorUndo,
   engineVersion,
   newMediaFromSummary,
-  previewFrame,
   probeMedia,
   readMediaBytes,
   templateSave,
-  transcribeClip,
   type ExportClip,
   type TemplateInfo,
 } from "./lib/engine";
-import { getTranscriberLanguage, getTranscriberModel } from "./lib/settings";
-import { buildChain } from "./lib/filters";
 import { findTransition } from "./lib/effects";
-import { defaultTextStyle, familyForPath, registerFont } from "./lib/text";
+import { familyForPath, registerFont } from "./lib/text";
+import { useCaptions } from "./hooks/useCaptions";
+import { useEngineSession } from "./hooks/useEngineSession";
+import { useEngineTruth } from "./hooks/useEngineTruth";
+import { usePlaybackBridge } from "./hooks/usePlaybackBridge";
 import { useTheme, type Theme } from "./lib/theme";
 import { useTransport } from "./lib/transport";
 
 const MIN_SECONDS_PER_PIXEL = 0.0005;
 const MAX_SECONDS_PER_PIXEL = 2;
-
-/** What the editor renders for the frame or two before the session opens. */
-const EMPTY_PROJECT: EditorProject = {
-  media: [],
-  fonts: [],
-  timelines: [
-    {
-      id: "TL1",
-      name: "Timeline 1",
-      tracks: [1, 2, 3, 4].map((number) => ({
-        id: `T${number}`,
-        name: `Track ${number}`,
-        visible: true,
-        muted: false,
-      })),
-      clips: [],
-    },
-  ],
-  activeTimelineId: "TL1",
-};
 
 /**
  * The window: either the launch screen or an open editor.
@@ -173,8 +139,40 @@ function Editor({
   /** Leaves this project for the launch screen's fill flow on a template. */
   onUseTemplate: (template: TemplateInfo) => void;
 }) {
-  const [view, setView] = useState<EditorView | null>(null);
-  const [echo, setEcho] = useState<Echo | null>(null);
+  const [toast, setToast] = useState<{ id: number; message: string; failed: boolean } | null>(
+    null,
+  );
+  const pushToast = useCallback((message: string, failed: boolean) => {
+    setToast({ id: Date.now(), message, failed });
+  }, []);
+  const [error, setError] = useState<string | null>(null);
+
+  // The engine session: queue, echo, undo, autosave. See useEngineSession.
+  const {
+    view,
+    viewRef,
+    loaded,
+    project,
+    dispatch,
+    undoAction,
+    redoAction,
+    liveClip,
+    commitEcho,
+    frame,
+    setFrame,
+    saveState,
+    saveAndNotify,
+  } = useEngineSession({
+    session,
+    onOpenError: setError,
+    onCommandError: useCallback((message: string) => pushToast(message, true), [pushToast]),
+    onSaved: useCallback(
+      (ok: boolean, message?: string) =>
+        pushToast(ok ? "Project saved" : `Save failed: ${message}`, !ok),
+      [pushToast],
+    ),
+  });
+
   const [selectedClipIds, setSelectedClipIds] = useState<string[]>([]);
   const [selectedMediaId, setSelectedMediaId] = useState<string | null>(null);
   const [tool, setTool] = useState<Tool>("select");
@@ -182,7 +180,6 @@ function Editor({
   const [binFilter, setBinFilter] = useState<BinFilter>(ALL_MEDIA);
   const [version, setVersion] = useState("");
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
   const [dropping, setDropping] = useState(false);
   const [context, setContext] = useState<ContextTarget | null>(null);
   const [mediaDrag, setMediaDrag] = useState<{ item: MediaItem; x: number; y: number } | null>(
@@ -190,14 +187,8 @@ function Editor({
   );
   const [exporting, setExporting] = useState(false);
   const [rightTab, setRightTab] = useState<RightTab>("details");
-  const [saveState, setSaveState] = useState<"idle" | "saving" | "saved" | "failed">("idle");
   /** Families whose font files failed to load - shown in the picker. */
   const [missingFonts, setMissingFonts] = useState<Set<string>>(new Set());
-  /**
-   * The output frame. Starts from the project settings but is editable from
-   * the preview footer; the engine persists whatever this holds on save.
-   */
-  const [frame, setFrame] = useState({ width: session.width, height: session.height });
 
   // Panel geometry.
   // Wide enough that the library's five tabs and a row of cards breathe;
@@ -214,12 +205,6 @@ function Editor({
   const zoomRef = useRef(secondsPerPixel);
   zoomRef.current = secondsPerPixel;
 
-  const loaded = view !== null;
-  // What the window draws: the engine's state with the gesture echo on top.
-  const project = useMemo(
-    () => withEcho(view?.project ?? EMPTY_PROJECT, echo),
-    [view, echo],
-  );
   const timeline = activeTimeline(project);
 
   const duration = projectDuration(project);
@@ -229,126 +214,9 @@ function Editor({
   // Read by event listeners that outlive the render that installed them.
   const latest = useRef({ project, secondsPerPixel, scrollLeft, trackScroll, snap, playhead, frame });
   latest.current = { project, secondsPerPixel, scrollLeft, trackScroll, snap, playhead, frame };
-  const viewRef = useRef(view);
-  viewRef.current = view;
-  const echoRef = useRef(echo);
-  echoRef.current = echo;
 
   // The project's rate is authoritative, not the first clip's.
   const frameRate = session.frameRate;
-
-  // ── the command queue ────────────────────────────────────────────────────
-  // Commands are serialised so responses can never land out of order and
-  // overwrite newer state with older. Errors surface as the toast - they are
-  // user-meaningful sentences from the engine ("Merged clips must touch...").
-  const queue = useRef<Promise<unknown>>(Promise.resolve());
-  const dispatch = useCallback((command: EditorCommand): Promise<string | undefined> => {
-    const run = queue.current.then(async () => {
-      const next = await editorApply(command);
-      viewRef.current = next;
-      setView(next);
-      return next.createdId;
-    });
-    queue.current = run.catch(() => undefined);
-    return run.catch((cause: unknown) => {
-      setToast({ id: Date.now(), message: String(cause), failed: true });
-      return undefined;
-    });
-  }, []);
-
-  const undoAction = useCallback(() => {
-    queue.current = queue.current
-      .then(async () => {
-        const next = await editorUndo();
-        viewRef.current = next;
-        setView(next);
-        setEcho(null);
-      })
-      .catch(() => undefined);
-  }, []);
-
-  const redoAction = useCallback(() => {
-    queue.current = queue.current
-      .then(async () => {
-        const next = await editorRedo();
-        viewRef.current = next;
-        setView(next);
-        setEcho(null);
-      })
-      .catch(() => undefined);
-  }, []);
-
-  // ── the gesture echo ─────────────────────────────────────────────────────
-
-  /** Live: merges a patch into the echo for one clip. */
-  const liveClip = useCallback((clipId: string, patch: Partial<Clip>) => {
-    setEcho((current) => ({
-      ...(current ?? {}),
-      [clipId]: { ...(current?.[clipId] ?? {}), ...patch },
-    }));
-  }, []);
-
-  /**
-   * Commit: everything echoed becomes engine commands - one per gesture is
-   * the point, so undo undoes the drag rather than a pixel of it. Multi-clip
-   * moves collapse into a single MoveClips. The echo clears only after the
-   * engine's state arrives, so nothing flashes back mid-flight.
-   */
-  const commitEcho = useCallback(() => {
-    const pending = echoRef.current;
-    const engineProject = viewRef.current?.project;
-    if (!pending || !engineProject) return;
-
-    const active = activeTimeline(engineProject);
-    const commands: EditorCommand[] = [];
-    const moves: { clipId: string; start: number; trackId: string }[] = [];
-
-    for (const [clipId, patch] of Object.entries(pending)) {
-      const base = active.clips.find((clip) => clip.id === clipId);
-      if (!base) continue;
-      for (const command of commandsForEcho(base, patch)) {
-        if (command.op === "moveClips") moves.push(...command.moves);
-        else commands.push(command);
-      }
-    }
-    if (moves.length > 0) commands.push({ op: "moveClips", moves });
-
-    if (commands.length === 0) {
-      setEcho(null);
-      return;
-    }
-    // A gesture that resolves to several commands is still one gesture, so
-    // it lands as one batch: one round trip, one undo step.
-    const command: EditorCommand =
-      commands.length === 1 ? commands[0] : { op: "batch", commands };
-    void dispatch(command).then(() => setEcho(null));
-  }, [dispatch]);
-
-  // ── the session ──────────────────────────────────────────────────────────
-  useEffect(() => {
-    let cancelled = false;
-    editorOpen({
-      path: session.path,
-      name: session.name,
-      width: session.width,
-      height: session.height,
-      rateNum: session.rateNum,
-      rateDen: session.rateDen,
-    })
-      .then((opened) => {
-        if (cancelled) return;
-        viewRef.current = opened;
-        setView(opened);
-        setFrame({ width: opened.settings.width, height: opened.settings.height });
-      })
-      .catch((cause: unknown) => {
-        if (!cancelled) setError(String(cause));
-      });
-    return () => {
-      cancelled = true;
-      void editorClose().catch(() => undefined);
-    };
-  }, [session]);
 
   // A selection can name clips an undo or a command just removed.
   useEffect(() => {
@@ -362,61 +230,6 @@ function Editor({
     // Keyed on the engine state, not the echo - the echo never removes clips.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [view]);
-
-  // Autosave, debounced. The engine writes the document; the UI only says
-  // when, and carries the output frame the preview footer can edit.
-  useEffect(() => {
-    if (!loaded) return;
-    const timer = window.setTimeout(() => {
-      setSaveState("saving");
-      editorSave(latest.current.frame)
-        .then(() => setSaveState("saved"))
-        .catch(() => setSaveState("failed"));
-    }, 1500);
-    return () => clearTimeout(timer);
-  }, [view, frame, loaded]);
-
-  const [toast, setToast] = useState<{ id: number; message: string; failed: boolean } | null>(
-    null,
-  );
-  const saveAndNotify = useCallback(() => {
-    setSaveState("saving");
-    editorSave(latest.current.frame)
-      .then(() => {
-        setSaveState("saved");
-        setToast({ id: Date.now(), message: "Project saved", failed: false });
-      })
-      .catch((cause: unknown) => {
-        setSaveState("failed");
-        setToast({ id: Date.now(), message: `Save failed: ${cause}`, failed: true });
-      });
-  }, []);
-
-  useEffect(() => {
-    if (!toast) return;
-    const timer = window.setTimeout(() => setToast(null), 2200);
-    return () => window.clearTimeout(timer);
-  }, [toast]);
-
-  // Playback failures surface as the toast instead of dying in the dev
-  // console - a mute app must never be a mystery. Identical messages within
-  // a burst (one per clip of a broken import, say) collapse into one.
-  useEffect(() => {
-    if (!isTauri()) return;
-    let unlisten: (() => void) | null = null;
-    let lastMessage = "";
-    let lastAt = 0;
-    void onAudioError((message) => {
-      const now = Date.now();
-      if (message === lastMessage && now - lastAt < 10_000) return;
-      lastMessage = message;
-      lastAt = now;
-      setToast({ id: now, message, failed: true });
-    }).then((stop) => {
-      unlisten = stop;
-    });
-    return () => unlisten?.();
-  }, []);
 
   // Bring back every font the project names, once, when it opens. A font
   // whose file has moved is marked rather than dropped.
@@ -452,7 +265,6 @@ function Editor({
   // The save-as-template sheet: null closed, otherwise whether the host is
   // packing the bundle right now.
   const [templateDialog, setTemplateDialog] = useState<null | { busy: boolean }>(null);
-  const [transcribing, setTranscribing] = useState(false);
 
   useEffect(() => {
     engineVersion()
@@ -563,42 +375,12 @@ function Editor({
   }, [importPaths]);
 
   // ── audio playback ───────────────────────────────────────────────────────
-  const audibleClips = useMemo(
-    () =>
-      timeline.clips.flatMap((clip) => {
-        if (clip.kind !== "audio" && clip.kind !== "video") return [];
-        if (clip.kind === "video" && clip.muted) return [];
-        const track = findTrack(project, clip.trackId);
-        if (!track || track.muted) return [];
-        const media = findMedia(project, clip.mediaId);
-        if (!media || !media.hasAudio) return [];
-        return [
-          {
-            path: media.path,
-            start: clip.start,
-            duration: clip.duration,
-            sourceStart: clip.sourceStart,
-            volume: clip.volume,
-            fadeIn: clip.fadeIn,
-            fadeOut: clip.fadeOut,
-            speed: clip.speed,
-            preservePitch: clip.preservePitch,
-            chain: buildChain(clip.filters) ?? "",
-          },
-        ];
-      }),
-    [project, timeline],
-  );
-
-  useEffect(() => {
-    if (!isTauri()) return;
-    const timer = window.setTimeout(() => {
-      void audioSetClips(session.path, audibleClips).catch(
-        (cause: unknown) => console.error("WolfCut: could not update the mix", cause),
-      );
-    }, 150);
-    return () => window.clearTimeout(timer);
-  }, [audibleClips, session.path]);
+  usePlaybackBridge({
+    project,
+    timeline,
+    projectPath: session.path,
+    onError: useCallback((message: string) => pushToast(message, true), [pushToast]),
+  });
 
   // ── text, effects, transitions ───────────────────────────────────────────
 
@@ -702,64 +484,11 @@ function Editor({
     [selectedClipIds, dispatch],
   );
 
-  /**
-   * Transcribes one clip's audio and lays the result out as text clips on a
-   * "Captions" track (created on first use, reused after).
-   */
-  const autoCaption = useCallback(
-    async (clip: Clip, media: MediaItem) => {
-      setTranscribing(true);
-      setToast({ id: Date.now(), message: "Transcribing...", failed: false });
-      try {
-        const segments = await transcribeClip({
-          path: media.path,
-          sourceStart: clip.sourceStart,
-          window: clip.duration * clip.speed,
-          language: getTranscriberLanguage(),
-          modelId: getTranscriberModel(),
-        });
-        if (segments.length === 0) {
-          setToast({ id: Date.now(), message: "No speech found", failed: false });
-          return;
-        }
-
-        let trackId = activeTimeline(latest.current.project).tracks.find(
-          (track) => track.name === "Captions",
-        )?.id;
-        if (!trackId) {
-          trackId = await dispatch({ op: "addTrack" });
-          if (!trackId) return;
-          await dispatch({ op: "renameTrack", trackId, name: "Captions" });
-        }
-
-        // One batch, one undo: "undo the captions" must not mean sixty
-        // presses. Each caption carries its own length and placement, so no
-        // per-clip follow-up commands are needed.
-        await dispatch({
-          op: "batch",
-          commands: segments.map((segment) => ({
-            op: "addTextClip",
-            trackId,
-            start: clip.start + segment.start / clip.speed,
-            duration: Math.max(0.4, (segment.end - segment.start) / clip.speed),
-            offsetY: 0.38,
-            // Caption-sized and lower-third, not title-sized and centred.
-            style: { ...defaultTextStyle(), content: segment.text, fontSize: 0.045 },
-          })),
-        });
-        setToast({
-          id: Date.now(),
-          message: `Added ${segments.length} caption${segments.length === 1 ? "" : "s"}`,
-          failed: false,
-        });
-      } catch (cause) {
-        setToast({ id: Date.now(), message: String(cause), failed: true });
-      } finally {
-        setTranscribing(false);
-      }
-    },
-    [dispatch],
-  );
+  const { autoCaption, transcribing } = useCaptions({
+    dispatch,
+    getProject: useCallback(() => latest.current.project, []),
+    onToast: pushToast,
+  });
 
   /** The audio/video tools dropdown. Hidden entirely for soundless clips. */
   const clipTools = useMemo<MenuOption[][]>(() => {
@@ -1114,117 +843,18 @@ function Editor({
     [project, timeline],
   );
 
-  /**
-   * The engine's true frame for the paused monitor: the exporter's own plan,
-   * compositor and effect chains, via the host's reader pool. Fetched when
-   * the playhead settles; cleared the moment it moves again, so scrubbing
-   * shows the live approximation and dwelling shows the truth.
-   */
-  const [engineStill, setEngineStill] = useState<{
-    bytes: ArrayBuffer;
-    width: number;
-    height: number;
-  } | null>(null);
-  const stillToken = useRef(0);
-  useEffect(() => {
-    // While playing, the streaming loop below owns the still; clearing it
-    // here on every playhead tick would fight the stream frame by frame.
-    if (playing) return;
-    const token = ++stillToken.current;
-    setEngineStill(null);
-    if (!loaded || exportClips.length === 0) return;
-
-    const timer = window.setTimeout(() => {
-      // Preview resolution: the frame's aspect, capped for IPC weight. Even
-      // dimensions, because decoders round odd ones themselves.
-      const cap = 960;
-      const scale = Math.min(1, cap / Math.max(frame.width, frame.height));
-      const width = Math.max(2, Math.round((frame.width * scale) / 2) * 2);
-      const height = Math.max(2, Math.round((frame.height * scale) / 2) * 2);
-      previewFrame({
-        time: latest.current.playhead,
-        width,
-        height,
-        rateNum: session.rateNum,
-        rateDen: session.rateDen,
-        clips: exportClips,
-      })
-        .then((bytes) => {
-          if (stillToken.current === token) setEngineStill({ bytes, width, height });
-        })
-        .catch(() => {
-          if (stillToken.current === token) setEngineStill(null);
-        });
-    }, 160);
-    return () => window.clearTimeout(timer);
-  }, [playing, loaded, playhead, exportClips, frame, session.rateNum, session.rateDen]);
-
-  /**
-   * Streaming truth: while playing, present the engine's real composite
-   * against the transport clock wherever the element preview is wrong.
-   *
-   * The DOM approximation is exact for a single visible layer and cannot
-   * composite a stack, so the loop engages only while two or more visual
-   * layers sit under the playhead - single-clip stretches keep the smooth
-   * element playback. Pull, not push: request the frame at the transport's
-   * current position, present it, request the next the moment it lands. The
-   * loop runs at whatever rate the machine sustains and can never queue
-   * stale frames; the pool's warm readers make consecutive requests rolls,
-   * not seeks. This is the presentation half of engine decision 0002 /
-   * desktop decision 0007 - see desktop decision 0009 for the shape and its
-   * exit (a native surface replaces the transport, not this seam).
-   */
-  const exportClipsRef = useRef(exportClips);
-  exportClipsRef.current = exportClips;
-  useEffect(() => {
-    if (!playing || !loaded) return;
-    let live = true;
-    // Invalidate any paused-dwell fetch still in flight from before play.
-    stillToken.current += 1;
-    // Rate beats resolution while the picture moves; the paused dwell
-    // re-fetches at the full 960 cap the moment the transport stops.
-    const cap = 640;
-    const wait = (ms: number) => new Promise((resolve) => window.setTimeout(resolve, ms));
-    const visualLayers = (time: number) =>
-      clipsAt(latest.current.project, time).filter(
-        (clip) => clip.kind === "video" || clip.kind === "image",
-      ).length;
-
-    const run = async () => {
-      while (live) {
-        const time = latest.current.playhead;
-        if (visualLayers(time) < 2) {
-          setEngineStill(null);
-          await wait(120);
-          continue;
-        }
-        const view = latest.current.frame;
-        const scale = Math.min(1, cap / Math.max(view.width, view.height));
-        const width = Math.max(2, Math.round((view.width * scale) / 2) * 2);
-        const height = Math.max(2, Math.round((view.height * scale) / 2) * 2);
-        try {
-          const bytes = await previewFrame({
-            time,
-            width,
-            height,
-            rateNum: session.rateNum,
-            rateDen: session.rateDen,
-            clips: exportClipsRef.current,
-          });
-          if (live) setEngineStill({ bytes, width, height });
-        } catch {
-          // A failed frame keeps the approximation on screen; back off so a
-          // persistently failing source cannot spin the pool.
-          if (live) setEngineStill(null);
-          await wait(200);
-        }
-      }
-    };
-    void run();
-    return () => {
-      live = false;
-    };
-  }, [playing, loaded, session.rateNum, session.rateDen]);
+  // The engine's true frames: paused dwell + playback stream. See
+  // useEngineTruth and desktop decision 0009.
+  const engineStill = useEngineTruth({
+    playing,
+    loaded,
+    playhead,
+    exportClips,
+    frame,
+    rateNum: session.rateNum,
+    rateDen: session.rateDen,
+    latest,
+  });
 
   const selectedClip =
     selectedClipIds.length === 1 ? findClip(project, selectedClipIds[0]) : null;
