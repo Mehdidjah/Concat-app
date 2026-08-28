@@ -1185,6 +1185,7 @@ function Editor({
                 : null,
             mediaWidth: media.width,
             mediaHeight: media.height,
+            hasAudio: media.hasAudio,
           },
         ];
       }),

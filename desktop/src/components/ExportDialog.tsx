@@ -46,6 +46,8 @@ function overlayClip(title: ExportTitle, path: string): ExportClip {
   return {
     path,
     kind: "image",
+    // A rasterised PNG has no sound; saying so spares the exporter a probe.
+    hasAudio: false,
     start: title.start,
     duration: title.duration,
     sourceStart: 0,

@@ -26,13 +26,29 @@ use relay_render::{Compositor, CpuCompositor, Layer, Placement, WgpuCompositor, 
 use serde::{Deserialize, Serialize};
 use tauri::Emitter;
 
+/// What a flattened clip is. Typed, so a kind check the compiler has not
+/// seen cannot exist - the wire still says "video"/"audio"/"image".
+#[derive(Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ClipKind {
+    Video,
+    Audio,
+    Image,
+}
+
+impl ClipKind {
+    /// True for the kinds that put pixels on screen.
+    fn is_visual(self) -> bool {
+        matches!(self, ClipKind::Video | ClipKind::Image)
+    }
+}
+
 /// One clip, as the UI describes it.
 #[derive(Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct ExportClip {
     pub path: String,
-    /// "video" or "audio".
-    pub kind: String,
+    pub kind: ClipKind,
     pub start: f64,
     pub duration: f64,
     pub source_start: f64,
@@ -94,6 +110,11 @@ pub struct ExportClip {
     pub media_width: Option<u32>,
     #[serde(default)]
     pub media_height: Option<u32>,
+    /// Whether the file carries an audio stream, when the UI knows (the
+    /// document records it at import). Absent falls back to probing, so an
+    /// older caller still exports correctly - just slower to start.
+    #[serde(default)]
+    pub has_audio: Option<bool>,
 }
 
 /// A transition on the cut into a clip.
@@ -198,7 +219,7 @@ fn resolve_transitions(clips: &mut [ExportClip], rate: FrameRate, bake_fades: bo
     let mut cuts: Vec<Cut> = Vec::new();
     for (incoming, clip) in clips.iter().enumerate() {
         let Some(transition) = &clip.transition else { continue };
-        if clip.hidden || (clip.kind != "video" && clip.kind != "image") {
+        if clip.hidden || !clip.kind.is_visual() {
             continue;
         }
         // The outgoing clip is whatever ends where this one starts, on the
@@ -206,7 +227,7 @@ fn resolve_transitions(clips: &mut [ExportClip], rate: FrameRate, bake_fades: bo
         // transition is silently orphaned, exactly like the UI treats it.
         let outgoing = clips.iter().position(|other| {
             !other.hidden
-                && (other.kind == "video" || other.kind == "image")
+                && other.kind.is_visual()
                 && other.track == clip.track
                 && (other.start + other.duration - clip.start).abs() < frame / 2.0
         });
@@ -236,7 +257,7 @@ fn resolve_transitions(clips: &mut [ExportClip], rate: FrameRate, bake_fades: bo
                 // handle, shorter dissolve: the duration clamps to what
                 // actually exists rather than freezing or inventing frames.
                 let mut d = cut.duration.min(a_duration).min(b.duration);
-                if b.kind != "image" {
+                if b.kind != ClipKind::Image {
                     d = d.min(b.source_start / b.speed.max(0.0625));
                 }
                 if d < frame {
@@ -244,7 +265,7 @@ fn resolve_transitions(clips: &mut [ExportClip], rate: FrameRate, bake_fades: bo
                 }
                 b.start -= d;
                 b.duration += d;
-                if b.kind != "image" {
+                if b.kind != ClipKind::Image {
                     b.source_start -= d * b.speed;
                 }
                 b.video_fade_in = d;
@@ -317,11 +338,11 @@ pub fn render(request: &ExportRequest, mut reporter: Reporter<'_>) -> Result<Str
     // decoded, which is handled where the decoder is opened.
     let visible: Vec<&ExportClip> = resolved
         .iter()
-        .filter(|clip| (clip.kind == "video" || clip.kind == "image") && !clip.hidden)
+        .filter(|clip| clip.kind.is_visual() && !clip.hidden)
         .collect();
     let audible: Vec<&ExportClip> = resolved
         .iter()
-        .filter(|clip| clip.kind == "audio" && !clip.muted)
+        .filter(|clip| clip.kind == ClipKind::Audio && !clip.muted)
         .collect();
 
     // A video clip carries its own sound, so an unmuted video track
@@ -330,17 +351,21 @@ pub fn render(request: &ExportRequest, mut reporter: Reporter<'_>) -> Result<Str
     sound.extend(
         resolved
             .iter()
-            .filter(|clip| clip.kind == "video" && !clip.muted),
+            .filter(|clip| clip.kind == ClipKind::Video && !clip.muted),
     );
 
     // An unmuted clip can still have no audio stream - a screen recording, a
     // silent render. FFmpeg refuses a filtergraph that names `[N:a]` on such
     // an input rather than treating it as silence, so membership in the mix
-    // is decided by probing the file, not by the clip's kind.
-    let mut has_audio: HashMap<&str, bool> = HashMap::new();
+    // needs the file's truth. The document learnt it at import and the UI
+    // sends it along; a request that omits it falls back to probing, once
+    // per unique path.
+    let mut probed: HashMap<&str, bool> = HashMap::new();
     sound.retain(|clip| {
-        *has_audio.entry(clip.path.as_str()).or_insert_with(|| {
-            relay_media::probe(&clip.path).is_ok_and(|info| info.audio.is_some())
+        clip.has_audio.unwrap_or_else(|| {
+            *probed.entry(clip.path.as_str()).or_insert_with(|| {
+                relay_media::probe(&clip.path).is_ok_and(|info| info.audio.is_some())
+            })
         })
     });
 
@@ -401,6 +426,36 @@ fn audio_clip(clip: &ExportClip) -> AudioClip {
     }
 }
 
+/// The fraction-to-pixel placement of one composited layer: fitted and
+/// centred is the base, the clip's transform moves it from there. The one
+/// definition the exporter and the preview share - these two paths must
+/// never place a picture differently, or the paused truth lies about the
+/// file.
+fn place_layer<'a>(
+    frame: &'a Frame,
+    opacity: f32,
+    transform: &Transform,
+    width: u32,
+    height: u32,
+) -> Layer<'a> {
+    let x = (i64::from(width) - i64::from(frame.width())) / 2;
+    let y = (i64::from(height) - i64::from(frame.height())) / 2;
+    let placement = if transform.is_identity() {
+        Placement::IDENTITY
+    } else {
+        Placement {
+            scale: transform.scale as f32,
+            rotation: transform.rotation.to_radians() as f32,
+            translate_x: (transform.offset_x * f64::from(width)) as f32,
+            translate_y: (transform.offset_y * f64::from(height)) as f32,
+        }
+    };
+    Layer::new(frame)
+        .at(x as i32, y as i32)
+        .with_opacity(opacity)
+        .with_placement(placement)
+}
+
 /// The best compositor this machine offers: the GPU when it has one, the CPU
 /// reference otherwise. Never an error - a machine with no adapter renders
 /// slower, not not-at-all.
@@ -420,7 +475,8 @@ fn render_picture(
     destination: &Path,
     reporter: &mut Reporter<'_>,
 ) -> Result<(), String> {
-    let (timeline, stills, decode_sizes, filter_chains) = build_timeline(request, rate, visible);
+    let BuiltTimeline { timeline, stills, decode_sizes, filter_chains } =
+        build_timeline(request, rate, visible);
 
     let mut encoder = FfmpegEncoder::create(
         destination,
@@ -510,25 +566,7 @@ fn render_picture(
         let layers: Vec<Layer<'_>> = sources
             .iter()
             .map(|(frame, opacity, transform)| {
-                // Fitted and centred is the base; the clip's transform moves
-                // it from there. The fraction-to-pixel conversion happens
-                // here and nowhere else.
-                let x = (i64::from(request.width) - i64::from(frame.width())) / 2;
-                let y = (i64::from(request.height) - i64::from(frame.height())) / 2;
-                let placement = if transform.is_identity() {
-                    Placement::IDENTITY
-                } else {
-                    Placement {
-                        scale: transform.scale as f32,
-                        rotation: transform.rotation.to_radians() as f32,
-                        translate_x: (transform.offset_x * f64::from(request.width)) as f32,
-                        translate_y: (transform.offset_y * f64::from(request.height)) as f32,
-                    }
-                };
-                Layer::new(frame)
-                    .at(x as i32, y as i32)
-                    .with_opacity(*opacity)
-                    .with_placement(placement)
+                place_layer(frame, *opacity, transform, request.width, request.height)
             })
             .collect();
 
@@ -548,20 +586,20 @@ fn render_picture(
     encoder.finish().map_err(|error| error.to_string())
 }
 
+/// An engine timeline plus the per-clip facts the decoders need that the
+/// engine's model has no field for.
+struct BuiltTimeline {
+    timeline: Timeline,
+    /// Clips that are stills: one-frame streams, decoded looping.
+    stills: std::collections::HashSet<ClipId>,
+    /// Contain-fitted decode size per clip, where the source's size is known.
+    decode_sizes: HashMap<ClipId, (u32, u32)>,
+    /// The clip's effect chain, where it has one.
+    filter_chains: HashMap<ClipId, String>,
+}
+
 /// Converts the UI's flat clip list into an engine timeline.
-///
-/// Also returns which clips are stills, because that is knowledge the engine's
-/// timeline has no field for and the decoder needs.
-fn build_timeline(
-    request: &ExportRequest,
-    rate: FrameRate,
-    visible: &[&ExportClip],
-) -> (
-    Timeline,
-    std::collections::HashSet<ClipId>,
-    HashMap<ClipId, (u32, u32)>,
-    HashMap<ClipId, String>,
-) {
+fn build_timeline(request: &ExportRequest, rate: FrameRate, visible: &[&ExportClip]) -> BuiltTimeline {
     let mut timeline = Timeline::new(request.width, request.height, rate);
     let mut stills = std::collections::HashSet::new();
     let mut decode_sizes: HashMap<ClipId, (u32, u32)> = HashMap::new();
@@ -586,7 +624,7 @@ fn build_timeline(
         engine_clip.source_start = quantise(clip.source_start, rate);
         // The same clamp the audio path applies, so a 2x clip means the same
         // thing to picture and sound. A still has no meaningful rate.
-        if clip.kind != "image" {
+        if clip.kind != ClipKind::Image {
             engine_clip.speed = Rational::approximate(audio::clamp_speed(clip.speed))
                 .unwrap_or(Rational::ONE);
         }
@@ -602,7 +640,7 @@ fn build_timeline(
         engine_clip.video_fade_in = quantise(clip.video_fade_in, rate);
 
         if let Some(id) = timeline.add_clip(tracks[clip.track], engine_clip) {
-            if clip.kind == "image" {
+            if clip.kind == ClipKind::Image {
                 stills.insert(id);
             }
             if let Some(size) = fitted_size(request, clip) {
@@ -614,7 +652,7 @@ fn build_timeline(
         }
     }
 
-    (timeline, stills, decode_sizes, filter_chains)
+    BuiltTimeline { timeline, stills, decode_sizes, filter_chains }
 }
 
 /// The source's contain-fitted size inside the output frame, or `None` when
@@ -668,7 +706,7 @@ pub fn preview_frame(
     resolve_transitions(&mut resolved, rate, false);
     let visible: Vec<&ExportClip> = resolved
         .iter()
-        .filter(|clip| (clip.kind == "video" || clip.kind == "image") && !clip.hidden)
+        .filter(|clip| clip.kind.is_visual() && !clip.hidden)
         .collect();
 
     // build_timeline reads only the output format off the request; the shim
@@ -683,7 +721,8 @@ pub fn preview_frame(
         preset: String::new(),
         clips: Vec::new(),
     };
-    let (timeline, stills, decode_sizes, filter_chains) = build_timeline(&shim, rate, &visible);
+    let BuiltTimeline { timeline, stills, decode_sizes, filter_chains } =
+        build_timeline(&shim, rate, &visible);
     let plan = plan_frame(&timeline, quantise(request.time, rate));
 
     let mut sources: Vec<(std::sync::Arc<Frame>, f32, Transform)> =
@@ -721,26 +760,11 @@ pub fn preview_frame(
         ));
     }
 
-    // The same fraction-to-pixel placement the exporter applies.
+    // The exporter's own placement, by construction: same function.
     let layers: Vec<Layer<'_>> = sources
         .iter()
         .map(|(frame, opacity, transform)| {
-            let x = (i64::from(request.width) - i64::from(frame.width())) / 2;
-            let y = (i64::from(request.height) - i64::from(frame.height())) / 2;
-            let placement = if transform.is_identity() {
-                Placement::IDENTITY
-            } else {
-                Placement {
-                    scale: transform.scale as f32,
-                    rotation: transform.rotation.to_radians() as f32,
-                    translate_x: (transform.offset_x * f64::from(request.width)) as f32,
-                    translate_y: (transform.offset_y * f64::from(request.height)) as f32,
-                }
-            };
-            Layer::new(frame)
-                .at(x as i32, y as i32)
-                .with_opacity(*opacity)
-                .with_placement(placement)
+            place_layer(frame.as_ref(), *opacity, transform, request.width, request.height)
         })
         .collect();
 
@@ -757,7 +781,11 @@ mod tests {
     fn clip(kind: &str, track: usize, start: f64, duration: f64, source_start: f64) -> ExportClip {
         ExportClip {
             path: format!("{kind}.mp4"),
-            kind: kind.to_owned(),
+            kind: match kind {
+                "audio" => ClipKind::Audio,
+                "image" => ClipKind::Image,
+                _ => ClipKind::Video,
+            },
             start,
             duration,
             source_start,
@@ -780,6 +808,7 @@ mod tests {
             video_fade_in: 0.0,
             media_width: None,
             media_height: None,
+            has_audio: None,
         }
     }
 

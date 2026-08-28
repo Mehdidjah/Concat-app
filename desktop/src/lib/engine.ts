@@ -357,6 +357,9 @@ export interface ExportClip {
   /** The source's pixel size, when known - what makes an aspect-correct fit possible. */
   mediaWidth: number | null;
   mediaHeight: number | null;
+  /** Whether the file carries an audio stream - the document knows from
+   * import, and sending it saves the exporter a probe per file. */
+  hasAudio: boolean;
 }
 
 export interface ExportRequest {
