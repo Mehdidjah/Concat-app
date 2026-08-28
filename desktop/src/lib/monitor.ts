@@ -8,8 +8,6 @@
  * these; nothing else derives them a second way.
  */
 
-import { buildEffectChain } from "./effects";
-import { buildChain } from "./filters";
 import {
   clipsAt,
   findMedia,
@@ -18,7 +16,6 @@ import {
   type EditorProject,
   type TimelineData,
 } from "./editor";
-import type { ExportClip } from "./engine";
 import type { TextStyle } from "./text";
 
 /** The clip the element preview shows: top-most visual clip at the playhead. */
@@ -174,49 +171,6 @@ export function previewVeilAt(
     };
   }
   return null;
-}
-
-/** The active timeline flattened for the exporter. Text clips are excluded;
- * they rasterise separately and rejoin as image clips. */
-export function exportClipsOf(project: EditorProject, timeline: TimelineData): ExportClip[] {
-  return timeline.clips.flatMap((clip) => {
-    if (clip.kind === "text") return [];
-    const media = findMedia(project, clip.mediaId);
-    const track = findTrack(project, clip.trackId);
-    const index = timeline.tracks.findIndex((candidate) => candidate.id === clip.trackId);
-    if (!media || !track || index < 0) return [];
-    return [
-      {
-        path: media.path,
-        kind: clip.kind as "video" | "audio" | "image",
-        start: clip.start,
-        duration: clip.duration,
-        sourceStart: clip.sourceStart,
-        track: index,
-        hidden: !track.visible,
-        muted: track.muted || clip.muted === true,
-        volume: clip.volume,
-        fadeIn: clip.fadeIn,
-        fadeOut: clip.fadeOut,
-        filterChain: buildChain(clip.filters) ?? "",
-        speed: clip.speed,
-        preservePitch: clip.preservePitch,
-        scale: clip.scale,
-        offsetX: clip.offsetX,
-        offsetY: clip.offsetY,
-        rotation: clip.rotation,
-        opacity: clip.opacity,
-        videoFilterChain: buildEffectChain(clip.videoEffects) ?? "",
-        transition:
-          clip.transitionIn && precedingClip(project, clip.id)
-            ? { kind: clip.transitionIn.id, duration: clip.transitionIn.duration }
-            : null,
-        mediaWidth: media.width,
-        mediaHeight: media.height,
-        hasAudio: media.hasAudio,
-      },
-    ];
-  });
 }
 
 /** The active timeline's titles, flattened for rasterisation at export. */

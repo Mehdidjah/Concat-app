@@ -11,7 +11,6 @@ import { describe, expect, test } from "vitest";
 
 import type { Clip, EditorProject } from "./editor";
 import {
-  exportClipsOf,
   previewGhostAt,
   previewSourceAt,
   previewVeilAt,
@@ -166,23 +165,6 @@ describe("previewVeilAt", () => {
     expect(previewVeilAt(p, timeline(p), 4)?.opacity).toBe(1);
     expect(previewVeilAt(p, timeline(p), 4.5)?.opacity).toBeCloseTo(0.5, 10);
     expect(previewVeilAt(p, timeline(p), 5.1)).toBeNull();
-  });
-});
-
-describe("exportClipsOf", () => {
-  test("flattens with track state, chains and audio knowledge", () => {
-    const p = project([
-      clip({ id: "a" }),
-      clip({ id: "text", kind: "text", text: undefined }),
-    ]);
-    p.timelines[0].tracks[0].muted = true;
-
-    const flat = exportClipsOf(p, timeline(p));
-    expect(flat).toHaveLength(1);
-    expect(flat[0].muted).toBe(true);
-    expect(flat[0].hasAudio).toBe(true);
-    expect(flat[0].track).toBe(0);
-    expect(flat[0].transition).toBeNull();
   });
 });
 

@@ -557,6 +557,20 @@ struct ExportState(std::sync::Arc<jobs::SingleFlight>);
 /// app's lifetime: its whole value is what stays warm between scrubs.
 struct PoolState(std::sync::Arc<std::sync::Mutex<wolfcut_media::ReaderPool>>);
 
+/// What the UI sends for one true frame: an instant and a resolution. The
+/// clips come from the engine's own session - the UI no longer serialises
+/// its whole clip list per scrub frame (see engine decision 0009).
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PreviewSpec {
+    /// The timeline instant to composite, in seconds.
+    time: f64,
+    /// Preview frame width in pixels.
+    width: u32,
+    /// Preview frame height in pixels.
+    height: u32,
+}
+
 /// The engine-composited frame at one instant, as raw RGBA bytes.
 ///
 /// Serialised through the pool's mutex on a blocking thread: one scrub at a
@@ -565,8 +579,18 @@ struct PoolState(std::sync::Arc<std::sync::Mutex<wolfcut_media::ReaderPool>>);
 #[tauri::command]
 async fn preview_frame(
     state: tauri::State<'_, PoolState>,
-    request: export::PreviewFrameRequest,
+    editor: tauri::State<'_, editor_api::EditorState>,
+    request: PreviewSpec,
 ) -> Result<tauri::ipc::Response, String> {
+    let (clips, settings) = editor_api::flattened_clips(&editor)?;
+    let request = export::PreviewFrameRequest {
+        time: request.time,
+        width: request.width,
+        height: request.height,
+        rate_num: settings.rate_num,
+        rate_den: settings.rate_den,
+        clips,
+    };
     let pool = std::sync::Arc::clone(&state.0);
     tauri::async_runtime::spawn_blocking(move || {
         let mut pool = pool.lock().map_err(|_| "reader pool poisoned".to_owned())?;
@@ -585,12 +609,44 @@ async fn preview_frame(
 /// Runs on a blocking thread and reports progress through the
 /// `export://progress` event, because a two-minute export must not freeze the
 /// window and gives the UI nothing to show if it says nothing until it is done.
+/// What the UI sends to start an export: the destination, the quality, and
+/// its rasterised titles rejoining as image clips. The timeline itself is
+/// deliberately absent - the engine flattens its own session, so the pixels
+/// rendered are the model's, never a frontend's copy of it.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ExportSpec {
+    /// The file to write.
+    output: String,
+    /// Constant rate factor; lower is better quality and a bigger file.
+    crf: u8,
+    /// The x264 speed/size preset name, e.g. "medium".
+    preset: String,
+    /// Rasterised text clips - fonts and layout live in the webview, so
+    /// titles arrive as images the flattener cannot produce itself.
+    #[serde(default)]
+    titles: Vec<export::ExportClip>,
+}
+
 #[tauri::command]
 async fn export_project(
     app: tauri::AppHandle,
     state: tauri::State<'_, ExportState>,
-    request: export::ExportRequest,
+    editor: tauri::State<'_, editor_api::EditorState>,
+    request: ExportSpec,
 ) -> Result<String, String> {
+    let (mut clips, settings) = editor_api::flattened_clips(&editor)?;
+    clips.extend(request.titles);
+    let request = export::ExportRequest {
+        output: request.output,
+        width: settings.width,
+        height: settings.height,
+        rate_num: settings.rate_num,
+        rate_den: settings.rate_den,
+        crf: request.crf,
+        preset: request.preset,
+        clips,
+    };
     let job = state.0.begin("export")?;
     tauri::async_runtime::spawn_blocking(move || export::run(&app, request, job.cancel_flag()))
         .await

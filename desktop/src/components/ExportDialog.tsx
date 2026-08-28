@@ -84,7 +84,7 @@ export function ExportDialog({
   rateNum,
   rateDen,
   duration,
-  clips,
+  clipCount,
   titles,
   onClose,
 }: {
@@ -95,7 +95,10 @@ export function ExportDialog({
   rateNum: number;
   rateDen: number;
   duration: number;
-  clips: ExportClip[];
+  /** Non-text clips on the active timeline. The engine flattens the clips
+   * itself (engine decision 0009); the dialog only needs to know whether
+   * there is anything to export and how to describe it. */
+  clipCount: number;
   titles: ExportTitle[];
   onClose: () => void;
 }) {
@@ -111,7 +114,7 @@ export function ExportDialog({
   }, []);
 
   const running = phase.kind === "running";
-  const empty = clips.length === 0 && titles.length === 0;
+  const empty = clipCount === 0 && titles.length === 0;
 
   const browse = async () => {
     const chosen = await save({
@@ -153,13 +156,9 @@ export function ExportDialog({
 
       const path = await exportProject({
         output,
-        width,
-        height,
-        rateNum,
-        rateDen,
         crf: quality.crf,
         preset: quality.preset,
-        clips: [...clips, ...overlays],
+        titles: overlays,
       });
       setPhase({ kind: "done", path });
     } catch (cause) {
@@ -225,7 +224,7 @@ export function ExportDialog({
           <Row
             label="Contents"
             value={
-              `${clips.length} clip${clips.length === 1 ? "" : "s"}` +
+              `${clipCount} clip${clipCount === 1 ? "" : "s"}` +
               (titles.length > 0 ? ` · ${titles.length} title${titles.length === 1 ? "" : "s"}` : "")
             }
           />

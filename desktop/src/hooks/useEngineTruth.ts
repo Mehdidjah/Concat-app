@@ -8,11 +8,16 @@
  * frames continuously at up to 640px - request at the transport's position,
  * present, request the next when it lands (desktop decision 0009). Single
  * layers keep the smooth element preview.
+ *
+ * The request carries an instant and a resolution, nothing else: the engine
+ * flattens its own session (engine decision 0009). The UI used to serialise
+ * its whole flattened clip list into every one of these requests - per
+ * scrub, per streamed frame.
  */
 import { useEffect, useRef, useState } from "react";
 
 import { clipsAt, type EditorProject } from "../lib/editor";
-import { previewFrame, type ExportClip } from "../lib/engine";
+import { previewFrame } from "../lib/engine";
 
 export interface EngineStill {
   bytes: ArrayBuffer;
@@ -33,26 +38,24 @@ export function useEngineTruth({
   playing,
   loaded,
   playhead,
-  exportClips,
+  project,
+  renderableClipCount,
   frame,
-  rateNum,
-  rateDen,
   latest,
 }: {
   playing: boolean;
   loaded: boolean;
   playhead: number;
-  exportClips: ExportClip[];
+  /** The engine's state; a new identity per edit refreshes the paused still. */
+  project: EditorProject;
+  /** Non-text clips on the active timeline - zero means nothing to composite. */
+  renderableClipCount: number;
   frame: { width: number; height: number };
-  rateNum: number;
-  rateDen: number;
   /** Live values, read mid-flight without restarting the loops. */
   latest: { current: { playhead: number; frame: { width: number; height: number }; project: EditorProject } };
 }): EngineStill | null {
   const [engineStill, setEngineStill] = useState<EngineStill | null>(null);
   const stillToken = useRef(0);
-  const exportClipsRef = useRef(exportClips);
-  exportClipsRef.current = exportClips;
 
   // The paused dwell.
   useEffect(() => {
@@ -61,18 +64,11 @@ export function useEngineTruth({
     if (playing) return;
     const token = ++stillToken.current;
     setEngineStill(null);
-    if (!loaded || exportClips.length === 0) return;
+    if (!loaded || renderableClipCount === 0) return;
 
     const timer = window.setTimeout(() => {
       const { width, height } = capped(frame, 960);
-      previewFrame({
-        time: latest.current.playhead,
-        width,
-        height,
-        rateNum,
-        rateDen,
-        clips: exportClips,
-      })
+      previewFrame({ time: latest.current.playhead, width, height })
         .then((bytes) => {
           if (stillToken.current === token) setEngineStill({ bytes, width, height });
         })
@@ -81,8 +77,9 @@ export function useEngineTruth({
         });
     }, 160);
     return () => window.clearTimeout(timer);
+    // `project` is the refresh signal: an edit while paused must re-fetch.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [playing, loaded, playhead, exportClips, frame, rateNum, rateDen]);
+  }, [playing, loaded, playhead, project, renderableClipCount, frame]);
 
   // The playback stream. Pull, not push: one request in flight, never a
   // queue of stale frames; the pool's warm readers make consecutive
@@ -108,14 +105,7 @@ export function useEngineTruth({
         }
         const { width, height } = capped(latest.current.frame, 640);
         try {
-          const bytes = await previewFrame({
-            time,
-            width,
-            height,
-            rateNum,
-            rateDen,
-            clips: exportClipsRef.current,
-          });
+          const bytes = await previewFrame({ time, width, height });
           if (live) setEngineStill({ bytes, width, height });
         } catch {
           // A failed frame keeps the approximation on screen; back off so a
@@ -129,8 +119,7 @@ export function useEngineTruth({
     return () => {
       live = false;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [playing, loaded, rateNum, rateDen]);
+  }, [playing, loaded, latest]);
 
   return engineStill;
 }

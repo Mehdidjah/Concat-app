@@ -70,6 +70,25 @@ fn view(session: &Session, created_id: Option<String>) -> EditorView {
     }
 }
 
+/// The active timeline flattened for rendering, plus the session settings.
+///
+/// This is what export and preview consume. It used to be a clip list the
+/// UI flattened and sent over the wire, which made the frontend's copy of
+/// the model - not the model - the thing that rendered; see engine decision
+/// 0009. Now the engine flattens its own session and the wire carries only
+/// what the UI genuinely owns (the destination, the quality, its rasterised
+/// titles).
+pub fn flattened_clips(
+    state: &EditorState,
+) -> Result<(Vec<wolfcut_export::ExportClip>, DocumentSettings), String> {
+    with_session(state, |session| {
+        Ok((
+            wolfcut_export::flatten::flatten_timeline(session.editor.project(), None),
+            session.settings.clone(),
+        ))
+    })
+}
+
 /// The open session's document, project folder and settings, for features
 /// that package the current edit (saving it as a template) rather than
 /// editing it.

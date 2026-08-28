@@ -13,7 +13,6 @@ import type { MenuOption } from "./components/Menu";
 import { ModifyProjectDialog } from "./components/ModifyProjectDialog";
 import { Preview } from "./components/Preview";
 import {
-  exportClipsOf,
   exportTitlesOf,
   previewGhostAt,
   previewSourceAt,
@@ -54,7 +53,6 @@ import {
   probeMedia,
   readMediaBytes,
   templateSave,
-  type ExportClip,
   type TemplateInfo,
 } from "./lib/engine";
 import { findTransition } from "./lib/effects";
@@ -941,10 +939,12 @@ function Editor({
     [project, timeline, playhead],
   );
 
-  // The exporter works from a flat list of the active timeline's clips.
-  const exportClips = useMemo<ExportClip[]>(
-    () => exportClipsOf(project, timeline),
-    [project, timeline],
+  // The exporter flattens the engine's own session (decision 0009); the UI
+  // only counts renderable clips to know whether there is anything to show,
+  // and rasterises its titles.
+  const renderableClipCount = useMemo(
+    () => timeline.clips.filter((clip) => clip.kind !== "text").length,
+    [timeline],
   );
 
   const exportTitles = useMemo<ExportTitle[]>(
@@ -958,10 +958,9 @@ function Editor({
     playing,
     loaded,
     playhead,
-    exportClips,
+    project,
+    renderableClipCount,
     frame,
-    rateNum: session.rateNum,
-    rateDen: session.rateDen,
     latest,
   });
 
@@ -1024,7 +1023,7 @@ function Editor({
             {
               label: "Export...",
               icon: "export",
-              disabled: exportClips.length === 0,
+              disabled: renderableClipCount === 0,
               onSelect: openExport,
             },
             {
@@ -1125,7 +1124,7 @@ function Editor({
     [
       deleteSelected,
       duration,
-      exportClips,
+      renderableClipCount,
       onCloseProject,
       openExport,
       openSettings,
@@ -1551,7 +1550,7 @@ function Editor({
           rateNum={session.rateNum}
           rateDen={session.rateDen}
           duration={duration}
-          clips={exportClips}
+          clipCount={renderableClipCount}
           titles={exportTitles}
           onClose={() => setExporting(false)}
         />
