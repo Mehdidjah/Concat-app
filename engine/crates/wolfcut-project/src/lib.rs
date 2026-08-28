@@ -1,18 +1,20 @@
 //! The edit itself, owned by the engine.
 //!
-//! `desktop/src/lib/project.ts` held a provisional copy of this model while
-//! the engine had no project API; this crate is that API. The model
-//! ([`model`]), every operation as a serialisable [`commands::Command`], the
-//! tolerant document reader and compatible writer ([`doc`]), and the undo
-//! stack ([`editor::Editor`]) - all headless, all testable without a window.
+//! The model ([`model`]), every operation as a serialisable
+//! [`commands::Command`], the tolerant document reader and compatible writer
+//! ([`doc`]), and the undo stack ([`editor::Editor`]) - all headless, all
+//! testable without a window.
 //!
-//! Two compatibility guarantees hold while the UI migrates:
+//! The semantics began as clamp-for-clamp ports of the UI's provisional
+//! `lib/project.ts`, which is deleted (decision 0007); the migration framing
+//! that used to live here is history. What survives it, deliberately:
 //!
-//! 1. **Documents are interchangeable.** A `wolfcut.json` written by either
-//!    side loads in the other, tolerance rules included.
-//! 2. **Operations mean the same thing.** The command semantics are ports of
-//!    the TS operations, clamp for clamp - which is what makes flipping the
-//!    UI onto this crate a mechanical change rather than a behavioural one.
+//! 1. **The document format is frozen by the documents that exist.** Saved
+//!    projects load forever, tolerance rules included - not because a TS
+//!    twin must agree, but because users' work does not migrate on our
+//!    schedule. Format changes go through `DOCUMENT_VERSION`.
+//! 2. **f64 seconds and String ids are the document's terms**, kept until a
+//!    version 2 decides otherwise on purpose - not an accident of porting.
 //!
 //! Deliberately a separate crate rather than part of `wolfcut-core`: the
 //! document model needs serde, and wolfcut-core's zero-dependency rule is worth
@@ -253,8 +255,9 @@ mod tests {
 
     #[test]
     fn a_typescript_written_document_loads() {
-        // The exact shape desktop/src/lib/persist.ts toDocument produces,
-        // optional fields omitted the way JSON.stringify drops undefined.
+        // The exact shape the deleted TS persist layer used to write,
+        // optional fields omitted the way JSON.stringify drops undefined -
+        // documents like this exist on disk and must load forever.
         let document = json!({
             "wolfcut": "0.1.0", "version": 1, "name": "TS",
             "video": { "width": 1920, "height": 1080, "rateNum": 30, "rateDen": 1 },

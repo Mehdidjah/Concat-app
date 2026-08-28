@@ -1,12 +1,11 @@
 //! The document model: what a WolfCut project *is*.
 //!
-//! This is the same shape `desktop/src/lib/project.ts` holds - deliberately,
-//! field for field, because the two must describe identical documents while
-//! the UI migrates onto this crate. Times are `f64` seconds here because that
-//! is what the on-disk format stores; the conversion to exact rationals stays
-//! at the render boundary (`export.rs`), exactly as it does today. Moving the
-//! *document* to rational time is a format decision for later, made once,
-//! here, instead of twice.
+//! Times are `f64` seconds here because that is what the on-disk format
+//! stores, and the documents that exist freeze the format (the provisional
+//! TS twin this shape once mirrored is deleted; decision 0007). The
+//! conversion to exact rationals stays at the render boundary -
+//! `wolfcut-export`'s timeline builder. Moving the *document* to rational
+//! time is a format decision for a deliberate version 2, made once, here.
 //!
 //! Serde names are camelCase so a document written by this crate is byte-level
 //! compatible with one written by the TypeScript side.

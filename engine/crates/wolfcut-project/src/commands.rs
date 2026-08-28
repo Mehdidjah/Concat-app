@@ -1,10 +1,10 @@
 //! Every edit operation, as data.
 //!
 //! A [`Command`] is what the UI sends over IPC; [`apply`] is the one place
-//! its meaning lives. The semantics are ported line for line from
-//! `desktop/src/lib/project.ts` - same clamps, same tolerances, same rules -
-//! because during the migration both sides must agree about every edit, and
-//! after it this file is simply the only copy.
+//! its meaning lives. The semantics were ported line for line from the UI's
+//! provisional model (deleted; decision 0007) and this file is now the only
+//! copy - the clamps and tolerances documented on each variant are the
+//! contract the UI's gesture echo mirrors and tests against.
 
 use std::collections::HashSet;
 

@@ -1,7 +1,8 @@
 //! Reading and writing `wolfcut.json`.
 //!
-//! The reader is a port of `desktop/src/lib/persist.ts`, tolerance rules
-//! included: every field defaults rather than being trusted, clips whose
+//! The reader began as a port of the UI's `persist.ts` (deleted; decision
+//! 0007) and its tolerance rules are the contract with every document
+//! already on disk: every field defaults rather than being trusted, clips whose
 //! track or media vanished are dropped, text clips survive without media,
 //! legacy flat documents load as a single timeline. A hand-edited or older
 //! file must degrade to something openable, never to a load error.
