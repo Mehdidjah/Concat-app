@@ -36,6 +36,7 @@ export function TitleBar({
   actions,
   theme,
   onToggleTheme,
+  onOpenSettings,
 }: {
   projectName: string;
   menus: { label: string; groups: MenuOption[][] }[];
@@ -44,6 +45,9 @@ export function TitleBar({
   actions?: ReactNode;
   theme: Theme;
   onToggleTheme: () => void;
+  /** Shows the settings gear beside the theme toggle when provided - the
+   * visible way in; the File menu entry remains for menu-first users. */
+  onOpenSettings?: () => void;
 }) {
   const [maximized, setMaximized] = useState(false);
   const native = isTauri();
@@ -115,6 +119,19 @@ export function TitleBar({
       </div>
 
       <span className="h-full flex-1" data-tauri-drag-region />
+
+      {onOpenSettings && (
+        <button
+          type="button"
+          title="Settings"
+          aria-label="Open settings"
+          onClick={onOpenSettings}
+          className="flex h-6 w-6 cursor-pointer items-center justify-center rounded-md
+                     text-secondary transition-colors hover:bg-hover hover:text-primary"
+        >
+          <Icon name="settings" size={14} />
+        </button>
+      )}
 
       <button
         type="button"

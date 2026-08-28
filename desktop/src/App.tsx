@@ -1350,6 +1350,7 @@ function Editor({
         }
         theme={theme}
         onToggleTheme={onToggleTheme}
+        onOpenSettings={() => setSettingsOpen(true)}
         actions={
           <button
             type="button"
