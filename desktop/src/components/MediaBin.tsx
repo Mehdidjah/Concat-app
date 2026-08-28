@@ -469,8 +469,12 @@ Drag onto a track, or double-click to add at the playhead`}
               >
                 <MediaThumb item={item} assets={assets} />
 
-                <span className="pointer-events-none absolute left-1 top-1 flex h-5 w-5
-                                 items-center justify-center rounded bg-black/55 text-white">
+                <span
+                  className="pointer-events-none absolute left-1 top-1 flex h-5 w-5
+                             items-center justify-center rounded text-white"
+                  // The kind's own hue, matching the clip it becomes on a track.
+                  style={{ background: KIND_TINTS[item.kind].mark }}
+                >
                   <Icon
                     name={item.kind === "video" ? "film" : item.kind === "image" ? "image" : "music"}
                     size={11}
@@ -566,10 +570,14 @@ function TextPage({ onAddText }: { onAddText: () => void }) {
       >
         <div
           className="relative flex aspect-video items-center justify-center overflow-hidden
-                     rounded-lg bg-sunken ring-1 ring-hairline transition-shadow
+                     rounded-lg ring-1 ring-hairline transition-shadow
                      group-hover:ring-hairline-strong"
+          // Titles wear the rose the timeline gives them.
+          style={{ background: "var(--color-clip-text-body)" }}
         >
-          <span className="text-xl font-semibold text-primary">Aa</span>
+          <span className="text-xl font-semibold" style={{ color: "var(--color-clip-text)" }}>
+            Aa
+          </span>
         </div>
         <span className="mt-1 block truncate text-[11px] leading-tight text-secondary">
           Default title
@@ -781,6 +789,17 @@ Click to start a new project from this template`}
 // ── thumbnails ───────────────────────────────────────────────────────────────
 
 /**
+ * Each media kind's hue pair - the vivid mark and the darker same-hue ground
+ * it sits on - matching the timeline's clip palette, so a card in the bin and
+ * the clip it becomes read as the same thing.
+ */
+const KIND_TINTS: Record<MediaItem["kind"], { mark: string; body: string }> = {
+  video: { mark: "var(--color-clip-video)", body: "var(--color-clip-video-body)" },
+  audio: { mark: "var(--color-clip-audio)", body: "var(--color-clip-audio-body)" },
+  image: { mark: "var(--color-clip-image)", body: "var(--color-clip-image-body)" },
+};
+
+/**
  * The bin preview for one item.
  *
  * Reuses exactly the artwork the timeline uses - the first frame of the cached
@@ -846,13 +865,18 @@ function MediaThumb({ item, assets }: { item: MediaItem; assets: MediaAssets }) 
         return;
       }
 
+      // The wave sits on its own darker orange rather than on the panel's
+      // near-black - the same two-intensity pair the timeline clip uses.
+      context.fillStyle = themeColor("clip-audio-body", "#33220e");
+      context.fillRect(0, 0, width, height);
+
       // The whole file squeezed into the thumbnail, extremes per column so a
       // transient does not vanish at this scale.
       const centre = height / 2;
       const half = height / 2 - 1;
       const buckets = peaks.max.length;
 
-      context.fillStyle = themeColor("clip-audio", "#2f8a68");
+      context.fillStyle = themeColor("clip-audio", "#f09e2f");
       context.beginPath();
       for (let column = 0; column < width; column += 1) {
         const from = Math.floor((column / width) * buckets);
@@ -877,10 +901,18 @@ function MediaThumb({ item, assets }: { item: MediaItem; assets: MediaAssets }) 
   }, [assets, item]);
 
   return (
-    <span className="relative block aspect-video w-full overflow-hidden bg-sunken">
+    <span
+      className="relative block aspect-video w-full overflow-hidden"
+      // The kind's darker hue as the ground, so a card without artwork yet is
+      // already colour-coded rather than a black hole.
+      style={{ background: KIND_TINTS[item.kind].body }}
+    >
       <canvas ref={canvasRef} className="h-full w-full" />
       {!hasArt && (
-        <span className="absolute inset-0 flex items-center justify-center text-tertiary">
+        <span
+          className="absolute inset-0 flex items-center justify-center"
+          style={{ color: KIND_TINTS[item.kind].mark }}
+        >
           <Icon name={item.kind === "video" ? "film" : item.kind === "image" ? "image" : "music"} size={14} />
         </span>
       )}

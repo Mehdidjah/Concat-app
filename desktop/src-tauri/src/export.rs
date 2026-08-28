@@ -688,6 +688,7 @@ pub fn preview_frame(
 
     let mut sources: Vec<(std::sync::Arc<Frame>, f32, Transform)> =
         Vec::with_capacity(plan.layers.len());
+    let mut failures: Vec<String> = Vec::new();
     for layer in &plan.layers {
         let (decode_width, decode_height) = decode_sizes
             .get(&layer.clip)
@@ -696,7 +697,7 @@ pub fn preview_frame(
         let chain = filter_chains.get(&layer.clip).map(String::as_str);
         // A source that fails to decode contributes nothing rather than
         // blanking the monitor - same grace the exporter extends.
-        if let Ok(frame) = pool.frame_at(
+        match pool.frame_at(
             std::path::Path::new(&layer.media),
             layer.source_time,
             decode_width,
@@ -704,8 +705,20 @@ pub fn preview_frame(
             stills.contains(&layer.clip),
             chain,
         ) {
-            sources.push((frame, layer.opacity, layer.transform));
+            Ok(frame) => sources.push((frame, layer.opacity, layer.transform)),
+            Err(error) => failures.push(format!("{}: {error}", layer.media.display())),
         }
+    }
+
+    // Planned layers with nothing decoded is a failed preview, not a black
+    // frame: compositing zero sources yields opaque black, and the caller
+    // would draw that "truth" over its own perfectly good approximation. An
+    // *empty plan* still composites - a gap in the timeline really is black.
+    if sources.is_empty() && !plan.layers.is_empty() {
+        return Err(format!(
+            "no layer decoded for the paused preview: {}",
+            failures.join(" / ")
+        ));
     }
 
     // The same fraction-to-pixel placement the exporter applies.
@@ -772,6 +785,76 @@ mod tests {
 
     fn spec(kind: &str, duration: f64) -> Option<TransitionSpec> {
         Some(TransitionSpec { kind: kind.to_owned(), duration })
+    }
+
+    /// End to end against a real FFmpeg: the paused monitor's frame must show
+    /// the footage, not an empty composite. Skips silently without FFmpeg.
+    #[test]
+    fn preview_frame_shows_the_footage_not_black() {
+        use relay_core::frame::Frame;
+        use relay_media::{EncodeOptions, FfmpegEncoder, FrameSink};
+
+        let path = std::env::temp_dir().join("relay-preview-test.mp4");
+        let Ok(mut encoder) = FfmpegEncoder::create(
+            &path,
+            64,
+            64,
+            FrameRate::THIRTY,
+            &EncodeOptions::default(),
+        ) else {
+            return; // no ffmpeg here
+        };
+        for _ in 0..30 {
+            let mut frame = Frame::black(64, 64);
+            frame.fill([200, 30, 30, 255]);
+            encoder.write_frame(&frame).expect("writes");
+        }
+        encoder.finish().expect("finishes");
+
+        let mut request_clip = clip("video", 0, 0.0, 1.0, 0.0);
+        request_clip.path = path.to_string_lossy().into_owned();
+        request_clip.media_width = Some(64);
+        request_clip.media_height = Some(64);
+        let request = PreviewFrameRequest {
+            time: 0.5,
+            width: 64,
+            height: 64,
+            rate_num: 30,
+            rate_den: 1,
+            clips: vec![request_clip],
+        };
+
+        let mut pool = relay_media::ReaderPool::new(16 * 1024 * 1024, 2);
+        let bytes = preview_frame(&mut pool, &request).expect("previews");
+        assert_eq!(bytes.len(), 64 * 64 * 4);
+        let centre = (32 * 64 + 32) * 4;
+        assert!(
+            bytes[centre] > 120 && bytes[centre + 1] < 90,
+            "centre pixel should be red-ish, got {:?}",
+            &bytes[centre..centre + 4],
+        );
+
+        // A clip trimmed past its media's end: the paused monitor at that
+        // time must show the last real frame, not a black composite and not
+        // an error. This is the exact shape that used to black the monitor.
+        let mut outliving = clip("video", 0, 0.0, 3.0, 0.0);
+        outliving.path = path.to_string_lossy().into_owned();
+        let late = PreviewFrameRequest {
+            time: 2.5,
+            width: 64,
+            height: 64,
+            rate_num: 30,
+            rate_den: 1,
+            clips: vec![outliving],
+        };
+        let bytes = preview_frame(&mut pool, &late).expect("previews past the media's end");
+        assert!(
+            bytes[centre] > 120 && bytes[centre + 1] < 90,
+            "past the end should freeze on the last frame, got {:?}",
+            &bytes[centre..centre + 4],
+        );
+
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

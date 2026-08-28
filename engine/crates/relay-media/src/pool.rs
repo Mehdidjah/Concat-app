@@ -260,6 +260,11 @@ struct MediaFacts {
     rate: FrameRate,
     /// A still image: one frame, served for every requested time.
     still: bool,
+    /// Whole frames the container claims to hold, when it states a duration.
+    /// Requests past this clamp to the last frame *before* any seek happens -
+    /// a seek past the end produces zero frames, not an error and not a
+    /// picture.
+    frames: Option<i64>,
 }
 
 /// Random access to frames across many files, cache in front, warm readers
@@ -310,7 +315,14 @@ impl ReaderPool {
     ) -> Result<Arc<Frame>> {
         let facts = self.facts_for(path, still)?;
         let rate = facts.rate;
-        let target = if facts.still { 0 } else { rate.frame_at(time).max(0) };
+        let mut target = if facts.still { 0 } else { rate.frame_at(time).max(0) };
+        // A clip can outlive its media - an end-trim past the file's length -
+        // and the honest picture for any time past the end is the last frame,
+        // exactly what the roll-forward case already serves. Clamp before
+        // seeking: `-ss` past the end decodes nothing at all.
+        if let Some(frames) = facts.frames {
+            target = target.min((frames - 1).max(0));
+        }
         let chain_key = chain.map(str::to_owned);
 
         let key = FrameKey {
@@ -356,6 +368,51 @@ impl ReaderPool {
             }
         }
 
+        // Nothing at all means the seek itself landed past the end of the
+        // picture stream - a container whose video ends before its audio, or
+        // a stated duration that lied past the clamp above. The last real
+        // frame is still the honest answer; it just has to be found by
+        // seeking backwards until something decodes. Each retry doubles the
+        // step, and the last one starts from zero, so a file with any
+        // decodable picture at all cannot fail here.
+        if latest.is_none() {
+            for step in [30i64, 240, i64::MAX] {
+                let from = target.saturating_sub(step).max(0);
+                reader.seek(rate, from)?;
+                loop {
+                    match reader.next_frame(rate)? {
+                        Some((index, frame)) => {
+                            let frame = Arc::new(frame);
+                            self.cache.insert(
+                                FrameKey {
+                                    path: path.to_path_buf(),
+                                    width,
+                                    height,
+                                    chain: chain_key.clone(),
+                                    index,
+                                },
+                                Arc::clone(&frame),
+                            );
+                            latest = Some(frame);
+                            if index >= target {
+                                break;
+                            }
+                        }
+                        None => break,
+                    }
+                }
+                if latest.is_some() || from == 0 {
+                    break;
+                }
+            }
+            if let Some(frame) = &latest {
+                // Remember the answer under the index that was asked for, so
+                // dwelling on a time past the end costs one lookup, not a
+                // respawn-and-decode per request.
+                self.cache.insert(key, Arc::clone(frame));
+            }
+        }
+
         latest.ok_or_else(|| crate::error::Error::PartialFrame {
             path: path.to_path_buf(),
             got: 0,
@@ -366,7 +423,7 @@ impl ReaderPool {
     fn facts_for(&mut self, path: &Path, still: bool) -> Result<&MediaFacts> {
         if !self.facts.contains_key(path) {
             let facts = if still {
-                MediaFacts { rate: FrameRate::THIRTY, still: true }
+                MediaFacts { rate: FrameRate::THIRTY, still: true, frames: None }
             } else {
                 let info = probe::probe(path)?;
                 let rate = info
@@ -374,7 +431,13 @@ impl ReaderPool {
                     .as_ref()
                     .map(|video| video.frame_rate)
                     .unwrap_or(FrameRate::THIRTY);
-                MediaFacts { rate, still: false }
+                // Ceil rather than floor: undercounting by one would clamp
+                // legitimate requests for the true last frame.
+                let frames = info
+                    .duration
+                    .map(|duration| (duration * rate.fps()).ceil())
+                    .filter(|count| *count > 0);
+                MediaFacts { rate, still: false, frames }
             };
             self.facts.insert(path.to_path_buf(), facts);
         }
@@ -523,6 +586,12 @@ mod tests {
         let again_at_50 = red_at(&mut pool, 50);
         assert_eq!(again_at_50, at_50, "revisit must come from cache, identical");
         assert!(pool.cache.len() > 0, "rolling forward populated the cache");
+
+        // Far past the end - a clip that outlives its media. The last real
+        // frame is the answer, not an error: a seek there decodes nothing,
+        // which used to surface as PartialFrame(0 bytes) and a black monitor.
+        let past_end = red_at(&mut pool, 300);
+        assert!(near(past_end, 89), "past the end read {past_end}, wanted the last frame");
 
         let _ = std::fs::remove_file(&path);
     }

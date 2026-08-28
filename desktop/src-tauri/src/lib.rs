@@ -526,6 +526,9 @@ async fn preview_frame(
     })
     .await
     .map_err(|error| format!("preview task failed: {error}"))?
+    // The UI quietly keeps its approximation on error, which is right for
+    // the monitor and useless for debugging - so the reason lands here.
+    .inspect_err(|error| eprintln!("relay: preview_frame: {error}"))
     .map(tauri::ipc::Response::new)
 }
 

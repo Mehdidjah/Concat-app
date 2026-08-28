@@ -12,7 +12,7 @@
 [![UI](https://img.shields.io/badge/ui-React%20%2B%20Tauri-24C8DB?logo=tauri&logoColor=white)](desktop)
 [![Version](https://img.shields.io/badge/version-0.1.0-blue)](https://github.com/jub0t/WolfCut)
 
-<img src="assets/screenshot-light.png" alt="WolfCut editor" width="100%" />
+<img src="assets/screenshot-dark.png" alt="WolfCut editor" width="100%" />
 
 </div>
 

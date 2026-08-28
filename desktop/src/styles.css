@@ -114,13 +114,21 @@
   --color-tool-active-bg: rgba(0, 0, 0, 0.08);
 
   --color-playhead: #ff3b30;
-  --color-clip-video: #0a6cc4;
-  --color-clip-video-body: #cfe3f7;
-  --color-clip-audio: #1f8a5f;
-  --color-clip-audio-body: #cfeade;
-  --color-clip-wave: rgba(20, 80, 55, 0.55);
-  --color-clip-image: #8a5cd6;
-  --color-clip-image-body: #e2d7f6;
+  /*
+   * One hue per media kind, in two intensities: a vivid mark and a pale
+   * same-hue body it sits on. Blue footage, orange sound, purple stills,
+   * rose titles - four kinds, four hues, and the pair structure is what
+   * keeps a waveform readable on its own clip.
+   */
+  --color-clip-video: #2f6fe0;
+  --color-clip-video-body: #d3e2fb;
+  --color-clip-audio: #d97f16;
+  --color-clip-audio-body: #fae6c8;
+  --color-clip-wave: rgba(140, 85, 10, 0.55);
+  --color-clip-image: #7743e8;
+  --color-clip-image-body: #e4dbfa;
+  --color-clip-text: #d41f4d;
+  --color-clip-text-body: #fad7df;
   --color-timeline: #e4e4e9;
   --color-timeline-alt: #ededf1;
   --color-ruler: #f4f4f6;
@@ -190,13 +198,15 @@
   --color-success: #30d158;
 
   --color-playhead: #ff453a;
-  --color-clip-video: #2b6ca8;
-  --color-clip-video-body: #16283d;
-  --color-clip-audio: #2f8a68;
-  --color-clip-audio-body: #123027;
-  --color-clip-wave: rgba(190, 240, 216, 0.65);
-  --color-clip-image: #7b53c4;
-  --color-clip-image-body: #241a38;
+  --color-clip-video: #4d8df6;
+  --color-clip-video-body: #142640;
+  --color-clip-audio: #f09e2f;
+  --color-clip-audio-body: #33220e;
+  --color-clip-wave: rgba(250, 214, 158, 0.7);
+  --color-clip-image: #8b5cf6;
+  --color-clip-image-body: #251a3d;
+  --color-clip-text: #e8355e;
+  --color-clip-text-body: #38131d;
   --color-timeline: #0d0d10;
   --color-timeline-alt: #0a0a0d;
   --color-ruler: #131316;

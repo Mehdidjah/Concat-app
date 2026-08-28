@@ -85,6 +85,9 @@ function refreshCanvasPalette(): void {
   PALETTE.image.header = themeColor("clip-image", PALETTE.image.header);
   PALETTE.image.body = themeColor("clip-image-body", PALETTE.image.body);
   PALETTE.image.edge = PALETTE.image.header;
+  PALETTE.text.header = themeColor("clip-text", PALETTE.text.header);
+  PALETTE.text.body = themeColor("clip-text-body", PALETTE.text.body);
+  PALETTE.text.edge = PALETTE.text.header;
 }
 
 /** Where one clip sat when a move began, so the whole set moves rigidly. */
@@ -1250,27 +1253,27 @@ function ellipsize(context: CanvasRenderingContext2D, text: string, maxWidth: nu
 /** Clip fills, refreshed alongside COLORS. See `refreshCanvasPalette`. */
 const PALETTE = {
   video: {
-    body: "#16283d",
-    header: "#2b6ca8",
-    edge: "#2b6ca8",
+    body: "#142640",
+    header: "#4d8df6",
+    edge: "#4d8df6",
   },
   audio: {
-    body: "#123027",
-    header: "#2f8a68",
-    edge: "#2f8a68",
-    wave: "rgba(190,240,216,0.65)",
+    body: "#33220e",
+    header: "#f09e2f",
+    edge: "#f09e2f",
+    wave: "rgba(250,214,158,0.7)",
   },
   image: {
-    body: "#241a38",
-    header: "#7b53c4",
-    edge: "#7b53c4",
+    body: "#251a3d",
+    header: "#8b5cf6",
+    edge: "#8b5cf6",
   },
-  // Amber, distinct from the three media kinds: a title is the one thing on
+  // Rose, distinct from the three media kinds: a title is the one thing on
   // the timeline that is not a file, and it should not be mistaken for one.
   text: {
-    body: "#3a2a11",
-    header: "#c08a2e",
-    edge: "#c08a2e",
+    body: "#38131d",
+    header: "#e8355e",
+    edge: "#e8355e",
   },
 };
 

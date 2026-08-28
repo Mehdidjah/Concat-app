@@ -604,7 +604,11 @@ export function Preview({
           */}
           {frameRect && titleOverlays.length > 0 && (
             <div
-              className="absolute overflow-hidden"
+              // pointer-events-none is load-bearing: this div covers the whole
+              // frame above the transform gizmo, and a transparent div still
+              // hit-tests. Without it, nothing inside the frame is clickable -
+              // each title box re-enables its own pointer events.
+              className="pointer-events-none absolute overflow-hidden"
               style={{
                 left: frameRect.left,
                 top: frameRect.top,
