@@ -19,6 +19,8 @@
 //! always-correct fallback. Sound is planned by the engine as one FFmpeg
 //! filtergraph and mixed in a single pass.
 
+pub mod chains;
+
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};

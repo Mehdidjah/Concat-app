@@ -15,6 +15,7 @@ gpu = ["wolfcut-render/gpu"]
 wolfcut-core.workspace = true
 wolfcut-media.workspace = true
 wolfcut-render.workspace = true
+wolfcut-project = { path = "../wolfcut-project" }
 serde = { version = "1", features = ["derive"] }
 
 [lints]
