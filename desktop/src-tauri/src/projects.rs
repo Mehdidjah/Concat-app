@@ -1,6 +1,6 @@
 //! Project folders on disk, and the list of recently opened ones.
 //!
-//! A project is a directory containing `relay.json`. That file is written the
+//! A project is a directory containing `wolfcut.json`. That file is written the
 //! moment the project is created, so a project is a real thing from the start
 //! rather than a promise the app keeps only if you remember to save.
 //!
@@ -13,7 +13,26 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
-const MANIFEST: &str = "relay.json";
+const MANIFEST: &str = "wolfcut.json";
+/// The manifest's original name. Projects created before the rename keep it
+/// forever: their manifest is read and written under the name they have,
+/// and only brand-new projects get the new one. A rename must never orphan
+/// an edit.
+const LEGACY_MANIFEST: &str = "relay.json";
+
+/// The manifest file this project actually uses: the new name, the legacy
+/// name if that is what exists, the new name for a fresh folder.
+pub(crate) fn manifest_path(root: &Path) -> PathBuf {
+    let current = root.join(MANIFEST);
+    if current.is_file() {
+        return current;
+    }
+    let legacy = root.join(LEGACY_MANIFEST);
+    if legacy.is_file() {
+        return legacy;
+    }
+    current
+}
 const RECENTS: &str = "recents.json";
 /// Long enough to be useful, short enough that the list stays scannable.
 const MAX_RECENTS: usize = 12;
@@ -36,7 +55,8 @@ pub struct ProjectInfo {
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Manifest {
-    relay: String,
+    #[serde(alias = "relay")]
+    wolfcut: String,
     name: String,
     video: Video,
     /// Everything else in the file is ignored when reading settings for the
@@ -77,8 +97,10 @@ pub fn create(
     let root = Path::new(location).join(folder_name(name));
     let manifest = root.join(MANIFEST);
 
-    if manifest.exists() {
-        return Err(format!("a Relay project already exists at {}", root.display()));
+    // Either name counts as an existing project - a legacy folder must be
+    // just as safe from being clobbered as a new one.
+    if manifest_path(&root).is_file() {
+        return Err(format!("a WolfCut project already exists at {}", root.display()));
     }
 
     std::fs::create_dir_all(&root)
@@ -87,7 +109,7 @@ pub fn create(
     // Settings only: a fresh project has no edit yet. The full document -
     // timelines included - is written by `editor_save` from the first change.
     let document = Manifest {
-        relay: env!("CARGO_PKG_VERSION").to_owned(),
+        wolfcut: env!("CARGO_PKG_VERSION").to_owned(),
         name: name.to_owned(),
         video: Video { width, height, rate_num, rate_den },
         rest: serde_json::Map::new(),
@@ -109,19 +131,19 @@ pub fn create(
     })
 }
 
-/// Writes the whole project document to `relay.json`.
+/// Writes the whole project document to `wolfcut.json`.
 ///
 /// The document is passed through as opaque JSON rather than being mirrored
-/// into Rust types: the engine (`relay-project`) owns the canonical model and
+/// into Rust types: the engine (`wolfcut-project`) owns the canonical model and
 /// produced this document, and the host has no decisions to make about its
 /// contents beyond writing it safely.
 ///
 /// Written to a temporary file and renamed into place, because a save
-/// interrupted halfway is worse than no save at all - a truncated relay.json
+/// interrupted halfway is worse than no save at all - a truncated wolfcut.json
 /// loses the project, while a failed rename leaves the previous one intact.
 pub fn save(path: &str, document: &serde_json::Value) -> Result<(), String> {
     let root = PathBuf::from(path);
-    let manifest = root.join(MANIFEST);
+    let manifest = manifest_path(&root);
     let temporary = root.join(format!("{MANIFEST}.saving"));
 
     std::fs::create_dir_all(&root)
@@ -139,23 +161,23 @@ pub fn save(path: &str, document: &serde_json::Value) -> Result<(), String> {
 
 /// Reads the whole project document back.
 pub fn read_document(path: &str) -> Result<serde_json::Value, String> {
-    let manifest = PathBuf::from(path).join(MANIFEST);
+    let manifest = manifest_path(Path::new(path));
     let bytes = std::fs::read(&manifest)
         .map_err(|error| format!("could not read {}: {error}", manifest.display()))?;
 
     serde_json::from_slice(&bytes)
-        .map_err(|error| format!("{} is not a Relay project: {error}", manifest.display()))
+        .map_err(|error| format!("{} is not a WolfCut project: {error}", manifest.display()))
 }
 
 /// Reads an existing project's settings.
 pub fn open(path: &str) -> Result<ProjectInfo, String> {
     let root = PathBuf::from(path);
-    let manifest = root.join(MANIFEST);
+    let manifest = manifest_path(&root);
 
     let bytes = std::fs::read(&manifest)
         .map_err(|error| format!("could not read {}: {error}", manifest.display()))?;
     let document: Manifest = serde_json::from_slice(&bytes)
-        .map_err(|error| format!("{} is not a Relay project: {error}", manifest.display()))?;
+        .map_err(|error| format!("{} is not a WolfCut project: {error}", manifest.display()))?;
 
     if document.video.rate_den == 0 {
         return Err(format!("{} has an invalid frame rate", manifest.display()));
@@ -188,7 +210,7 @@ pub fn remember(config: &Path, project: &ProjectInfo) -> Result<(), String> {
 pub fn list(config: &Path) -> Vec<ProjectInfo> {
     read_recents(config)
         .into_iter()
-        .filter(|entry| Path::new(&entry.path).join(MANIFEST).exists())
+        .filter(|entry| manifest_path(Path::new(&entry.path)).is_file())
         .collect()
 }
 
@@ -257,6 +279,22 @@ mod tests {
         assert_eq!(folder_name("  trailing.  "), "trailing");
         assert_eq!(folder_name("..."), "Untitled project");
         assert_eq!(folder_name(""), "Untitled project");
+    }
+
+    #[test]
+    fn a_legacy_manifest_keeps_its_name() {
+        let scratch = std::env::temp_dir().join("wolfcut-legacy-manifest-test");
+        let _ = std::fs::remove_dir_all(&scratch);
+        std::fs::create_dir_all(&scratch).expect("scratch dir");
+        // A fresh folder resolves to the new name...
+        assert!(manifest_path(&scratch).ends_with(MANIFEST));
+        // ...a pre-rename project keeps the manifest it has, forever...
+        std::fs::write(scratch.join(LEGACY_MANIFEST), b"{}").expect("writes");
+        assert!(manifest_path(&scratch).ends_with(LEGACY_MANIFEST));
+        // ...and the new name wins only where it actually exists.
+        std::fs::write(scratch.join(MANIFEST), b"{}").expect("writes");
+        assert!(manifest_path(&scratch).ends_with(MANIFEST));
+        let _ = std::fs::remove_dir_all(&scratch);
     }
 
     #[test]

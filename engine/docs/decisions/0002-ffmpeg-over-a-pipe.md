@@ -49,8 +49,8 @@ the whole reason this note was rewritten.
 
 ## Containment
 Everything process-shaped hides behind `FrameSource` and `FrameSink` in
-`relay-media`. The FFI backend is one new type implementing `FrameSource`;
-`relay-core`, `relay-render` and every caller stay untouched. The subprocess
+`wolfcut-media`. The FFI backend is one new type implementing `FrameSource`;
+`wolfcut-core`, `wolfcut-render` and every caller stay untouched. The subprocess
 decoder stays as a fallback for formats the linked build was not compiled with.
 
 ## What the FFI work will actually cost
@@ -68,7 +68,7 @@ Budget for the build plumbing, not the Rust. The Rust is the easy half.
 
 ## Status: the FFI half now exists
 
-`relay-media`'s `ffi` feature builds a linked decoder, `FfiDecoder`, which
+`wolfcut-media`'s `ffi` feature builds a linked decoder, `FfiDecoder`, which
 implements `FrameSource` and `SeekableSource`. Both correctness gaps above are
 closed in it and covered by `tests/ffi_decode.rs`:
 
@@ -80,15 +80,15 @@ what runs, and probe and export are staying on it permanently.
 
 The seam held: adding it required one new type implementing an existing trait,
 one new trait for the capability the pipe genuinely lacks, and no change to
-`relay-core`, `relay-render`, or any caller.
+`wolfcut-core`, `wolfcut-render`, or any caller.
 
 ## Status: the reader pool exists too
 
-`relay_media::pool` is the per-media reader pool with a byte-budgeted LRU
+`wolfcut_media::pool` is the per-media reader pool with a byte-budgeted LRU
 frame cache that playback was waiting on: warm readers roll forward for near
 requests and seek for far ones - frame-accurately through `FfiDecoder` when
 the `ffi` feature is on, by respawn on the pipe otherwise. Its first two
-consumers are live: `relay-cli render` (whose founding "deliberate shortcut"
+consumers are live: `wolfcut-cli render` (whose founding "deliberate shortcut"
 comment is finally deleted) and the host's `preview_frame` command, which
 composites the true frame for the paused monitor.
 

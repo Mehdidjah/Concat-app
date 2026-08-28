@@ -20,7 +20,7 @@ learn timelines exist. Thirty operations, zero changes.
 
 ## Its known ugliness, and the exit
 Two homes for the same kind of data is a real smell - which is why the
-engine model (`relay-project`, engine decision 0007) has **no shelf**: it
+engine model (`wolfcut-project`, engine decision 0007) has **no shelf**: it
 stores a plain list of timelines and an active id, and operations address the
 active one. The shelf dies with `lib/project.ts` when the UI flips. The
 *document* format never had a shelf either; both models read and write the

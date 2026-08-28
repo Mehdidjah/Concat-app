@@ -1,7 +1,7 @@
 # 0004 - CPU compositor first, GPU behind the same trait
 
 > **Status: the sequencing completed as planned.** `WgpuCompositor` exists
-> behind relay-render's `gpu` feature, diff-tested against the CPU reference
+> behind wolfcut-render's `gpu` feature, diff-tested against the CPU reference
 > with deliberate parity choices (non-sRGB target, premultiplied source-over),
 > and the desktop app exports through it (`best_compositor()` in the host's
 > `export.rs`, CPU fallback for machines with no usable adapter). The CPU
@@ -10,7 +10,7 @@
 > composites with, where at preview sizes it is fast enough.
 
 ## Decision
-`relay-render` ships a correct, dependency-free `CpuCompositor`. The GPU path
+`wolfcut-render` ships a correct, dependency-free `CpuCompositor`. The GPU path
 (`wgpu`) will be a second implementation of the same `Compositor` trait.
 
 ## Why

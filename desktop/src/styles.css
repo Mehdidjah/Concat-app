@@ -165,7 +165,7 @@
 /*
  * Dark, applied only by explicit choice.
  *
- * Deliberately not wired to `prefers-color-scheme`: light is Relay's default
+ * Deliberately not wired to `prefers-color-scheme`: light is WolfCut's default
  * regardless of what the OS is set to. A creative tool that flips its entire
  * appearance because of a system setting the user was not thinking about is
  * disorienting, and colour work in particular wants a predictable surround.

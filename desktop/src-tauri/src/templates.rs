@@ -2,7 +2,7 @@
 //!
 //! A template is a folder in the app config directory's `templates/`:
 //!
-//! - `template.json` - an ordinary relay document whose placeholder media
+//! - `template.json` - an ordinary wolfcut document whose placeholder media
 //!   (engine `placeholder: true`) have blank paths, and whose bundled media
 //!   and fonts - the music, overlays and faces that are part of the design -
 //!   have paths relative to the bundle (`assets/...`).
@@ -12,12 +12,12 @@
 //! Saving packs the open project into a bundle; instantiating unpacks one
 //! into a fresh project folder and fills every slot with the user's media
 //! *through the engine* (`Command::FillSlot` in a batch), so what a fill
-//! means is defined in exactly one place - `relay-project` - and the editor
+//! means is defined in exactly one place - `wolfcut-project` - and the editor
 //! never opens on a slot with a dead path.
 
 use std::path::{Path, PathBuf};
 
-use relay_project::{Command, DocumentSettings, Editor};
+use wolfcut_project::{Command, DocumentSettings, Editor};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -60,7 +60,7 @@ pub struct SlotInfo {
 #[serde(rename_all = "camelCase")]
 pub struct SlotFill {
     pub media_id: String,
-    pub item: relay_project::commands::NewMedia,
+    pub item: wolfcut_project::commands::NewMedia,
 }
 
 pub fn templates_dir(config: &Path) -> PathBuf {
@@ -258,7 +258,7 @@ fn slots_of(document: &Value) -> Vec<SlotInfo> {
 /// Unpacks a template into a fresh project with every slot filled.
 ///
 /// The fills go through the engine as one `Batch` of `FillSlot` commands, so
-/// the semantics live in `relay-project` and a half-fillable set of media
+/// the semantics live in `wolfcut-project` and a half-fillable set of media
 /// leaves no half-made project behind.
 pub fn instantiate(
     template: &str,
@@ -384,7 +384,7 @@ mod tests {
 
     fn template_document() -> Value {
         json!({
-            "relay": "0.1.0", "version": 1, "name": "Beat Intro",
+            "wolfcut": "0.1.0", "version": 1, "name": "Beat Intro",
             "video": { "width": 1920, "height": 1080, "rateNum": 30, "rateDen": 1 },
             "media": [
                 { "id": "m1", "path": "", "name": "A-roll", "duration": 4.0, "kind": "video",
@@ -470,11 +470,11 @@ mod tests {
             "From bundle",
             vec![SlotFill {
                 media_id: "m1".to_owned(),
-                item: relay_project::commands::NewMedia {
+                item: wolfcut_project::commands::NewMedia {
                     path: "/mine/clip.mp4".to_owned(),
                     name: "clip.mp4".to_owned(),
                     duration: Some(6.0),
-                    kind: relay_project::model::MediaKind::Video,
+                    kind: wolfcut_project::model::MediaKind::Video,
                     width: Some(1920),
                     height: Some(1080),
                     frame_rate: Some(30.0),
@@ -512,11 +512,11 @@ mod tests {
 
         let fill = |media_id: &str, path: &str| SlotFill {
             media_id: media_id.to_owned(),
-            item: relay_project::commands::NewMedia {
+            item: wolfcut_project::commands::NewMedia {
                 path: path.to_owned(),
                 name: path.rsplit('/').next().unwrap_or(path).to_owned(),
                 duration: Some(9.0),
-                kind: relay_project::model::MediaKind::Video,
+                kind: wolfcut_project::model::MediaKind::Video,
                 width: Some(1920),
                 height: Some(1080),
                 frame_rate: Some(30.0),

@@ -1,10 +1,10 @@
-//! Tauri host for the Relay editor.
+//! Tauri host for the WolfCut editor.
 //!
 //! Deliberately thin. Every command here does two things: call into the engine
 //! crates, and convert the result to something `serde` can put on the wire.
 //! No editing logic lives on this side of the bridge - if a command starts
-//! making decisions about the edit, that logic belongs in `relay-core` or
-//! `relay-render` where it can be unit-tested without a window.
+//! making decisions about the edit, that logic belongs in `wolfcut-core` or
+//! `wolfcut-render` where it can be unit-tested without a window.
 
 // Public so the integration tests can drive a real export; see tests/.
 pub mod export;
@@ -52,7 +52,7 @@ pub struct MediaSummary {
     audio: Option<AudioStreamInfo>,
 }
 
-/// Extensions Relay is willing to treat as stills.
+/// Extensions WolfCut is willing to treat as stills.
 const IMAGE_EXTENSIONS: &[&str] = &[
     "png", "jpg", "jpeg", "webp", "bmp", "tif", "tiff", "avif", "heic", "heif", "gif",
 ];
@@ -67,7 +67,7 @@ const IMAGE_EXTENSIONS: &[&str] = &[
 /// GIF or WebP reports a duration; a single image does not. It is a heuristic,
 /// and a deliberately conservative one - misreading an animation as a still
 /// shows its first frame rather than failing.
-fn classify(info: &relay_media::MediaInfo) -> &'static str {
+fn classify(info: &wolfcut_media::MediaInfo) -> &'static str {
     if info.video.is_none() {
         return "audio";
     }
@@ -86,8 +86,8 @@ fn classify(info: &relay_media::MediaInfo) -> &'static str {
     }
 }
 
-impl From<relay_media::MediaInfo> for MediaSummary {
-    fn from(info: relay_media::MediaInfo) -> Self {
+impl From<wolfcut_media::MediaInfo> for MediaSummary {
+    fn from(info: wolfcut_media::MediaInfo) -> Self {
         Self {
             kind: classify(&info),
             path: info.path.to_string_lossy().into_owned(),
@@ -119,7 +119,7 @@ impl From<relay_media::MediaInfo> for MediaSummary {
 /// Reports what is inside a media file.
 #[tauri::command]
 fn probe_media(path: String) -> Result<MediaSummary, String> {
-    relay_media::probe(&path).map(MediaSummary::from).map_err(describe)
+    wolfcut_media::probe(&path).map(MediaSummary::from).map_err(describe)
 }
 
 /// The version of the app the UI is talking to. Also a liveness check on the
@@ -210,14 +210,14 @@ fn filmstrip(path: &str, count: u32, height: u32) -> Result<Vec<u8>, String> {
     let count = count.clamp(1, 60);
     let height = height.clamp(16, 240);
 
-    let info = relay_media::probe(path).map_err(describe)?;
+    let info = wolfcut_media::probe(path).map_err(describe)?;
     let duration = info
         .duration
         .map(|duration| duration.as_f64())
         .filter(|seconds| *seconds > 0.0)
         .ok_or_else(|| format!("{path} reports no duration"))?;
 
-    let output = std::process::Command::new(relay_media::ffmpeg())
+    let output = std::process::Command::new(wolfcut_media::ffmpeg())
         .args(["-hide_banner", "-nostdin", "-loglevel", "error"])
         .args(["-i", path])
         .args([
@@ -250,7 +250,7 @@ fn filmstrip(path: &str, count: u32, height: u32) -> Result<Vec<u8>, String> {
 ///
 /// Grabbed from the earliest visible clip of the project's active timeline
 /// and cached as `cache/preview.jpg` in the project folder; the cache is
-/// fresh as long as it is newer than `relay.json`, so an edited project gets
+/// fresh as long as it is newer than `wolfcut.json`, so an edited project gets
 /// a new poster on its next appearance and an untouched one costs a stat.
 #[tauri::command]
 async fn project_preview(path: String) -> Result<tauri::ipc::Response, String> {
@@ -262,7 +262,7 @@ async fn project_preview(path: String) -> Result<tauri::ipc::Response, String> {
 
 fn poster_frame(project: &str) -> Result<Vec<u8>, String> {
     let root = std::path::Path::new(project);
-    let manifest = root.join("relay.json");
+    let manifest = projects::manifest_path(root);
     let cached = root.join("cache").join("preview.jpg");
 
     let fresh = match (std::fs::metadata(&cached), std::fs::metadata(&manifest)) {
@@ -318,7 +318,7 @@ fn poster_frame(project: &str) -> Result<Vec<u8>, String> {
         return Err("nothing on the timeline to preview".to_owned());
     };
 
-    let mut command = std::process::Command::new(relay_media::ffmpeg());
+    let mut command = std::process::Command::new(wolfcut_media::ffmpeg());
     command.args(["-hide_banner", "-nostdin", "-loglevel", "error"]);
     // Seeking a still means seeking a one-frame stream to nowhere.
     if !is_still && source_start > 0.0 {
@@ -388,7 +388,7 @@ async fn create_project(
         // A project that cannot be added to the recents list has still been
         // created, so this failure is reported but not fatal.
         if let Err(error) = projects::remember(&config, &project) {
-            eprintln!("relay: {error}");
+            eprintln!("wolfcut: {error}");
         }
         Ok(project)
     })
@@ -403,7 +403,7 @@ async fn open_project(app: tauri::AppHandle, path: String) -> Result<projects::P
     tauri::async_runtime::spawn_blocking(move || {
         let project = projects::open(&path)?;
         if let Err(error) = projects::remember(&config, &project) {
-            eprintln!("relay: {error}");
+            eprintln!("wolfcut: {error}");
         }
         Ok(project)
     })
@@ -459,7 +459,7 @@ async fn template_instantiate(
     tauri::async_runtime::spawn_blocking(move || {
         let project = templates::instantiate(&template, &location, &name, fills)?;
         if let Err(error) = projects::remember(&config, &project) {
-            eprintln!("relay: {error}");
+            eprintln!("wolfcut: {error}");
         }
         Ok(project)
     })
@@ -491,7 +491,7 @@ struct ExportState(std::sync::Arc<std::sync::atomic::AtomicBool>);
 
 /// The reader pool behind the paused monitor's true frames. One pool for the
 /// app's lifetime: its whole value is what stays warm between scrubs.
-struct PoolState(std::sync::Arc<std::sync::Mutex<relay_media::ReaderPool>>);
+struct PoolState(std::sync::Arc<std::sync::Mutex<wolfcut_media::ReaderPool>>);
 
 /// The engine-composited frame at one instant, as raw RGBA bytes.
 ///
@@ -512,7 +512,7 @@ async fn preview_frame(
     .map_err(|error| format!("preview task failed: {error}"))?
     // The UI quietly keeps its approximation on error, which is right for
     // the monitor and useless for debugging - so the reason lands here.
-    .inspect_err(|error| eprintln!("relay: preview_frame: {error}"))
+    .inspect_err(|error| eprintln!("wolfcut: preview_frame: {error}"))
     .map(tauri::ipc::Response::new)
 }
 
@@ -544,7 +544,7 @@ fn cancel_export(state: tauri::State<'_, ExportState>) {
 ///
 /// `Display` on a `thiserror` enum prints only the outermost message, and the
 /// useful half - what FFmpeg or the OS actually said - is in the source chain.
-fn describe(error: relay_media::Error) -> String {
+fn describe(error: wolfcut_media::Error) -> String {
     use std::error::Error;
 
     let mut message = error.to_string();
@@ -558,7 +558,7 @@ fn describe(error: relay_media::Error) -> String {
 
 /// Points the engine at the bundled FFmpeg.
 ///
-/// Relay ships its own copy so that a fresh install works without the user
+/// WolfCut ships its own copy so that a fresh install works without the user
 /// having installed anything - "is FFmpeg on PATH?" is not a question anyone
 /// should have to answer to open a video file.
 ///
@@ -591,7 +591,7 @@ fn use_bundled_ffmpeg(app: &tauri::App) {
         let ffprobe = directory.join(format!("ffprobe{suffix}"));
 
         if ffmpeg.is_file() && ffprobe.is_file() {
-            relay_media::set_binaries(ffmpeg, ffprobe);
+            wolfcut_media::set_binaries(ffmpeg, ffprobe);
             return;
         }
     }
@@ -618,7 +618,7 @@ pub fn run() {
             )));
             app.manage(editor_api::EditorState(std::sync::Mutex::new(None)));
             app.manage(PoolState(std::sync::Arc::new(std::sync::Mutex::new(
-                relay_media::ReaderPool::with_defaults(),
+                wolfcut_media::ReaderPool::with_defaults(),
             ))));
             Ok(())
         })

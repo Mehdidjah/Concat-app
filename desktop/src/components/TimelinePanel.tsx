@@ -27,7 +27,7 @@ const RULER_HEIGHT = 28;
 /** Tall enough that a filmstrip frame and a waveform are both readable. */
 const TRACK_HEIGHT = 64;
 /** Marks the canvas so a drag in flight can find it. See `resolveDrop`. */
-const CANVAS_MARKER = "data-relay-timeline";
+const CANVAS_MARKER = "data-wolfcut-timeline";
 const HEADER_WIDTH = 164;
 /** How close to a clip edge the pointer must be to grab it, in pixels. */
 const EDGE_GRAB = 6;

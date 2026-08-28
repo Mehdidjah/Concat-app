@@ -13,7 +13,7 @@ import { useCallback, useLayoutEffect, useState } from "react";
  */
 export type Theme = "light" | "dark";
 
-const STORAGE_KEY = "relay.theme";
+const STORAGE_KEY = "wolfcut.theme";
 
 function stored(): Theme {
   try {

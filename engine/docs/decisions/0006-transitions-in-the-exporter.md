@@ -12,7 +12,7 @@ is turned into things the renderer already understands at export time, by
 - **Fade to black/white**: frame-exact `fade` filters appended to each side's
   decode chain. Nothing moves.
 
-`relay-core::Clip` grew exactly one concept: `video_fade_in`/`video_fade_out`
+`wolfcut-core::Clip` grew exactly one concept: `video_fade_in`/`video_fade_out`
 ramps, multiplied into the frame plan's layer opacity. The compositor never
 learns transitions exist.
 
@@ -33,5 +33,5 @@ learns transitions exist.
   engine and stay "Soon" until it has them.
 
 ## What would change our mind
-Animated transforms landing in `relay-core` - at which point wipes arrive and
+Animated transforms landing in `wolfcut-core` - at which point wipes arrive and
 cross-fade could become a first-class engine op instead of an export lowering.

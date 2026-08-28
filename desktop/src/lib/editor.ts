@@ -1,7 +1,7 @@
 /**
  * The UI's view of the engine-owned edit.
  *
- * The engine (`relay-project`, via the `editor_*` commands) is the model of
+ * The engine (`wolfcut-project`, via the `editor_*` commands) is the model of
  * record: every mutation is an [`EditorCommand`] sent through
  * `lib/engine.ts`, and the state that comes back is the truth. What lives
  * here is everything that is legitimately the UI's:

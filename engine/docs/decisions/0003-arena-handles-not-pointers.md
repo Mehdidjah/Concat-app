@@ -1,7 +1,7 @@
 # 0003 - Timeline and graph objects are arena handles, not `Rc<RefCell<..>>`
 
 ## Decision
-Clips, tracks and graph nodes live in a `relay_core::arena::Arena<T>` and are
+Clips, tracks and graph nodes live in a `wolfcut_core::arena::Arena<T>` and are
 referred to by a `Copy` handle, `Id<T>`.
 
 ## Why

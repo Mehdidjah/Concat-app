@@ -1,7 +1,7 @@
 //! The engine-owned editing session, exposed to the UI.
 //!
 //! One session at a time, held in managed state: open a project and the
-//! engine holds the edit; every mutation arrives as a `relay_project`
+//! engine holds the edit; every mutation arrives as a `wolfcut_project`
 //! [`Command`], is applied with undo recorded, and the new state goes back
 //! over the wire. This is the API `lib/editor.ts` mirrors; the provisional
 //! TypeScript model it replaced is gone - see
@@ -12,7 +12,7 @@
 
 use std::sync::Mutex;
 
-use relay_project::{Command, DocumentSettings, Editor};
+use wolfcut_project::{Command, DocumentSettings, Editor};
 use serde::Serialize;
 
 use crate::projects;
@@ -32,7 +32,7 @@ pub struct Session {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EditorView {
-    project: relay_project::Project,
+    project: wolfcut_project::Project,
     can_undo: bool,
     can_redo: bool,
     /// The settings as the session holds them - the document's own output

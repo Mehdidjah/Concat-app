@@ -7,8 +7,8 @@
  * the choice is about this computer's speed/quality tradeoff.
  */
 
-const MODEL_KEY = "relay.transcriber.model";
-const LANGUAGE_KEY = "relay.transcriber.language";
+const MODEL_KEY = "wolfcut.transcriber.model";
+const LANGUAGE_KEY = "wolfcut.transcriber.language";
 
 /** The default model: the speed/quality sweet spot, per the settings panel. */
 export const DEFAULT_TRANSCRIBER_MODEL = "base.en";

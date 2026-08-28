@@ -5,7 +5,7 @@
  * a drag can preview locally before its one command commits. That mirror is
  * the architecture's soft spot: if the two drift, the preview lies and the
  * commit "jumps". Every expectation here is copied from the corresponding
- * test or clamp in `engine/crates/relay-project/src/commands.rs` - when one
+ * test or clamp in `engine/crates/wolfcut-project/src/commands.rs` - when one
  * of these fails, read the engine first and fix whichever side moved.
  */
 import { describe, expect, test } from "vitest";

@@ -2,7 +2,7 @@
 
 ## Decision
 A template (the CapCut-style "drop your clips into a finished edit" feature)
-is an ordinary relay document with one new fact and one new operation:
+is an ordinary wolfcut document with one new fact and one new operation:
 
 - `MediaItem.placeholder: bool` marks a media item as a *slot* - a stand-in
   whose metadata says what belongs there. Skipped when false, so documents
@@ -21,7 +21,7 @@ is an ordinary relay document with one new fact and one new operation:
 The *bundle* - `template.json` with `assets/` for the music and overlays
 that are part of the design, paths relative to the bundle - is host territory
 (`desktop/src-tauri/src/templates.rs`), not engine territory. The host packs
-and unpacks; instantiation opens the document in a `relay_project::Editor`
+and unpacks; instantiation opens the document in a `wolfcut_project::Editor`
 and applies a batch of fills, so what a fill *means* lives in exactly one
 place. The editor never opens on a slot with a dead path: the launch screen
 collects every slot's media first, and instantiation refuses a partial set.
@@ -34,8 +34,8 @@ collects every slot's media first, and instantiation refuses a partial set.
   to the beat many times and fill once - and the engine's "clips reference
   media" indirection was already the right join point.
 - Relative asset paths stay confined to the bundle boundary. The engine
-  still never sees anything but ordinary paths, so `relay-media`,
-  `relay-render` and the exporter needed no changes at all.
+  still never sees anything but ordinary paths, so `wolfcut-media`,
+  `wolfcut-render` and the exporter needed no changes at all.
 
 ## What it costs
 - Slot metadata rides in every document, invisible until used.

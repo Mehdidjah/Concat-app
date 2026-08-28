@@ -29,7 +29,7 @@ the architecture doctrine warns about. Containment:
 
 ## Status: the retirement clock is running
 The first step of the engine presentation path shipped: the reader pool and
-frame cache exist (`relay_media::pool`), and the paused monitor already shows
+frame cache exist (`wolfcut_media::pool`), and the paused monitor already shows
 the engine's true composite through `preview_frame` - real multi-track
 stacking and exact effect chains, with the approximation layer doing motion
 and the truth taking over on dwell. Streaming presentation against the

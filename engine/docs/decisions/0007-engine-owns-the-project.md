@@ -6,13 +6,13 @@
 > commands (decision 0008) on exactly the seam this note built.
 
 ## Decision
-`relay-project` is the model of record for the edit: the document types,
+`wolfcut-project` is the model of record for the edit: the document types,
 every operation as a serialisable `Command`, whole-state undo, and the
-tolerant `relay.json` reader/writer - all ported semantics-for-semantics from
+tolerant `wolfcut.json` reader/writer - all ported semantics-for-semantics from
 the UI's provisional `lib/project.ts`. The host exposes it as the `editor_*`
 commands (open / apply / undo / redo / save / state / close).
 
-`lib/project.ts` is **frozen**: bug fixes only, mirrored into `relay-project`
+`lib/project.ts` is **frozen**: bug fixes only, mirrored into `wolfcut-project`
 in the same commit, until the UI has flipped onto the engine API and the file
 is deleted.
 
@@ -24,11 +24,11 @@ audit that preceded this decision called it the repo's biggest strategic
 debt; this crate is the answer.
 
 ## Shape choices worth recording
-- **A separate crate, not part of relay-core.** The document model needs
-  serde; relay-core's zero-dependency rule is worth more than adjacency.
+- **A separate crate, not part of wolfcut-core.** The document model needs
+  serde; wolfcut-core's zero-dependency rule is worth more than adjacency.
 - **String ids and f64 seconds in the document model.** These match the
   on-disk format and the ten projects that already exist. The arena-handled,
-  rational-time `relay-core::Timeline` remains the *render* model; the
+  rational-time `wolfcut-core::Timeline` remains the *render* model; the
   exporter converts, as it always has. Moving the document itself to exact
   time is a format decision to make once, deliberately, later.
 - **Undo is whole-state snapshots**, capped at 200. A heavy project is a few

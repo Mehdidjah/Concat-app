@@ -622,7 +622,7 @@ function Editor({
         const media = findMedia(current, mediaId);
         if (!media) return [];
         const from = at;
-        // The engine's own placement defaults (relay-project: a still lasts
+        // The engine's own placement defaults (wolfcut-project: a still lasts
         // 5s, unknown-duration media falls back to 5s) - mirrored here only
         // to lay items end to end; the engine still decides each clip's
         // real duration.
@@ -823,7 +823,7 @@ function Editor({
         case "KeyF": {
           // The same marker resolveDrop uses to find the timeline canvas -
           // its width is a layout fact only that element knows.
-          const canvas = document.querySelector<HTMLCanvasElement>("[data-relay-timeline]");
+          const canvas = document.querySelector<HTMLCanvasElement>("[data-wolfcut-timeline]");
           if (canvas) fit(canvas.clientWidth);
           break;
         }

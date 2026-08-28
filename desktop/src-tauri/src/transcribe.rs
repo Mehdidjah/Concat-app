@@ -20,7 +20,7 @@
 //!    as 16 kHz mono WAV - the input whisper wants - then `whisper-cli`
 //!    writes JSON, which is parsed into segments relative to the window.
 //!
-//! This lives in the host rather than `relay-media` for now: the engine has
+//! This lives in the host rather than `wolfcut-media` for now: the engine has
 //! no caption concept, and model downloads certainly do not belong there. If
 //! the engine grows an audio-analysis seam, the runner half graduates.
 
@@ -425,7 +425,7 @@ fn extract_wav(
     destination: &Path,
     slot: &Arc<Mutex<Option<Child>>>,
 ) -> Result<(), String> {
-    let mut command = Command::new(relay_media::ffmpeg());
+    let mut command = Command::new(wolfcut_media::ffmpeg());
     command
         .args(["-hide_banner", "-nostdin", "-loglevel", "error", "-y"])
         .args(["-ss", &format!("{start:.6}")])
@@ -513,9 +513,9 @@ fn run_transcription(
         RUNS.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
     );
     let scratch = std::env::temp_dir();
-    let wav = scratch.join(format!("relay-transcribe-{nonce}.wav"));
-    let out_base = scratch.join(format!("relay-transcribe-{nonce}"));
-    let json = scratch.join(format!("relay-transcribe-{nonce}.json"));
+    let wav = scratch.join(format!("wolfcut-transcribe-{nonce}.wav"));
+    let out_base = scratch.join(format!("wolfcut-transcribe-{nonce}"));
+    let json = scratch.join(format!("wolfcut-transcribe-{nonce}.json"));
 
     let result = (|| {
         extract_wav(&request.path, request.source_start, request.window, &wav, slot)?;

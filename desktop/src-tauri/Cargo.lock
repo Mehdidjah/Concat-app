@@ -3248,56 +3248,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
-name = "relay-core"
-version = "0.1.0"
-
-[[package]]
-name = "relay-desktop"
-version = "0.1.0"
-dependencies = [
- "cpal",
- "memmap2",
- "relay-core",
- "relay-media",
- "relay-project",
- "relay-render",
- "rusqlite",
- "serde",
- "serde_json",
- "tauri",
- "tauri-build",
- "tauri-plugin-dialog",
- "tauri-plugin-opener",
- "ureq",
-]
-
-[[package]]
-name = "relay-media"
-version = "0.1.0"
-dependencies = [
- "relay-core",
- "serde_json",
- "thiserror 2.0.20",
-]
-
-[[package]]
-name = "relay-project"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "relay-render"
-version = "0.1.0"
-dependencies = [
- "pollster",
- "relay-core",
- "wgpu",
-]
-
-[[package]]
 name = "renderdoc-sys"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5865,6 +5815,56 @@ name = "wit-bindgen"
 version = "0.57.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
+
+[[package]]
+name = "wolfcut-core"
+version = "0.1.0"
+
+[[package]]
+name = "wolfcut-desktop"
+version = "0.1.0"
+dependencies = [
+ "cpal",
+ "memmap2",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-dialog",
+ "tauri-plugin-opener",
+ "ureq",
+ "wolfcut-core",
+ "wolfcut-media",
+ "wolfcut-project",
+ "wolfcut-render",
+]
+
+[[package]]
+name = "wolfcut-media"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "thiserror 2.0.20",
+ "wolfcut-core",
+]
+
+[[package]]
+name = "wolfcut-project"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "wolfcut-render"
+version = "0.1.0"
+dependencies = [
+ "pollster",
+ "wgpu",
+ "wolfcut-core",
+]
 
 [[package]]
 name = "writeable"

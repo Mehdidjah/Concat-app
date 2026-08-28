@@ -1,9 +1,9 @@
 //! Rendering a timeline to a file.
 //!
 //! This is the seam where the UI's model becomes the engine's: clips arrive as
-//! flat JSON, are converted into a `relay_core::Timeline`, and from there the
-//! engine decides everything - what is on screen (`relay-render`), what the
-//! sound means (`relay_media::audio`), and how bytes move (`relay-media`).
+//! flat JSON, are converted into a `wolfcut_core::Timeline`, and from there the
+//! engine decides everything - what is on screen (`wolfcut-render`), what the
+//! sound means (`wolfcut_media::audio`), and how bytes move (`wolfcut-media`).
 //! Editing semantics deliberately do not live here; this file converts,
 //! orchestrates and reports.
 //!
@@ -15,14 +15,14 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use relay_core::frame::Frame;
-use relay_core::time::{FrameRate, Rational};
-use relay_core::timeline::{Clip, ClipId, MediaRef, Timeline, Track, TrackKind, Transform};
-use relay_media::audio::{self, AudioClip};
-use relay_media::{
+use wolfcut_core::frame::Frame;
+use wolfcut_core::time::{FrameRate, Rational};
+use wolfcut_core::timeline::{Clip, ClipId, MediaRef, Timeline, Track, TrackKind, Transform};
+use wolfcut_media::audio::{self, AudioClip};
+use wolfcut_media::{
     DecodeOptions, EncodeOptions, FfmpegDecoder, FfmpegEncoder, FrameSink, FrameSource,
 };
-use relay_render::{Compositor, CpuCompositor, Layer, Placement, WgpuCompositor, plan_frame};
+use wolfcut_render::{Compositor, CpuCompositor, Layer, Placement, WgpuCompositor, plan_frame};
 use serde::{Deserialize, Serialize};
 use tauri::Emitter;
 
@@ -364,7 +364,7 @@ pub fn render(request: &ExportRequest, mut reporter: Reporter<'_>) -> Result<Str
     sound.retain(|clip| {
         clip.has_audio.unwrap_or_else(|| {
             *probed.entry(clip.path.as_str()).or_insert_with(|| {
-                relay_media::probe(&clip.path).is_ok_and(|info| info.audio.is_some())
+                wolfcut_media::probe(&clip.path).is_ok_and(|info| info.audio.is_some())
             })
         })
     });
@@ -380,10 +380,10 @@ pub fn render(request: &ExportRequest, mut reporter: Reporter<'_>) -> Result<Str
 
     // Render into siblings of the output so the move at the end stays on one
     // filesystem, then clean up whatever we made.
-    let stem = output.file_stem().map_or_else(|| "relay".into(), |s| s.to_string_lossy());
+    let stem = output.file_stem().map_or_else(|| "wolfcut".into(), |s| s.to_string_lossy());
     let directory = output.parent().unwrap_or(Path::new("."));
-    let silent = directory.join(format!(".{stem}.relay-video.mp4"));
-    let mixed = directory.join(format!(".{stem}.relay-audio.m4a"));
+    let silent = directory.join(format!(".{stem}.wolfcut-video.mp4"));
+    let mixed = directory.join(format!(".{stem}.wolfcut-audio.m4a"));
 
     let result = (|| -> Result<(), String> {
         render_picture(request, rate, total_frames, &visible, &silent, &mut reporter)?;
@@ -697,7 +697,7 @@ pub struct PreviewFrameRequest {
 /// already matches the exporter's. Returns raw RGBA, exactly
 /// `width * height * 4` bytes.
 pub fn preview_frame(
-    pool: &mut relay_media::ReaderPool,
+    pool: &mut wolfcut_media::ReaderPool,
     request: &PreviewFrameRequest,
 ) -> Result<Vec<u8>, String> {
     let rate = FrameRate::new(Rational::new(request.rate_num, request.rate_den));
@@ -820,10 +820,10 @@ mod tests {
     /// the footage, not an empty composite. Skips silently without FFmpeg.
     #[test]
     fn preview_frame_shows_the_footage_not_black() {
-        use relay_core::frame::Frame;
-        use relay_media::{EncodeOptions, FfmpegEncoder, FrameSink};
+        use wolfcut_core::frame::Frame;
+        use wolfcut_media::{EncodeOptions, FfmpegEncoder, FrameSink};
 
-        let path = std::env::temp_dir().join("relay-preview-test.mp4");
+        let path = std::env::temp_dir().join("wolfcut-preview-test.mp4");
         let Ok(mut encoder) = FfmpegEncoder::create(
             &path,
             64,
@@ -853,7 +853,7 @@ mod tests {
             clips: vec![request_clip],
         };
 
-        let mut pool = relay_media::ReaderPool::new(16 * 1024 * 1024, 2);
+        let mut pool = wolfcut_media::ReaderPool::new(16 * 1024 * 1024, 2);
         let bytes = preview_frame(&mut pool, &request).expect("previews");
         assert_eq!(bytes.len(), 64 * 64 * 4);
         let centre = (32 * 64 + 32) * 4;

@@ -34,7 +34,7 @@ start cutting, no account, no extra downloads, no setup.
 
 ## Get started
 
-Download from [Releases](https://github.com/jub0t/WolfCut/releases), Supports:
+Currently in Alpha (pre-release), Download from [Releases](https://github.com/jub0t/WolfCut/releases), Supports:
 - Windows (tested)
 - MacOs (tested)
 - Linux

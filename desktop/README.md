@@ -80,7 +80,7 @@ src-tauri/
 - **No time arithmetic in TypeScript.** The engine works in exact rational
   seconds; JS numbers are `f64` and drift. `lib/time.ts` formats, nothing more.
 - **The engine owns the edit.** Every mutation is an `editor_apply` command
-  into `relay-project` (engine decision 0007); the UI renders the state that
+  into `wolfcut-project` (engine decision 0007); the UI renders the state that
   comes back and holds only a transient gesture echo while a drag is in
   flight. Undo, serialisation and the operations themselves live in Rust -
   do not reintroduce model logic in TypeScript.

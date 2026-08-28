@@ -909,47 +909,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
-name = "relay-cli"
-version = "0.1.0"
-dependencies = [
- "clap",
- "relay-core",
- "relay-media",
- "relay-render",
-]
-
-[[package]]
-name = "relay-core"
-version = "0.1.0"
-
-[[package]]
-name = "relay-media"
-version = "0.1.0"
-dependencies = [
- "relay-core",
- "rusty_ffmpeg",
- "serde_json",
- "thiserror",
-]
-
-[[package]]
-name = "relay-project"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "relay-render"
-version = "0.1.0"
-dependencies = [
- "pollster",
- "relay-core",
- "wgpu",
-]
-
-[[package]]
 name = "renderdoc-sys"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1533,6 +1492,47 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3949bd5b99cafdf1c7ca86b43ca564028dfe27d66958f2470940f73d86d75b37"
 dependencies = [
  "windows-link",
+]
+
+[[package]]
+name = "wolfcut-cli"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "wolfcut-core",
+ "wolfcut-media",
+ "wolfcut-render",
+]
+
+[[package]]
+name = "wolfcut-core"
+version = "0.1.0"
+
+[[package]]
+name = "wolfcut-media"
+version = "0.1.0"
+dependencies = [
+ "rusty_ffmpeg",
+ "serde_json",
+ "thiserror",
+ "wolfcut-core",
+]
+
+[[package]]
+name = "wolfcut-project"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "wolfcut-render"
+version = "0.1.0"
+dependencies = [
+ "pollster",
+ "wgpu",
+ "wolfcut-core",
 ]
 
 [[package]]
