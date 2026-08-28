@@ -75,6 +75,7 @@ pub fn templates_dir(config: &Path) -> PathBuf {
 pub fn save(
     config: &Path,
     document: &Value,
+    settings: &wolfcut_project::DocumentSettings,
     project_path: &str,
     name: &str,
 ) -> Result<TemplateInfo, String> {
@@ -86,31 +87,30 @@ pub fn save(
     std::fs::create_dir_all(&assets)
         .map_err(|error| format!("could not create {}: {error}", assets.display()))?;
 
-    let mut document = document.clone();
-    document["name"] = Value::String(name.to_owned());
+    // Typed through the engine's reader and writer, not hand-edited JSON:
+    // the manifest is written by the same code path every save uses, and a
+    // schema change breaks this at compile time.
+    let Some(mut project) = wolfcut_project::from_document(document) else {
+        return Err("the open project is not a document this build can read".to_owned());
+    };
 
     // Placeholder media loses its path - it was the creator's own footage,
     // standing in. Everything else is part of the design and ships in the
     // bundle, referenced relative to it.
-    if let Some(media) = document.get_mut("media").and_then(Value::as_array_mut) {
-        for item in media {
-            let placeholder =
-                item.get("placeholder").and_then(Value::as_bool).unwrap_or(false);
-            if placeholder {
-                item["path"] = Value::String(String::new());
-                continue;
-            }
-            let source = item.get("path").and_then(Value::as_str).unwrap_or("").to_owned();
-            let id = item.get("id").and_then(Value::as_str).unwrap_or("m").to_owned();
-            item["path"] = Value::String(bundle_file(&assets, &id, &source)?);
+    for item in &mut project.media {
+        if item.placeholder {
+            item.path = String::new();
+            continue;
         }
+        item.path = bundle_file(&assets, &item.id.clone(), &item.path.clone())?;
     }
-    if let Some(fonts) = document.get_mut("fonts").and_then(Value::as_array_mut) {
-        for (index, font) in fonts.iter_mut().enumerate() {
-            let source = font.get("path").and_then(Value::as_str).unwrap_or("").to_owned();
-            font["path"] = Value::String(bundle_file(&assets, &format!("font{index}"), &source)?);
-        }
+    for (index, font) in project.fonts.iter_mut().enumerate() {
+        font.path = bundle_file(&assets, &format!("font{index}"), &font.path.clone())?;
     }
+
+    let mut settings = settings.clone();
+    settings.name = name.to_owned();
+    let document = wolfcut_project::to_document(&settings, &project);
 
     let encoded = serde_json::to_vec_pretty(&document)
         .map_err(|error| format!("could not encode the template: {error}"))?;
@@ -206,47 +206,45 @@ fn read_info(root: &Path) -> Result<TemplateInfo, String> {
 
 /// The placeholder media of a document, ordered by when each first appears
 /// on the active timeline - the order a user fills them in.
+///
+/// Typed through the engine's own reader: a schema change breaks this at
+/// compile time, not as a gallery that silently shows no slots.
 fn slots_of(document: &Value) -> Vec<SlotInfo> {
-    let media = document.get("media").and_then(Value::as_array);
-    // The flat top-level clips mirror the active timeline, exactly as the
-    // poster frame reads them.
-    let clips = document.get("clips").and_then(Value::as_array);
-    let (Some(media), clips) = (media, clips.map(Vec::as_slice).unwrap_or(&[])) else {
+    let Some(project) = wolfcut_project::from_document(document) else {
         return Vec::new();
     };
+    let clips = project
+        .timelines
+        .iter()
+        .find(|timeline| timeline.id == project.active_timeline_id)
+        .or_else(|| project.timelines.first())
+        .map(|timeline| timeline.clips.as_slice())
+        .unwrap_or(&[]);
 
     let mut slots: Vec<(f64, SlotInfo)> = Vec::new();
-    for item in media {
-        if !item.get("placeholder").and_then(Value::as_bool).unwrap_or(false) {
+    for item in &project.media {
+        if !item.placeholder {
             continue;
         }
-        let Some(id) = item.get("id").and_then(Value::as_str) else { continue };
 
         let mut first = f64::MAX;
         let mut seconds = 0.0;
-        for clip in clips {
-            if clip.get("mediaId").and_then(Value::as_str) != Some(id) {
-                continue;
-            }
-            let start = clip.get("start").and_then(Value::as_f64).unwrap_or(0.0);
-            first = first.min(start);
-            seconds += clip.get("duration").and_then(Value::as_f64).unwrap_or(0.0);
+        for clip in clips.iter().filter(|clip| clip.media_id == item.id) {
+            first = first.min(clip.start);
+            seconds += clip.duration;
         }
 
         slots.push((
             first,
             SlotInfo {
-                media_id: id.to_owned(),
-                name: item
-                    .get("name")
-                    .and_then(Value::as_str)
-                    .unwrap_or("Slot")
-                    .to_owned(),
-                kind: item
-                    .get("kind")
-                    .and_then(Value::as_str)
-                    .unwrap_or("video")
-                    .to_owned(),
+                media_id: item.id.clone(),
+                name: item.name.clone(),
+                kind: match item.kind {
+                    wolfcut_project::model::MediaKind::Video => "video",
+                    wolfcut_project::model::MediaKind::Audio => "audio",
+                    wolfcut_project::model::MediaKind::Image => "image",
+                }
+                .to_owned(),
                 seconds,
             },
         ));
@@ -439,14 +437,24 @@ mod tests {
             media[1]["kind"] = Value::String("audio".to_owned());
         }
 
-        let info = save(&config, &document, &project.to_string_lossy(), "Beat Intro")
+        let settings = wolfcut_project::DocumentSettings {
+            name: "Beat Intro".to_owned(),
+            width: 1920,
+            height: 1080,
+            rate_num: 30,
+            rate_den: 1,
+        };
+        let info = save(&config, &document, &settings, &project.to_string_lossy(), "Beat Intro")
             .expect("saves");
         assert_eq!(info.name, "Beat Intro");
         assert_eq!(info.slots.len(), 1, "only the placeholder is a slot");
         assert_eq!(info.slots[0].media_id, "m1");
 
         // The same name again is refused, not overwritten.
-        assert!(save(&config, &document, &project.to_string_lossy(), "Beat Intro").is_err());
+        assert!(
+            save(&config, &document, &settings, &project.to_string_lossy(), "Beat Intro")
+                .is_err()
+        );
 
         let bundle = PathBuf::from(&info.path);
         let packed: Value = serde_json::from_slice(

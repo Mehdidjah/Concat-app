@@ -330,35 +330,41 @@ fn poster_frame(project: &str) -> Result<Vec<u8>, String> {
     let document: serde_json::Value =
         serde_json::from_str(&text).map_err(|error| format!("not a project: {error}"))?;
 
-    // The flat top-level clips are the active timeline - exactly the frame
-    // the user last saw. The earliest clip with a picture is the poster.
-    let clips = document.get("clips").and_then(|value| value.as_array());
-    let media = document.get("media").and_then(|value| value.as_array());
-    let (clips, media) = match (clips, media) {
-        (Some(clips), Some(media)) => (clips, media),
-        _ => return Err("the project has no timeline to preview".to_owned()),
+    // Typed access through the engine's own reader, not hand-parsed JSON -
+    // a schema change breaks this at compile time now, not silently at the
+    // next launch screen.
+    let Some(project) = wolfcut_project::from_document(&document) else {
+        return Err("the project has no timeline to preview".to_owned());
+    };
+    let timeline = project
+        .timelines
+        .iter()
+        .find(|timeline| timeline.id == project.active_timeline_id)
+        .or_else(|| project.timelines.first());
+    let Some(timeline) = timeline else {
+        return Err("the project has no timeline to preview".to_owned());
     };
 
+    // The earliest clip with a picture is the poster - exactly the frame
+    // the user last saw open.
+    use wolfcut_project::model::ClipKind;
     let mut poster: Option<(f64, String, f64, bool)> = None;
-    for clip in clips {
-        let kind = clip.get("kind").and_then(|value| value.as_str()).unwrap_or("");
-        if kind != "video" && kind != "image" {
+    for clip in &timeline.clips {
+        if clip.kind != ClipKind::Video && clip.kind != ClipKind::Image {
             continue;
         }
-        let start = clip.get("start").and_then(|value| value.as_f64()).unwrap_or(0.0);
-        if poster.as_ref().is_some_and(|(best, ..)| *best <= start) {
+        if poster.as_ref().is_some_and(|(best, ..)| *best <= clip.start) {
             continue;
         }
-        let media_id = clip.get("mediaId").and_then(|value| value.as_str()).unwrap_or("");
-        let Some(path) = media.iter().find_map(|item| {
-            (item.get("id").and_then(|value| value.as_str()) == Some(media_id))
-                .then(|| item.get("path").and_then(|value| value.as_str()))
-                .flatten()
-        }) else {
+        let Some(media) = project.media.iter().find(|item| item.id == clip.media_id) else {
             continue;
         };
-        let source_start = clip.get("sourceStart").and_then(|value| value.as_f64()).unwrap_or(0.0);
-        poster = Some((start, path.to_owned(), source_start, kind == "image"));
+        poster = Some((
+            clip.start,
+            media.path.clone(),
+            clip.source_start,
+            clip.kind == ClipKind::Image,
+        ));
     }
 
     let Some((_, media_path, source_start, is_still)) = poster else {
@@ -492,10 +498,10 @@ async fn template_save(
     state: tauri::State<'_, editor_api::EditorState>,
     name: String,
 ) -> Result<templates::TemplateInfo, String> {
-    let (document, project_path, _) = editor_api::session_snapshot(&state)?;
+    let (document, project_path, settings) = editor_api::session_snapshot(&state)?;
     let config = config_dir(&app)?;
     tauri::async_runtime::spawn_blocking(move || {
-        templates::save(&config, &document, &project_path, &name)
+        templates::save(&config, &document, &settings, &project_path, &name)
     })
     .await
     .map_err(|error| format!("template save task failed: {error}"))?
