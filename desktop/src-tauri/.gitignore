@@ -8,3 +8,5 @@
 
 # Staged FFmpeg pair for bundled builds (downloaded in CI, ~100 MB)
 /ffmpeg/
+/whisper/whisper-cli*
+/whisper/*.dll

@@ -189,7 +189,7 @@ function TranscriberSettings() {
       <section>
         <h3 className="mb-2 flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-tertiary">
           Engine
-          <HelpTip text="Transcription runs whisper.cpp locally - nothing leaves this machine. Download whisper-cli from the whisper.cpp releases page and point Relay at it once." />
+          <HelpTip text="Transcription runs whisper.cpp locally - nothing leaves this machine. The engine ships inside WolfCut; pick a model below and captions work." />
         </h3>
         <div className="flex items-center gap-2 rounded-lg bg-sunken px-3 py-2.5">
           <span
@@ -200,16 +200,22 @@ function TranscriberSettings() {
           <span className="min-w-0 flex-1 truncate text-xs text-secondary">
             {status === null
               ? "Checking..."
-              : (status.binary ?? "whisper-cli not found - locate it to enable captions")}
+              : status.bundled
+                ? "Included with WolfCut"
+                : (status.binary ?? "Transcription engine not found in this dev build")}
           </span>
-          <button
-            type="button"
-            onClick={() => void locate()}
-            className="shrink-0 cursor-pointer rounded-md bg-panel px-2.5 py-1 text-[11px]
-                       text-primary ring-1 ring-hairline transition-colors hover:bg-hover"
-          >
-            Locate...
-          </button>
+          {/* The picker is a dev-build escape hatch, never a user chore: a
+              packaged app always carries its own copy and hides this. */}
+          {status !== null && !status.bundled && (
+            <button
+              type="button"
+              onClick={() => void locate()}
+              className="shrink-0 cursor-pointer rounded-md bg-panel px-2.5 py-1 text-[11px]
+                         text-primary ring-1 ring-hairline transition-colors hover:bg-hover"
+            >
+              Locate...
+            </button>
+          )}
         </div>
       </section>
 

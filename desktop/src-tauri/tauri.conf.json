@@ -45,7 +45,8 @@
       "icons/icon.ico"
     ],
     "resources": {
-      "ffmpeg/*": "ffmpeg/"
+      "ffmpeg/*": "ffmpeg/",
+      "whisper/*": "whisper/"
     }
   }
 }

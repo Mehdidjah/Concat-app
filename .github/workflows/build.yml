@@ -114,6 +114,49 @@ jobs:
           desktop/src-tauri/ffmpeg/ffmpeg -version | head -1
           desktop/src-tauri/ffmpeg/ffprobe -version | head -1
 
+      # The transcriber ships too: users never install a binary (see desktop
+      # decision 0010). Built from source where no official binary exists,
+      # cached by version so it costs one cold build per platform.
+      - name: Cache whisper-cli (unix)
+        if: matrix.platform != 'windows'
+        uses: actions/cache@v4
+        with:
+          path: whisper-stage
+          key: whisper-cli-v1.8.2-${{ matrix.platform }}
+
+      - name: Stage bundled whisper-cli (unix)
+        if: matrix.platform != 'windows'
+        run: |
+          set -euo pipefail
+          if [ ! -x whisper-stage/whisper-cli ]; then
+            git clone --depth 1 --branch v1.8.2 https://github.com/ggml-org/whisper.cpp.git wbuild
+            cmake -S wbuild -B wbuild/build -DCMAKE_BUILD_TYPE=Release \
+              -DBUILD_SHARED_LIBS=OFF -DGGML_METAL_EMBED_LIBRARY=ON -DWHISPER_BUILD_TESTS=OFF
+            cmake --build wbuild/build --config Release -j 4 --target whisper-cli
+            mkdir -p whisper-stage
+            cp wbuild/build/bin/whisper-cli whisper-stage/whisper-cli
+          fi
+          mkdir -p desktop/src-tauri/whisper
+          cp whisper-stage/whisper-cli desktop/src-tauri/whisper/whisper-cli
+          chmod +x desktop/src-tauri/whisper/whisper-cli
+          desktop/src-tauri/whisper/whisper-cli --help >/dev/null 2>&1 || true
+
+      - name: Stage bundled whisper-cli (Windows)
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          New-Item -ItemType Directory -Force desktop/src-tauri/whisper | Out-Null
+          curl.exe -fsSL --retry 5 --retry-all-errors -o whisper-win.zip `
+            "https://github.com/ggml-org/whisper.cpp/releases/download/v1.8.2/whisper-bin-x64.zip"
+          Expand-Archive whisper-win.zip -DestinationPath wdl
+          Copy-Item (Get-ChildItem wdl -Recurse -Filter whisper-cli.exe | Select-Object -First 1).FullName desktop/src-tauri/whisper/
+          # The official build is dynamic; its DLLs ride along in the same
+          # resource folder, which is also the executable's search path.
+          Get-ChildItem wdl -Recurse -Filter *.dll | ForEach-Object {
+            Copy-Item $_.FullName desktop/src-tauri/whisper/
+          }
+
       - name: Stage bundled FFmpeg (Windows)
         if: matrix.platform == 'windows'
         shell: pwsh

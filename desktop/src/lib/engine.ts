@@ -454,6 +454,8 @@ export interface TranscriberModel {
 export interface TranscriberStatus {
   /** Where `whisper-cli` was found, or null when it was not. */
   binary: string | null;
+  /** True when the binary in use is the copy shipped inside the app. */
+  bundled: boolean;
   /** Where models are stored on disk. */
   modelsDir: string;
   models: TranscriberModel[];

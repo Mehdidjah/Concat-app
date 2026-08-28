@@ -8,10 +8,11 @@
 //!
 //! Three pieces:
 //!
-//! 1. **The binary.** `whisper-cli` is not bundled (yet). It is looked for in
-//!    the app data folder, beside the executable, then on PATH - and the user
-//!    can point at a copy from Settings, which is remembered in
-//!    `transcriber.json` in the config directory.
+//! 1. **The binary.** `whisper-cli` ships inside the app, staged at build
+//!    like FFmpeg; the release guard refuses to build without it. The search
+//!    below still honours a remembered override first and falls back to the
+//!    app data folder, beside the executable, then PATH - for dev builds and
+//!    for anyone who insists on their own copy.
 //! 2. **Models.** Downloaded on demand from Hugging Face into the app data
 //!    folder as plain `.bin` files, streamed with progress events, written to
 //!    a `.part` and renamed - a torn download must never look usable.
@@ -203,6 +204,8 @@ pub struct ModelStatus {
 pub struct TranscriberStatus {
     /// Where `whisper-cli` was found, or null when it was not.
     binary: Option<String>,
+    /// True when the binary in use is the copy shipped inside the app.
+    bundled: bool,
     /// Where models are stored, so the settings panel can say so.
     models_dir: String,
     models: Vec<ModelStatus>,
@@ -212,8 +215,14 @@ pub struct TranscriberStatus {
 #[tauri::command]
 pub fn transcriber_status(app: tauri::AppHandle) -> Result<TranscriberStatus, String> {
     let dir = models_dir(&app)?;
+    let binary = find_binary(&app);
+    let bundled = match (&binary, app.path().resource_dir()) {
+        (Some(path), Ok(resources)) => path.starts_with(&resources),
+        _ => false,
+    };
     Ok(TranscriberStatus {
-        binary: find_binary(&app).map(|path| path.to_string_lossy().into_owned()),
+        binary: binary.map(|path| path.to_string_lossy().into_owned()),
+        bundled,
         models_dir: dir.to_string_lossy().into_owned(),
         models: KNOWN_MODELS
             .iter()

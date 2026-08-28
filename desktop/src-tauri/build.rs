@@ -16,6 +16,18 @@ fn main() {
             );
         }
         println!("cargo:rerun-if-changed=ffmpeg");
+
+        // Same rule for the transcriber: users are never asked to install a
+        // binary and point the app at it, so a release ships its own
+        // whisper-cli or it does not ship.
+        let whisper = std::path::Path::new("whisper").join(format!("whisper-cli{suffix}"));
+        assert!(
+            whisper.is_file(),
+            "release build without a bundled whisper-cli: stage it in \
+             desktop/src-tauri/whisper/ first (see the Build App workflow), or \
+             transcription would arrive as a setup chore instead of a feature"
+        );
+        println!("cargo:rerun-if-changed=whisper");
     }
 
     tauri_build::build()
