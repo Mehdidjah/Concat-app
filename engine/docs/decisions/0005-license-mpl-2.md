@@ -9,8 +9,7 @@ repository root is the canonical text; every crate and package manifest names
 - File-level copyleft: changes to WolfCut's own files must be shared, which
   keeps improvements flowing back without capturing everything they touch.
 - A proprietary plugin, integration, or vendor SDK can link against the engine
-  without inheriting the license - the future OpenFX/VST story (decision 0001)
-  stays possible.
+  without inheriting the license - the future OpenFX/VST story stays possible.
 - Compatible with the dependency tree in use (MIT/Apache Rust crates), and
   with distributing GPL-built FFmpeg *alongside* the app as a separate
   program.

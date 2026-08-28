@@ -5,6 +5,11 @@ The timeline is one `<canvas>` drawn from a `requestAnimationFrame` loop. The
 preview is a placeholder that will become a native GPU surface. Neither renders
 through React.
 
+> The preview half has moved twice since: 0007 promoted its approximation
+> layer to the plan of record, and 0009 streams the engine's true composite
+> against the transport clock. The native surface stays the endgame; those two
+> notes are the path to it.
+
 ## Why
 - A real edit is thousands of clips, keyframes and waveform segments. As DOM
   nodes that is thousands of elements, restyled and re-laid-out on every scrub.

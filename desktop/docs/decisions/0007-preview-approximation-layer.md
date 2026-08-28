@@ -32,8 +32,10 @@ The first step of the engine presentation path shipped: the reader pool and
 frame cache exist (`relay_media::pool`), and the paused monitor already shows
 the engine's true composite through `preview_frame` - real multi-track
 stacking and exact effect chains, with the approximation layer doing motion
-and the truth taking over on dwell. What remains for full retirement is
-streaming presentation against the transport clock.
+and the truth taking over on dwell. Streaming presentation against the
+transport clock has since begun where the approximation is wrong - stacked
+layers stream the true composite during playback (decision 0009). Full
+retirement still waits on the native surface.
 
 ## What would change our mind
 The engine presentation path completing. When the engine can show its own

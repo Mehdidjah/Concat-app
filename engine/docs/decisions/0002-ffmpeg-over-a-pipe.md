@@ -92,6 +92,18 @@ consumers are live: `relay-cli render` (whose founding "deliberate shortcut"
 comment is finally deleted) and the host's `preview_frame` command, which
 composites the true frame for the paused monitor.
 
+## Status: streaming presentation has begun, and the FFI half is portable now
+
+The "what remains" below is half done: the desktop monitor now pulls pooled
+frames continuously against the transport clock wherever its approximation
+cannot composite - see desktop decision 0009 for the shape and its
+native-surface exit. And the FFI build plumbing this note budgeted for is
+paid on macOS too: the feature builds and passes every test against a
+package-manager FFmpeg via `FFMPEG_PKG_CONFIG_PATH` (after two portability
+fixes - a committed Windows vendor path, and `AVERROR(EAGAIN)` being -35,
+not -11, on macOS and the BSDs). It stays off in shipped builds; linking
+FFmpeg is the licensing tripwire decision 0005 records.
+
 ## What would change our mind
 Nothing left to decide about *whether*. What remains is streaming playback -
 presenting pooled frames continuously against the transport clock rather than

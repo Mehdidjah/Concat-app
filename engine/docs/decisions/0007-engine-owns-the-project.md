@@ -1,5 +1,10 @@
 # 0007 - The engine owns the project
 
+> **Status: the migration is complete.** Every step below is done;
+> `lib/project.ts` and `lib/persist.ts` are deleted, and the freeze language
+> in the decision is historical. This crate has since grown the template
+> commands (decision 0008) on exactly the seam this note built.
+
 ## Decision
 `relay-project` is the model of record for the edit: the document types,
 every operation as a serialisable `Command`, whole-state undo, and the

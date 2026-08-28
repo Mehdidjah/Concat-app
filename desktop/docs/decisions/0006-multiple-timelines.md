@@ -1,5 +1,11 @@
 # 0006 - Multiple timelines, and the shelf that made them cheap
 
+> **Status: the exit was taken.** The shelf died with `lib/project.ts` when
+> the UI flipped onto the engine model (engine decision 0007), exactly as
+> planned below - no `shelved` map exists anywhere in the tree. What
+> survives of this note is the feature itself and the document-format
+> compatibility reasoning.
+
 ## Decision
 A project holds several timelines (tabs above the timeline tray). In the
 frozen UI model the active timeline's tracks and clips stay at the top of the
