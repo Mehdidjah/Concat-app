@@ -8,8 +8,6 @@
 
 [![Build](https://github.com/jub0t/WolfCut/actions/workflows/build.yml/badge.svg)](https://github.com/jub0t/WolfCut/actions/workflows/build.yml)
 [![Platforms](https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-8A2BE2)](https://github.com/jub0t/WolfCut/releases)
-[![Made with Rust](https://img.shields.io/badge/engine-Rust-DEA584?logo=rust&logoColor=white)](engine)
-[![UI](https://img.shields.io/badge/ui-React%20%2B%20Tauri-24C8DB?logo=tauri&logoColor=white)](desktop)
 [![Version](https://img.shields.io/badge/version-0.1.0-blue)](https://github.com/jub0t/WolfCut)
 [![Discord](https://img.shields.io/badge/Discord-join%20the%20server-5865F2?logo=discord&logoColor=white)](https://discord.gg/DVuPfpXfqP)
 
@@ -27,8 +25,8 @@ start cutting, no account, no extra downloads, no setup.
 ## Highlights
 
 - 🎬 Multi-track timeline
-- 🎙️ Free Voice Filters
-- Free Local Auto-captions (transcription)
+- 🎙️ Uses [ffmpeg](https://github.com/ffmpeg/ffmpeg) for Free Voice Filters
+- Uses [whisper.cpp](https://github.com/ggml-org/whisper.cpp) for Local Auto-captions (transcription)
 - Save and re-use Templates
 - 🚫 No watermarks, ever.
 - 🖥️ Cross-platform
@@ -40,16 +38,21 @@ Currently in Alpha (pre-release), Download from [Releases](https://github.com/ju
 - MacOs (tested)
 - Linux
 
-## Growth
+## Roadmap (or ideas)
 
-<a href="https://star-history.com/#jub0t/WolfCut&Date">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=jub0t/WolfCut&type=Date&theme=dark" />
-    <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=jub0t/WolfCut&type=Date" />
-    <img alt="Star history chart" src="https://api.star-history.com/svg?repos=jub0t/WolfCut&type=Date" />
-  </picture>
-</a>
+🌟 = important or really desired.
 
-<div align="center">
-<sub>WolfCut is under active development — things move fast and edges are sharp.</sub>
-</div>
+- [ ] 🌟 Templates: Improve templates, create centralized registry of templates contributed by users (kinda like npm).
+- [ ] Hardware analysis: for device-tier detection, checking how good or potato someone's device is.
+- [ ] Effects: A scaleable way to embed or add hundreds of different Transition styles, Effects, etc to the Library.
+- [ ] Noise Cancelation/Removal.
+- [ ] Object/Face Tracking: Proposed (can do better): MOSSE/KCF/optical flow.
+- [ ] Auto Human Face Detection & Blurring features: YuNet + tracker, or look for better alternative tech.
+- [ ] Caption text highlighting: Achievable with Whisper.cpp for timestamps.
+- [ ] Profanity detection from Audio: Whisper + dictionary.
+- [ ] Audio Silence removal feature.
+- [ ] Auto Reframe: YuNet/person detector + tracker.
+
+## Rules
+
+- No Third Party API/Cloud integration such as voice generators, image generators, video generators, etc.
