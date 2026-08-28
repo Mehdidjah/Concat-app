@@ -12,8 +12,11 @@ import type { ReactNode } from "react";
  * preview and the timeline are not built from `Panel` - they own their whole
  * interior - so they reuse this constant instead of copying the classes.
  */
+// No outline border: the panels separate from the stage by surface colour
+// and the resizer gutters alone, and only *interior* dividers draw lines.
+// An outline on every panel doubled each gutter's line weight for nothing.
 export const PANEL_SHELL =
-  "flex h-full min-h-0 flex-col overflow-hidden rounded-xl border border-hairline bg-panel";
+  "flex h-full min-h-0 flex-col overflow-hidden rounded-xl bg-panel";
 
 /** A docked panel with a heading strip and a scrolling body. */
 export function Panel({
