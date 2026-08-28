@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::AtomicBool;
 
-use wolfcut_desktop_lib::export::{ExportClip, ExportRequest, Reporter, render};
+use wolfcut_desktop_lib::export::{ClipKind, ExportClip, ExportRequest, Reporter, render};
 
 /// Points the engine at the staged bundle exactly once, before anything runs.
 fn use_bundled_pair() {
@@ -53,7 +53,11 @@ fn fixture(directory: &Path, name: &str, args: &[&str]) -> PathBuf {
 fn media_clip(path: &Path, kind: &str, start: f64, duration: f64, track: usize) -> ExportClip {
     ExportClip {
         path: path.to_string_lossy().into_owned(),
-        kind: kind.to_owned(),
+        kind: match kind {
+            "audio" => ClipKind::Audio,
+            "image" => ClipKind::Image,
+            _ => ClipKind::Video,
+        },
         start,
         duration,
         source_start: 0.0,
@@ -70,8 +74,15 @@ fn media_clip(path: &Path, kind: &str, start: f64, duration: f64, track: usize) 
         offset_x: 0.0,
         offset_y: 0.0,
         rotation: 0.0,
+        opacity: 1.0,
+        video_filter_chain: String::new(),
+        transition: None,
+        video_fade_in: 0.0,
         media_width: Some(320),
         media_height: Some(180),
+        // Deliberately absent: this suite exists to exercise the probe
+        // fallback and the graph-membership rules against real files.
+        has_audio: None,
     }
 }
 
