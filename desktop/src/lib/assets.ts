@@ -11,9 +11,13 @@
  * the timeline down with it.
  */
 
-import { invoke } from "@tauri-apps/api/core";
 
-import { readMediaBytes } from "./engine";
+import {
+  extractFilmstrip,
+  readArtwork as readArtworkFile,
+  readMediaBytes,
+  writeArtwork as writeArtworkFile,
+} from "./engine";
 
 /** Min/max sample pairs, bucketed at a fixed rate. */
 export interface Peaks {
@@ -196,7 +200,7 @@ function artworkKey(path: string): string {
 async function readArtwork(project: string | null, key: string): Promise<ArrayBuffer | null> {
   if (!project) return null;
   try {
-    return await invoke<ArrayBuffer>("read_artwork", { project, key });
+    return await readArtworkFile(project, key);
   } catch {
     return null;
   }
@@ -207,10 +211,7 @@ function writeArtwork(project: string | null, key: string, bytes: Uint8Array): v
   // Serialising the payload for IPC is main-thread work, and nothing about a
   // cache write is urgent - it waits for an idle moment so it never competes
   // with playback.
-  const send = () =>
-    void invoke("write_artwork", { project, key, bytes: Array.from(bytes) }).catch(
-      () => undefined,
-    );
+  const send = () => void writeArtworkFile(project, key, bytes).catch(() => undefined);
   if (typeof window.requestIdleCallback === "function") window.requestIdleCallback(() => send());
   else window.setTimeout(send, 500);
 }
@@ -321,11 +322,7 @@ async function loadStrip(
   }
 
   try {
-    const bytes = await invoke<ArrayBuffer>("extract_filmstrip", {
-      path,
-      count: STRIP_FRAMES,
-      height: STRIP_HEIGHT,
-    });
+    const bytes = await extractFilmstrip(path, STRIP_FRAMES, STRIP_HEIGHT);
     writeArtwork(project, key, new Uint8Array(bytes));
     // createImageBitmap decodes off the main thread, so a slow JPEG does not
     // stall the timeline.

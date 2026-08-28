@@ -71,8 +71,8 @@ export async function engineVersion(): Promise<string> {
 /**
  * Reads a whole file into memory as bytes.
  *
- * Only used as the audio fallback when the asset protocol is unavailable - see
- * `lib/audio.ts`. It loads the entire file, so do not reach for it as a
+ * Two callers: the waveform peak decode in `lib/assets.ts`, and custom font
+ * registration. It loads the entire file, so do not reach for it as a
  * general-purpose reader.
  */
 export async function readMediaBytes(path: string): Promise<ArrayBuffer> {
@@ -112,6 +112,76 @@ export async function createProject(request: {
 /** Reads an existing project's settings and marks it as recently opened. */
 export async function openProject(path: string): Promise<ProjectInfo> {
   return invoke<ProjectInfo>("open_project", { path });
+}
+
+// ── playback, transport and artwork ────────────────────────────────────────
+
+/** One audible clip, as `playback.rs` mixes it. */
+export interface AudioClipSpec {
+  path: string;
+  /** Timeline seconds. */
+  start: number;
+  duration: number;
+  /** Seconds into the source file. */
+  sourceStart: number;
+  volume: number;
+  fadeIn: number;
+  fadeOut: number;
+  speed: number;
+  preservePitch: boolean;
+  /** FFmpeg audio filter chain, or empty. */
+  chain: string;
+}
+
+/** Replaces the engine mixer's audible clip set wholesale. */
+export async function audioSetClips(project: string, clips: AudioClipSpec[]): Promise<void> {
+  return invoke<void>("audio_set_clips", { project, clips });
+}
+
+export async function transportPlay(position: number): Promise<void> {
+  return invoke<void>("transport_play", { position });
+}
+
+export async function transportPause(): Promise<void> {
+  return invoke<void>("transport_pause");
+}
+
+export async function transportSeek(position: number): Promise<void> {
+  return invoke<void>("transport_seek", { position });
+}
+
+/**
+ * Subscribes to playback failures the engine would otherwise swallow - a
+ * missing output device, a clip whose audio would not decode. Resolves to an
+ * unsubscribe function.
+ */
+export async function onAudioError(handler: (message: string) => void): Promise<UnlistenFn> {
+  return listen<string>("audio://error", (event) => handler(event.payload));
+}
+
+/** One cached artwork file from the project's cache, or a throw the caller
+ * treats as a miss. */
+export async function readArtwork(project: string, key: string): Promise<ArrayBuffer> {
+  return invoke<ArrayBuffer>("read_artwork", { project, key });
+}
+
+/** Stores one artwork file in the project's cache. Fire-and-forget shaped:
+ * a failed write only means regenerating next launch. */
+export async function writeArtwork(
+  project: string,
+  key: string,
+  bytes: Uint8Array,
+): Promise<void> {
+  return invoke<void>("write_artwork", { project, key, bytes: Array.from(bytes) });
+}
+
+/** A strip of evenly spaced frames as one JPEG, for timeline filmstrips. */
+export async function extractFilmstrip(
+  path: string,
+  count: number,
+  height: number,
+): Promise<ArrayBuffer> {
+  return invoke<ArrayBuffer>("extract_filmstrip", { path, count, height });
 }
 
 // ── the editing session ────────────────────────────────────────────────────

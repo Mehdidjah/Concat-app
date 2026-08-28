@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { invoke, isTauri } from "@tauri-apps/api/core";
+import { isTauri } from "@tauri-apps/api/core";
+
+import { transportPause, transportPlay, transportSeek } from "./engine";
 import { listen } from "@tauri-apps/api/event";
 
 /**
@@ -45,13 +47,13 @@ export function useTransport({ duration }: { duration: number }): Transport {
 
   const pause = useCallback(() => {
     setPlaying(false);
-    if (native) void invoke("transport_pause").catch(() => undefined);
+    if (native) void transportPause().catch(() => undefined);
   }, [native]);
 
   const play = useCallback(() => {
     const from = playheadRef.current;
     anchor.current = { position: from, at: performance.now() };
-    if (native) void invoke("transport_play", { position: from }).catch(() => undefined);
+    if (native) void transportPlay(from).catch(() => undefined);
     setPlaying(true);
   }, [native]);
 
@@ -65,7 +67,7 @@ export function useTransport({ duration }: { duration: number }): Transport {
       const next = Math.max(0, seconds);
       anchor.current = { position: next, at: performance.now() };
       setPlayhead(next);
-      if (native) void invoke("transport_seek", { position: next }).catch(() => undefined);
+      if (native) void transportSeek(next).catch(() => undefined);
     },
     [native],
   );
@@ -108,7 +110,7 @@ export function useTransport({ duration }: { duration: number }): Transport {
       if (end > 0 && next >= end) {
         setPlayhead(end);
         setPlaying(false);
-        if (native) void invoke("transport_pause").catch(() => undefined);
+        if (native) void transportPause().catch(() => undefined);
         return;
       }
 
