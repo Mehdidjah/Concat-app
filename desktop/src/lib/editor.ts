@@ -442,6 +442,10 @@ export function commandsForEcho(base: Clip, patch: Partial<Clip>): EditorCommand
       ? patch.duration !== base.duration
       : false;
   const startChanged = has("start") && patch.start !== undefined && patch.start !== base.start;
+  // Same-value guard, like start: an echoed-but-unchanged track must not
+  // commit a do-nothing MoveClips, which would burn an empty undo step.
+  const trackChanged =
+    has("trackId") && patch.trackId !== undefined && patch.trackId !== base.trackId;
 
   if (durationChanged && startChanged) {
     commands.push({
@@ -457,7 +461,14 @@ export function commandsForEcho(base: Clip, patch: Partial<Clip>): EditorCommand
       edge: "end",
       delta: (patch.duration ?? base.duration) - base.duration,
     });
-  } else if (startChanged || has("trackId")) {
+  }
+
+  // A move commits whatever the trims above did not. Not an else-branch: an
+  // echo holding both a trim and a track change (a busy panel's mixed
+  // accumulation) used to commit the trim and silently lose the move. After
+  // a head trim the engine has already placed the start, so the move's start
+  // - the same value - is idempotent and only the track genuinely applies.
+  if (trackChanged || (startChanged && !durationChanged)) {
     commands.push({
       op: "moveClips",
       moves: [

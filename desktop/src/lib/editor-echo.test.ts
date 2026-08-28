@@ -66,13 +66,22 @@ describe("commandsForEcho: moves", () => {
     ]);
   });
 
-  test("a trackId echoed back unchanged still emits the move", () => {
-    // Current behaviour, pinned deliberately: dropping a clip back onto its
-    // own track at its own start commits a do-nothing MoveClips (and so an
-    // empty undo step). If this ever changes to [], that is an improvement -
-    // update this expectation, not the caller.
-    expect(commandsForEcho(clip(), { trackId: "T1" })).toEqual([
-      { op: "moveClips", moves: [{ clipId: "c1", start: 0, trackId: "T1" }] },
+  test("a trackId echoed back unchanged commits nothing", () => {
+    // Dropping a clip back onto its own track at its own start is not an
+    // edit: the same-value guard start and duration already have. It used to
+    // commit a do-nothing MoveClips and burn an empty undo step.
+    expect(commandsForEcho(clip(), { trackId: "T1" })).toEqual([]);
+  });
+
+  test("a track change combined with a trim commits both", () => {
+    // A busy panel's mixed accumulation: the head trim commits first (the
+    // engine places the start), then the move carries the track - it used to
+    // be silently lost in the trim's else-branch.
+    expect(
+      commandsForEcho(clip({ start: 2, duration: 4 }), { start: 3, duration: 3, trackId: "T2" }),
+    ).toEqual([
+      { op: "trimClip", clipId: "c1", edge: "start", delta: 1 },
+      { op: "moveClips", moves: [{ clipId: "c1", start: 3, trackId: "T2" }] },
     ]);
   });
 });
