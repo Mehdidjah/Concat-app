@@ -40,6 +40,11 @@ memmap2 = "0.9"
 # worth of dependencies for one GET.
 ureq = "2"
 
+[lints.clippy]
+# Same stance as the engine workspace: a Tauri command's arguments are its
+# wire signature, and splitting one to satisfy a count is cleverness.
+too_many_arguments = "allow"
+
 [profile.release]
 opt-level = 3
 lto = true
