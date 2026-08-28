@@ -27,6 +27,8 @@ start cutting, no account, no extra downloads, no setup.
 
 - 🎬 Multi-track timeline
 - 🎙️ Free Voice Filters
+- Free Local Auto-captions (transcription)
+- Save and re-use Templates
 - 🚫 No watermarks, ever.
 - 🖥️ Cross-platform
 
