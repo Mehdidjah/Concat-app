@@ -103,14 +103,16 @@ export interface TextOverlay {
   offsetY: number;
 }
 
-/** Alignment guides live while something is being dragged: a vertical line at
- * `x` and a horizontal one at `y`, both fractions of the frame. Null = none. */
+/** Alignment guides live while something is being dragged: vertical lines at
+ * `x` and horizontal ones at `y`, as fractions of the frame. Lists, because a
+ * scale snap on a centred picture kisses both bounds of an axis at once and
+ * should say so with both lines. Empty = none. */
 interface Guides {
-  x: number | null;
-  y: number | null;
+  x: number[];
+  y: number[];
 }
 
-const NO_GUIDES: Guides = { x: null, y: null };
+const NO_GUIDES: Guides = { x: [], y: [] };
 
 /** How close an alignment has to be before it takes, in screen pixels. Small
  * on purpose: a guide should feel like a nudge you barely notice accepting,
@@ -185,6 +187,64 @@ function softSnap(
     if (Math.abs(raw - target.value) * frameSpan < SNAP_PX) return target;
   }
   return { value: raw, guide: null };
+}
+
+/**
+ * Softly snaps a scale while a corner is being dragged.
+ *
+ * The candidates are the scales at which a picture edge coincides with a
+ * frame bound, given where the picture's centre currently sits - scale a
+ * landscape clip up inside a vertical frame and it settles exactly where its
+ * top and bottom meet the frame's. The same `SNAP_PX` law as `softSnap`,
+ * measured at the moving edge, so the catch feels identical to move-snapping.
+ * A centred picture reaches both bounds of an axis at the same scale and
+ * lights both guides. `fittedX`/`fittedY` are the picture's unscaled extents
+ * per axis, null when the picture is tilted and edges cannot line up.
+ */
+function snapScale(
+  raw: number,
+  geometry: {
+    fittedX: number | null;
+    fittedY: number | null;
+    centreX: number;
+    centreY: number;
+    frameWidth: number;
+    frameHeight: number;
+  },
+): { value: number; guides: Guides } {
+  const candidates: { scale: number; axis: "x" | "y"; guide: number; slack: number }[] = [];
+  const consider = (scale: number, axis: "x" | "y", guide: number, halfExtent: number) => {
+    if (scale <= MIN_SCALE || scale > MAX_SCALE) return;
+    const slack = Math.abs(raw - scale) * halfExtent;
+    if (slack < SNAP_PX) candidates.push({ scale, axis, guide, slack });
+  };
+  if (geometry.fittedX !== null) {
+    consider((2 * geometry.centreX) / geometry.fittedX, "x", 0, geometry.fittedX / 2);
+    consider(
+      (2 * (geometry.frameWidth - geometry.centreX)) / geometry.fittedX,
+      "x",
+      1,
+      geometry.fittedX / 2,
+    );
+  }
+  if (geometry.fittedY !== null) {
+    consider((2 * geometry.centreY) / geometry.fittedY, "y", 0, geometry.fittedY / 2);
+    consider(
+      (2 * (geometry.frameHeight - geometry.centreY)) / geometry.fittedY,
+      "y",
+      1,
+      geometry.fittedY / 2,
+    );
+  }
+  if (candidates.length === 0) return { value: raw, guides: NO_GUIDES };
+
+  candidates.sort((left, right) => left.slack - right.slack);
+  const winner = candidates[0].scale;
+  const guides: Guides = { x: [], y: [] };
+  for (const candidate of candidates) {
+    if (Math.abs(candidate.scale - winner) < 1e-6) guides[candidate.axis].push(candidate.guide);
+  }
+  return { value: winner, guides };
 }
 
 /**
@@ -563,20 +623,22 @@ export function Preview({
 
               {/* Alignment guides, only alive mid-drag. Dashed and faint on
                   purpose: a hint that something lined up, not a grid. */}
-              {guides.x !== null && (
+              {guides.x.map((guide) => (
                 <div
+                  key={`x${guide}`}
                   className="pointer-events-none absolute inset-y-0 w-0 border-l border-dashed
                              border-white/45"
-                  style={{ left: `${guides.x * 100}%` }}
+                  style={{ left: `${guide * 100}%` }}
                 />
-              )}
-              {guides.y !== null && (
+              ))}
+              {guides.y.map((guide) => (
                 <div
+                  key={`y${guide}`}
                   className="pointer-events-none absolute inset-x-0 h-0 border-t border-dashed
                              border-white/45"
-                  style={{ top: `${guides.y * 100}%` }}
+                  style={{ top: `${guide * 100}%` }}
                 />
-              )}
+              ))}
             </div>
           )}
 
@@ -1081,11 +1143,21 @@ function TransformGizmo({
             extentY,
           );
           onChange(clipId, { offsetX: x.value, offsetY: y.value });
-          onGuides({ x: x.guide, y: y.guide });
+          onGuides({ x: x.guide === null ? [] : [x.guide], y: y.guide === null ? [] : [y.guide] });
         } else if (mode === "scale") {
           const distance = Math.hypot(pointer.clientX - centre.x, pointer.clientY - centre.y);
-          const scale = start.scale * (distance / startDistance);
-          onChange(clipId, { scale: Math.max(MIN_SCALE, Math.min(MAX_SCALE, scale)) });
+          const raw = start.scale * (distance / startDistance);
+          const snapped = snapScale(Math.max(MIN_SCALE, Math.min(MAX_SCALE, raw)), {
+            // Unscaled per-axis extents; the drag rescales them from here.
+            fittedX: extentX === null ? null : extentX / start.scale,
+            fittedY: extentY === null ? null : extentY / start.scale,
+            centreX: frameRect.width / 2 + start.offsetX * frameRect.width,
+            centreY: frameRect.height / 2 + start.offsetY * frameRect.height,
+            frameWidth: frameRect.width,
+            frameHeight: frameRect.height,
+          });
+          onChange(clipId, { scale: snapped.value });
+          onGuides(snapped.guides);
         } else {
           const angle = Math.atan2(pointer.clientY - centre.y, pointer.clientX - centre.x);
           let rotation = start.rotation + ((angle - startAngle) * 180) / Math.PI;
@@ -1246,7 +1318,7 @@ function TextOverlayBox({
             null,
           );
           onChange(overlay.clipId, { offsetX: x.value, offsetY: y.value });
-          onGuides({ x: x.guide, y: y.guide });
+          onGuides({ x: x.guide === null ? [] : [x.guide], y: y.guide === null ? [] : [y.guide] });
         } else {
           const distance = Math.hypot(pointer.clientX - centre.x, pointer.clientY - centre.y);
           const fontSize = start.fontSize * (distance / startDistance);

@@ -7,7 +7,7 @@
 **The free, open-source CapCut replacement.**
 
 [![Build](https://github.com/jub0t/WolfCut/actions/workflows/build.yml/badge.svg)](https://github.com/jub0t/WolfCut/actions/workflows/build.yml)
-[![Platforms](https://img.shields.io/badge/platform-macOS%20%7C%20Windows-8A2BE2)](https://github.com/jub0t/WolfCut/releases)
+[![Platforms](https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-8A2BE2)](https://github.com/jub0t/WolfCut/releases)
 [![Made with Rust](https://img.shields.io/badge/engine-Rust-DEA584?logo=rust&logoColor=white)](engine)
 [![UI](https://img.shields.io/badge/ui-React%20%2B%20Tauri-24C8DB?logo=tauri&logoColor=white)](desktop)
 [![Version](https://img.shields.io/badge/version-0.1.0-blue)](https://github.com/jub0t/WolfCut)
@@ -23,23 +23,21 @@ or subscriptions. A native Rust engine does the heavy lifting, a clean React
 interface does the editing, and it all runs on your machine: install it and
 start cutting, no account, no extra downloads, no setup.
 
-## ✨ Highlights
+## Highlights
 
-- 🎬 **Multi-track timeline** — cut, trim, split, and arrange video, audio, and text
-- 🎙️ **Free voice filters** — the effects CapCut puts behind Pro, included for everyone
-- 🚫 **No watermarks, ever** — your exports are yours, at full quality
-- ⚡ **Native performance** — a Rust engine under the hood, not a browser pretending
-- 🪶 **Lightweight** — a few megabytes, opens in a blink
-- 🖥️ **macOS & Windows** — one editor, both platforms
+- 🎬 Multi-track timeline
+- 🎙️ Free Voice Filters
+- 🚫 No watermarks, ever.
+- 🖥️ Cross-platform
 
-## 🚀 Get started
+## Get started
 
-The alpha is out — grab the installer for your platform from
-[Releases](https://github.com/jub0t/WolfCut/releases): macOS (Apple Silicon
-`.dmg`) and Windows (`.msi` / `.exe`), FFmpeg included, nothing else to
-install.
+Download from [Releases](https://github.com/jub0t/WolfCut/releases), Supports:
+- Windows (tested)
+- MacOs (tested)
+- Linux
 
-## 📈 Growth
+## Growth
 
 <a href="https://star-history.com/#jub0t/WolfCut&Date">
   <picture>
