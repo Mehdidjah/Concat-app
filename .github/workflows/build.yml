@@ -32,6 +32,10 @@ jobs:
           workspaces: engine
       - run: cargo test --workspace
         working-directory: engine
+      # -D warnings covers rustc lints too (missing_docs among them), so a
+      # public item without documentation fails here, not in review.
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+        working-directory: engine
 
   app:
     name: App (${{ matrix.platform }})
@@ -176,6 +180,19 @@ jobs:
 
       - run: npm run typecheck
         working-directory: desktop
+
+      - run: npm run lint
+        working-directory: desktop
+
+      - run: npm test
+        working-directory: desktop
+
+      # Host lints on one platform: the host compiles on all three anyway,
+      # and clippy findings do not vary by OS enough to pay for three runs.
+      - name: Host clippy (macOS)
+        if: matrix.platform == 'macos'
+        run: cargo clippy --all-targets -- -D warnings
+        working-directory: desktop/src-tauri
 
       # Full release build - LTO and codegen-units=1 make this the slow step.
       - run: npm run app:build

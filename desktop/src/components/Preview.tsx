@@ -1001,7 +1001,7 @@ function GhostVideo({
     media.src = convertFileSrc(ghost.path);
     media.load();
     // Mount effect only: the sync effect below lands the position.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+     
   }, [ghost.path]);
 
   useEffect(() => {

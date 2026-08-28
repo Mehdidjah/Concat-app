@@ -429,7 +429,7 @@ function Editor({
       // Registered before it is stored, so a file the webview cannot parse is
       // reported now rather than becoming a broken entry in the picker.
       if (!(await registerFont(font, readMediaBytes))) {
-        setError(`Could not read ${picked.split(/[\/]/).pop() ?? picked} as a font.`);
+        setError(`Could not read ${picked.split(/[/\\]/).pop() ?? picked} as a font.`);
         return;
       }
       void dispatch({ op: "addFont", family: font.family, path: font.path });
@@ -591,7 +591,7 @@ function Editor({
         }
       });
     },
-    [dispatch, transport],
+    [dispatch, transport, viewRef],
   );
 
   // ── edit operations ──────────────────────────────────────────────────────

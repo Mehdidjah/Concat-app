@@ -343,28 +343,23 @@ impl ReaderPool {
         // Roll forward to the target, caching everything passed on the way -
         // the next scrub over this span is then free.
         let mut latest: Option<Arc<Frame>> = None;
-        loop {
-            match reader.next_frame(rate)? {
-                Some((index, frame)) => {
-                    let frame = Arc::new(frame);
-                    self.cache.insert(
-                        FrameKey {
-                            path: path.to_path_buf(),
-                            width,
-                            height,
-                            chain: chain_key.clone(),
-                            index,
-                        },
-                        Arc::clone(&frame),
-                    );
-                    latest = Some(frame);
-                    if index >= target {
-                        break;
-                    }
-                }
-                // End of stream before the target: a clip trimmed past its
-                // media's end. The last real frame is the honest answer.
-                None => break,
+        // Stops at end of stream too: a clip trimmed past its media's end,
+        // where the last real frame is the honest answer.
+        while let Some((index, frame)) = reader.next_frame(rate)? {
+            let frame = Arc::new(frame);
+            self.cache.insert(
+                FrameKey {
+                    path: path.to_path_buf(),
+                    width,
+                    height,
+                    chain: chain_key.clone(),
+                    index,
+                },
+                Arc::clone(&frame),
+            );
+            latest = Some(frame);
+            if index >= target {
+                break;
             }
         }
 
@@ -379,26 +374,21 @@ impl ReaderPool {
             for step in [30i64, 240, i64::MAX] {
                 let from = target.saturating_sub(step).max(0);
                 reader.seek(rate, from)?;
-                loop {
-                    match reader.next_frame(rate)? {
-                        Some((index, frame)) => {
-                            let frame = Arc::new(frame);
-                            self.cache.insert(
-                                FrameKey {
-                                    path: path.to_path_buf(),
-                                    width,
-                                    height,
-                                    chain: chain_key.clone(),
-                                    index,
-                                },
-                                Arc::clone(&frame),
-                            );
-                            latest = Some(frame);
-                            if index >= target {
-                                break;
-                            }
-                        }
-                        None => break,
+                while let Some((index, frame)) = reader.next_frame(rate)? {
+                    let frame = Arc::new(frame);
+                    self.cache.insert(
+                        FrameKey {
+                            path: path.to_path_buf(),
+                            width,
+                            height,
+                            chain: chain_key.clone(),
+                            index,
+                        },
+                        Arc::clone(&frame),
+                    );
+                    latest = Some(frame);
+                    if index >= target {
+                        break;
                     }
                 }
                 if latest.is_some() || from == 0 {
@@ -585,7 +575,7 @@ mod tests {
         assert!(near(back_at_20, 20), "backward to 20 read {back_at_20}");
         let again_at_50 = red_at(&mut pool, 50);
         assert_eq!(again_at_50, at_50, "revisit must come from cache, identical");
-        assert!(pool.cache.len() > 0, "rolling forward populated the cache");
+        assert!(!pool.cache.is_empty(), "rolling forward populated the cache");
 
         // Far past the end - a clip that outlives its media. The last real
         // frame is the answer, not an error: a seek there decodes nothing,
