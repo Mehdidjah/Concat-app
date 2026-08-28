@@ -180,7 +180,7 @@ function Editor({
   const [modifyingProject, setModifyingProject] = useState<null | { busy: boolean }>(null);
 
   const [selectedClipIds, setSelectedClipIds] = useState<string[]>([]);
-  const [selectedMediaId, setSelectedMediaId] = useState<string | null>(null);
+  const [selectedMediaIds, setSelectedMediaIds] = useState<string[]>([]);
   const [tool, setTool] = useState<Tool>("select");
   const [snap, setSnap] = useState(true);
   const [binFilter, setBinFilter] = useState<BinFilter>(ALL_MEDIA);
@@ -220,6 +220,8 @@ function Editor({
   // Read by event listeners that outlive the render that installed them.
   const latest = useRef({ project, secondsPerPixel, scrollLeft, trackScroll, snap, playhead, frame });
   latest.current = { project, secondsPerPixel, scrollLeft, trackScroll, snap, playhead, frame };
+  const selectedMediaRef = useRef(selectedMediaIds);
+  selectedMediaRef.current = selectedMediaIds;
 
   // The project's rate is authoritative, not the first clip's.
   const frameRate = session.frameRate;
@@ -230,9 +232,10 @@ function Editor({
       const kept = ids.filter((id) => timeline.clips.some((clip) => clip.id === id));
       return kept.length === ids.length ? ids : kept;
     });
-    setSelectedMediaId((id) =>
-      id && project.media.some((item) => item.id === id) ? id : null,
-    );
+    setSelectedMediaIds((ids) => {
+      const kept = ids.filter((id) => project.media.some((item) => item.id === id));
+      return kept.length === ids.length ? ids : kept;
+    });
     // Keyed on the engine state, not the echo - the echo never removes clips.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [view]);
@@ -324,7 +327,7 @@ function Editor({
             item: newMediaFromSummary(summary),
           });
           if (mediaId) {
-            setSelectedMediaId(mediaId);
+            setSelectedMediaIds([mediaId]);
             // Fire and forget: the clip draws flat until the artwork lands.
             requestAssets(
               assets.current,
@@ -399,7 +402,7 @@ function Editor({
     }).then((clipId) => {
       if (clipId) {
         setSelectedClipIds([clipId]);
-        setSelectedMediaId(null);
+        setSelectedMediaIds([]);
         setRightTab("text");
       }
     });
@@ -592,15 +595,6 @@ function Editor({
   );
 
   // ── edit operations ──────────────────────────────────────────────────────
-  const placeMedia = useCallback(
-    (mediaId: string, trackId: string, start: number) => {
-      void dispatch({ op: "addClip", mediaId, trackId, start }).then((clipId) => {
-        if (clipId) setSelectedClipIds([clipId]);
-      });
-    },
-    [dispatch],
-  );
-
   const addToTimeline = useCallback(
     (mediaId: string) => {
       void dispatch({
@@ -608,6 +602,41 @@ function Editor({
         mediaId,
         start: latest.current.playhead,
       }).then((clipId) => {
+        if (clipId) setSelectedClipIds([clipId]);
+      });
+    },
+    [dispatch],
+  );
+
+  /**
+   * Places several bin items end to end from `start`, as one batch and one
+   * undo step - the multi-select drop and the File menu's add-selected.
+   * With a track they land on that lane; without one each finds the first
+   * free lane for its own span, like a double-click does.
+   */
+  const placeMediaSet = useCallback(
+    (mediaIds: string[], start: number, trackId: string | null) => {
+      const current = latest.current.project;
+      let at = Math.max(0, start);
+      const commands = mediaIds.flatMap((mediaId) => {
+        const media = findMedia(current, mediaId);
+        if (!media) return [];
+        const from = at;
+        // The engine's own placement defaults (relay-project: a still lasts
+        // 5s, unknown-duration media falls back to 5s) - mirrored here only
+        // to lay items end to end; the engine still decides each clip's
+        // real duration.
+        at += media.kind === "image" ? 5 : (media.duration ?? 5);
+        return [
+          trackId
+            ? ({ op: "addClip", mediaId, trackId, start: from } as const)
+            : ({ op: "addClipAtFirstFree", mediaId, start: from } as const),
+        ];
+      });
+      if (commands.length === 0) return;
+      void dispatch(
+        commands.length === 1 ? commands[0] : { op: "batch", commands: [...commands] },
+      ).then((clipId) => {
         if (clipId) setSelectedClipIds([clipId]);
       });
     },
@@ -643,13 +672,15 @@ function Editor({
               playhead: state.playhead,
             })
           : drop.start;
-        placeMedia(item.id, drop.trackId, Math.max(0, start));
+        const set = selectedMediaRef.current;
+        const dragged = set.includes(item.id) && set.length > 1 ? set : [item.id];
+        placeMediaSet(dragged, Math.max(0, start), drop.trackId);
       };
 
       window.addEventListener("pointermove", onMove);
       window.addEventListener("pointerup", onUp);
     },
-    [placeMedia],
+    [placeMediaSet],
   );
 
   const splitAtPlayhead = useCallback(() => {
@@ -669,11 +700,26 @@ function Editor({
     });
   }, [selectedClipIds, dispatch]);
 
+  /** Deletes the bin selection as one undo step; removal cascades clips. */
+  const deleteSelectedMedia = useCallback(() => {
+    const ids = selectedMediaRef.current;
+    if (ids.length === 0) return;
+    const commands = ids.map((mediaId) => ({ op: "removeMedia", mediaId }) as const);
+    void dispatch(
+      commands.length === 1 ? commands[0] : { op: "batch", commands: [...commands] },
+    );
+    setSelectedMediaIds([]);
+  }, [dispatch]);
+
   const deleteSelected = useCallback(() => {
-    if (selectedClipIds.length === 0) return;
-    void dispatch({ op: "removeClips", clipIds: selectedClipIds });
-    setSelectedClipIds([]);
-  }, [selectedClipIds, dispatch]);
+    if (selectedClipIds.length > 0) {
+      void dispatch({ op: "removeClips", clipIds: selectedClipIds });
+      setSelectedClipIds([]);
+      return;
+    }
+    // No clips selected: Delete acts on the bin selection instead.
+    deleteSelectedMedia();
+  }, [selectedClipIds, deleteSelectedMedia, dispatch]);
 
   const zoom = useCallback((factor: number, anchor?: number) => {
     const previous = zoomRef.current;
@@ -866,8 +912,8 @@ function Editor({
     selectedClipIds.length === 1 ? findClip(project, selectedClipIds[0]) : null;
   const inspectorMedia = selectedClip
     ? findMedia(project, selectedClip.mediaId)
-    : selectedMediaId
-      ? findMedia(project, selectedMediaId)
+    : selectedMediaIds.length === 1
+      ? findMedia(project, selectedMediaIds[0])
       : null;
 
   return (
@@ -907,8 +953,8 @@ function Editor({
                 {
                   label: "Add selected to timeline",
                   icon: "plus",
-                  disabled: !selectedMediaId,
-                  onSelect: () => selectedMediaId && addToTimeline(selectedMediaId),
+                  disabled: selectedMediaIds.length === 0,
+                  onSelect: () => placeMediaSet(selectedMediaIds, latest.current.playhead, null),
                 },
                 {
                   label: "Save",
@@ -1027,17 +1073,18 @@ function Editor({
               assets={assets.current}
               dropping={dropping}
               filter={binFilter}
-              selectedId={selectedMediaId}
+              selectedIds={selectedMediaIds}
               busy={busy}
               error={error}
               onFilter={setBinFilter}
               onAddText={addText}
-              onSelect={(id) => {
-                setSelectedMediaId(id);
-                setSelectedClipIds([]);
+              onSelect={(ids) => {
+                setSelectedMediaIds(ids);
+                if (ids.length > 0) setSelectedClipIds([]);
               }}
               onImport={(paths) => void importPaths(paths)}
               onRemove={(id) => void dispatch({ op: "removeMedia", mediaId: id })}
+              onRemoveSelected={deleteSelectedMedia}
               onDismissError={() => setError(null)}
               onBeginDrag={beginMediaDrag}
               onAddToTimeline={addToTimeline}
@@ -1432,6 +1479,11 @@ function Editor({
             className={mediaDrag.item.kind === "video" ? "text-accent" : "text-clip-audio"}
           />
           <span className="max-w-48 truncate text-xs text-primary">{mediaDrag.item.name}</span>
+          {selectedMediaIds.length > 1 && selectedMediaIds.includes(mediaDrag.item.id) && (
+            <span className="rounded bg-accent px-1.5 font-technical text-[10px] text-on-accent">
+              {selectedMediaIds.length}
+            </span>
+          )}
         </div>
       )}
     </div>

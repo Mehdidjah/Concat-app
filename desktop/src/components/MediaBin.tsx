@@ -63,7 +63,7 @@ const TABS: { id: LibraryTab; label: string }[] = [
 export function MediaBin({
   items,
   filter,
-  selectedId,
+  selectedIds,
   busy,
   error,
   onFilter,
@@ -71,6 +71,7 @@ export function MediaBin({
   onSelect,
   onImport,
   onRemove,
+  onRemoveSelected,
   onDismissError,
   onBeginDrag,
   onAddToTimeline,
@@ -88,15 +89,18 @@ export function MediaBin({
   dropping: boolean;
   /** Shared with the timeline, so a waveform is only ever computed once. */
   assets: MediaAssets;
-  selectedId: string | null;
+  selectedIds: readonly string[];
   busy: boolean;
   error: string | null;
   onFilter: (filter: BinFilter) => void;
   /** Puts a new title on the timeline at the playhead. */
   onAddText: () => void;
-  onSelect: (id: string) => void;
+  /** Replaces the bin selection; cards and the marquee both call it. */
+  onSelect: (ids: string[]) => void;
   onImport: (paths: string[]) => void;
   onRemove: (id: string) => void;
+  /** Deletes everything in the current bin selection, as one undo step. */
+  onRemoveSelected: () => void;
   onDismissError: () => void;
   /** Called once the pointer has moved far enough to count as a drag. */
   onBeginDrag: (item: MediaItem, clientX: number, clientY: number) => void;
@@ -194,7 +198,7 @@ export function MediaBin({
               <MediaPage
                 items={items}
                 filter={filter}
-                selectedId={selectedId}
+                selectedIds={selectedIds}
                 busy={busy}
                 error={error}
                 dropping={dropping}
@@ -202,6 +206,7 @@ export function MediaBin({
                 onSelect={onSelect}
                 onImport={onImport}
                 onRemove={onRemove}
+                onRemoveSelected={onRemoveSelected}
                 onDismissError={onDismissError}
                 onBeginDrag={onBeginDrag}
                 onAddToTimeline={onAddToTimeline}
@@ -329,7 +334,7 @@ const CARD_GRID = "grid grid-cols-[repeat(auto-fill,minmax(88px,1fr))] gap-2 px-
 function MediaPage({
   items,
   filter,
-  selectedId,
+  selectedIds,
   busy,
   error,
   dropping,
@@ -337,6 +342,7 @@ function MediaPage({
   onSelect,
   onImport,
   onRemove,
+  onRemoveSelected,
   onDismissError,
   onBeginDrag,
   onAddToTimeline,
@@ -344,14 +350,16 @@ function MediaPage({
 }: {
   items: MediaItem[];
   filter: BinFilter;
-  selectedId: string | null;
+  selectedIds: readonly string[];
   busy: boolean;
   error: string | null;
   dropping: boolean;
   assets: MediaAssets;
-  onSelect: (id: string) => void;
+  onSelect: (ids: string[]) => void;
   onImport: (paths: string[]) => void;
   onRemove: (id: string) => void;
+  /** Deletes everything in the current bin selection, as one undo step. */
+  onRemoveSelected: () => void;
   onDismissError: () => void;
   onBeginDrag: (item: MediaItem, clientX: number, clientY: number) => void;
   onAddToTimeline: (mediaId: string) => void;
@@ -378,6 +386,58 @@ function MediaPage({
     // The picker hands back a string for one file and an array for many.
     if (Array.isArray(chosen)) onImport(chosen);
     else if (typeof chosen === "string") onImport([chosen]);
+  };
+
+  /**
+   * Marquee selection over the card grid.
+   *
+   * A press on the grid's background (never on a card - cards are drag
+   * sources) starts a band in client coordinates; every move re-derives the
+   * selection from the cards' live rects, so scrolled positions and wrapped
+   * rows need no bookkeeping. Shift adds to the selection that existed when
+   * the band started, like the timeline's marquee.
+   */
+  const grid = useRef<HTMLDivElement>(null);
+  const [band, setBand] = useState<{ x0: number; y0: number; x1: number; y1: number } | null>(
+    null,
+  );
+  const beginMarquee = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (event.button !== 0) return;
+    if ((event.target as Element).closest("[data-media-card]")) return;
+    const basis = event.shiftKey ? [...selectedIds] : [];
+    if (!event.shiftKey) onSelect([]);
+    const origin = { x: event.clientX, y: event.clientY };
+    setBand({ x0: origin.x, y0: origin.y, x1: origin.x, y1: origin.y });
+
+    const caught = (x: number, y: number) => {
+      const left = Math.min(origin.x, x);
+      const right = Math.max(origin.x, x);
+      const top = Math.min(origin.y, y);
+      const bottom = Math.max(origin.y, y);
+      const ids: string[] = [];
+      grid.current
+        ?.querySelectorAll<HTMLElement>("[data-media-card]")
+        .forEach((card) => {
+          const rect = card.getBoundingClientRect();
+          const hit =
+            rect.left < right && rect.right > left && rect.top < bottom && rect.bottom > top;
+          const id = card.dataset.mediaCard;
+          if (hit && id) ids.push(id);
+        });
+      return ids;
+    };
+
+    const onMove = (move: PointerEvent) => {
+      setBand({ x0: origin.x, y0: origin.y, x1: move.clientX, y1: move.clientY });
+      onSelect([...new Set([...basis, ...caught(move.clientX, move.clientY)])]);
+    };
+    const onUp = () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      setBand(null);
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
   };
 
   /**
@@ -413,7 +473,9 @@ function MediaPage({
   const visible = items.filter((item) => filter[item.kind]);
 
   return (
-    <>
+    // The grid area is the marquee surface; pressing empty space drags a
+    // selection band, pressing a card starts a media drag.
+    <div ref={grid} onPointerDown={beginMarquee} className="flex min-h-full flex-col">
       <div className="px-2 pb-2 pt-2">
         <button
           type="button"
@@ -428,6 +490,23 @@ function MediaPage({
           {busy ? "Importing..." : "Import media"}
         </button>
       </div>
+
+      {selectedIds.length > 1 && (
+        <div className="mx-2 mb-2 flex items-center justify-between rounded-lg bg-sunken
+                        px-2.5 py-1.5">
+          <span className="text-[11px] text-secondary">
+            {selectedIds.length} selected - drag any of them to place all
+          </span>
+          <button
+            type="button"
+            onClick={onRemoveSelected}
+            className="cursor-pointer rounded px-2 py-0.5 text-[11px] font-medium text-danger
+                       transition-colors hover:bg-danger-soft"
+          >
+            Delete
+          </button>
+        </div>
+      )}
 
       {error && <ErrorNotice message={error} onDismiss={onDismissError} className="mx-2 mb-2" />}
 
@@ -451,8 +530,18 @@ function MediaPage({
           {visible.map((item) => (
             <li
               key={item.id}
+              data-media-card={item.id}
               onPointerDown={(event) => beginDrag(event, item)}
-              onClick={() => onSelect(item.id)}
+              onClick={(event) => {
+                const additive = event.shiftKey || event.metaKey || event.ctrlKey;
+                onSelect(
+                  additive
+                    ? selectedIds.includes(item.id)
+                      ? selectedIds.filter((id) => id !== item.id)
+                      : [...selectedIds, item.id]
+                    : [item.id],
+                );
+              }}
               onDoubleClick={() => onAddToTimeline(item.id)}
               // The details that used to sit on a second line live here now.
               // They are worth having, but not worth a permanent row each.
@@ -463,7 +552,7 @@ Drag onto a track, or double-click to add at the playhead`}
             >
               <div
                 className={`relative overflow-hidden rounded-lg transition-shadow ${
-                  item.id === selectedId
+                  selectedIds.includes(item.id)
                     ? "ring-2 ring-accent"
                     : "ring-1 ring-hairline group-hover:ring-hairline-strong"
                 }`}
@@ -547,7 +636,22 @@ Drag onto a track, or double-click to add at the playhead`}
           ))}
         </ul>
       )}
-    </>
+
+      {band && (
+        <div
+          aria-hidden
+          className="pointer-events-none fixed z-40 border"
+          style={{
+            left: Math.min(band.x0, band.x1),
+            top: Math.min(band.y0, band.y1),
+            width: Math.abs(band.x1 - band.x0),
+            height: Math.abs(band.y1 - band.y0),
+            background: "var(--color-accent-soft)",
+            borderColor: "var(--color-accent)",
+          }}
+        />
+      )}
+    </div>
   );
 }
 
