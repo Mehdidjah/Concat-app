@@ -145,8 +145,11 @@ export interface EffectDefinition {
   /** CSS background for the preview tile, until real thumbnails exist. */
   swatch: string;
   params: FilterParam[];
-  /** Builds the FFmpeg video filter fragment for these parameter values. */
-  chain: (params: Record<string, number>) => string;
+  /** Builds the FFmpeg video filter fragment for these parameter values.
+   * `index` is the fragment's position in the clip's chain: any filtergraph
+   * labels MUST embed it, or stacking the same effect twice duplicates
+   * labels and FFmpeg rejects the whole graph. */
+  chain: (params: Record<string, number>, index: number) => string;
   /** How the monitor draws it live. Every effect has one - no export-only. */
   preview: EffectPreview;
 }
@@ -384,10 +387,11 @@ export const EFFECTS: EffectDefinition[] = [
     params: [
       { key: "amount", label: "Amount", min: 10, max: 100, step: 1, default: 45, format: percent },
     ],
-    // Screen-blend a blurred copy over itself - the classic bloom.
-    chain: ({ amount = 45 }) =>
-      `split[glowa][glowb];[glowb]gblur=sigma=18[glowg];` +
-      `[glowa][glowg]blend=all_mode=screen:all_opacity=${(amount / 100).toFixed(2)}`,
+    // Screen-blend a blurred copy over itself - the classic bloom. Labels
+    // carry the chain index so two glows cannot collide in one graph.
+    chain: ({ amount = 45 }, index) =>
+      `split[glowa${index}][glowb${index}];[glowb${index}]gblur=sigma=18[glowg${index}];` +
+      `[glowa${index}][glowg${index}]blend=all_mode=screen:all_opacity=${(amount / 100).toFixed(2)}`,
     preview: {
       kind: "svg",
       // The same bloom: blur a copy, weight it, screen it over the source.
@@ -457,7 +461,9 @@ export const EFFECTS: EffectDefinition[] = [
     blurb: "Reflects the left half of the frame onto the right.",
     swatch: "linear-gradient(90deg, #63e6be 0%, #0ca678 50%, #63e6be 100%)",
     params: [],
-    chain: () => "crop=iw/2:ih:0:0,split[mirl][mirr];[mirr]hflip[mirf];[mirl][mirf]hstack",
+    chain: (_params, index) =>
+      `crop=iw/2:ih:0:0,split[mirl${index}][mirr${index}];[mirr${index}]hflip[mirf${index}];` +
+      `[mirl${index}][mirf${index}]hstack`,
     preview: { kind: "mirror" },
   },
   {
@@ -522,12 +528,15 @@ export function resolveEffectParams(
  */
 export function buildEffectChain(effects: readonly AppliedEffect[] | undefined): string | null {
   if (!effects) return null;
-  const fragments = effects.flatMap((applied) => {
-    if (applied.enabled === false) return [];
+  const fragments: string[] = [];
+  for (const applied of effects) {
+    if (applied.enabled === false) continue;
     const definition = findEffect(applied.id);
-    if (!definition) return [];
-    return [definition.chain(resolveEffectParams(definition, applied.params))];
-  });
+    if (!definition) continue;
+    // The emitted position, not the list position: labels stay stable when
+    // a bypassed effect sits earlier in the list.
+    fragments.push(definition.chain(resolveEffectParams(definition, applied.params), fragments.length));
+  }
   return fragments.length > 0 ? fragments.join(",") : null;
 }
 

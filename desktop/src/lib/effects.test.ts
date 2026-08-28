@@ -35,11 +35,11 @@ const DEFAULT_CHAINS: Record<string, string> = {
   vignette: "vignette=angle=0.775",
   "film-grain": "noise=alls=12:allf=t+u",
   glow:
-    "split[glowa][glowb];[glowb]gblur=sigma=18[glowg];" +
-    "[glowa][glowg]blend=all_mode=screen:all_opacity=0.45",
+    "split[glowa0][glowb0];[glowb0]gblur=sigma=18[glowg0];" +
+    "[glowa0][glowg0]blend=all_mode=screen:all_opacity=0.45",
   posterize: "lutrgb=r=trunc(val/64)*64:g=trunc(val/64)*64:b=trunc(val/64)*64",
   pixelate: "pixelize=width=16:height=16",
-  mirror: "crop=iw/2:ih:0:0,split[mirl][mirr];[mirr]hflip[mirf];[mirl][mirf]hstack",
+  mirror: "crop=iw/2:ih:0:0,split[mirl0][mirr0];[mirr0]hflip[mirf0];[mirl0][mirf0]hstack",
   fisheye: "lenscorrection=k1=-0.275:k2=-0.100:i=bilinear",
   shake: "crop=iw-24:ih-24:12+12*sin(t*13):12+12*cos(t*17)",
 };
@@ -56,8 +56,8 @@ const MIN_CHAINS: Record<string, string> = {
   vignette: "vignette=angle=0.355",
   "film-grain": "noise=alls=2:allf=t+u",
   glow:
-    "split[glowa][glowb];[glowb]gblur=sigma=18[glowg];" +
-    "[glowa][glowg]blend=all_mode=screen:all_opacity=0.10",
+    "split[glowa0][glowb0];[glowb0]gblur=sigma=18[glowg0];" +
+    "[glowa0][glowg0]blend=all_mode=screen:all_opacity=0.10",
   posterize: "lutrgb=r=trunc(val/128)*128:g=trunc(val/128)*128:b=trunc(val/128)*128",
   pixelate: "pixelize=width=2:height=2",
   fisheye: "lenscorrection=k1=-0.028:k2=-0.010:i=bilinear",
@@ -76,8 +76,8 @@ const MAX_CHAINS: Record<string, string> = {
   vignette: "vignette=angle=1.300",
   "film-grain": "noise=alls=40:allf=t+u",
   glow:
-    "split[glowa][glowb];[glowb]gblur=sigma=18[glowg];" +
-    "[glowa][glowg]blend=all_mode=screen:all_opacity=1.00",
+    "split[glowa0][glowb0];[glowb0]gblur=sigma=18[glowg0];" +
+    "[glowa0][glowg0]blend=all_mode=screen:all_opacity=1.00",
   posterize: "lutrgb=r=trunc(val/32)*32:g=trunc(val/32)*32:b=trunc(val/32)*32",
   pixelate: "pixelize=width=64:height=64",
   fisheye: "lenscorrection=k1=-0.550:k2=-0.200:i=bilinear",
@@ -131,6 +131,24 @@ describe("buildEffectChain composition", () => {
         { id: "gaussian-blur", params: {} },
       ]),
     ).toBe("hue=s=0,gblur=sigma=10.0");
+  });
+
+  test("stacking one labelled effect twice keeps its graph labels distinct", () => {
+    // Labels embed the emitted index. With the old fixed labels, two glows
+    // (or two mirrors) on one clip duplicated [glowa]/[mirl] in a single
+    // filtergraph and FFmpeg rejected it - the whole export failed.
+    const chain = buildEffectChain([
+      { id: "glow", params: {} },
+      { id: "glow", params: {} },
+    ]);
+    expect(chain).toContain("[glowa0]");
+    expect(chain).toContain("[glowa1]");
+    // A bypassed entry does not consume an index: labels follow emission.
+    const skipped = buildEffectChain([
+      { id: "sepia", params: {}, enabled: false },
+      { id: "mirror", params: {} },
+    ]);
+    expect(skipped).toContain("[mirl0]");
   });
 
   test("a bypassed effect contributes nothing", () => {

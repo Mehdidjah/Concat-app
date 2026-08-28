@@ -60,7 +60,10 @@ impl Params {
 struct Entry {
     id: &'static str,
     params: &'static [Param],
-    chain: fn(&Params) -> String,
+    /// Builds the fragment. `index` is the fragment's emitted position in
+    /// the clip's chain: any filtergraph labels MUST embed it, or stacking
+    /// the same effect twice duplicates labels and FFmpeg rejects the graph.
+    chain: fn(&Params, usize) -> String,
 }
 
 /// Formats an `f64` the way JS `value.toFixed(digits)` does.
@@ -83,102 +86,105 @@ fn round(value: f64) -> i64 {
 
 // ─── the video effect catalogue ─ mirror of desktop/src/lib/effects.ts ──────
 
-fn fx_black_white(_: &Params) -> String {
+fn fx_black_white(_: &Params, _index: usize) -> String {
     "hue=s=0".to_owned()
 }
 
-fn fx_sepia(_: &Params) -> String {
+fn fx_sepia(_: &Params, _index: usize) -> String {
     // The standard sepia matrix, the same one the CSS filter defines.
     "colorchannelmixer=.393:.769:.189:0:.349:.686:.168:0:.272:.534:.131".to_owned()
 }
 
-fn fx_invert(_: &Params) -> String {
+fn fx_invert(_: &Params, _index: usize) -> String {
     "negate".to_owned()
 }
 
-fn fx_sharpen(p: &Params) -> String {
+fn fx_sharpen(p: &Params, _index: usize) -> String {
     let amount = fixed(p.get("amount"), 2);
     format!("unsharp=5:5:{amount}:5:5:0")
 }
 
-fn fx_gaussian_blur(p: &Params) -> String {
+fn fx_gaussian_blur(p: &Params, _index: usize) -> String {
     let sigma = fixed(p.get("radius"), 1);
     format!("gblur=sigma={sigma}")
 }
 
-fn fx_box_blur(p: &Params) -> String {
+fn fx_box_blur(p: &Params, _index: usize) -> String {
     let radius = round(p.get("radius"));
     format!("boxblur={radius}:1")
 }
 
-fn fx_motion_blur(p: &Params) -> String {
+fn fx_motion_blur(p: &Params, _index: usize) -> String {
     // Gaussian in one axis only is the streak; the tiny vertical sigma keeps
     // the filter happy without visibly blurring that axis.
     let sigma = fixed(p.get("length"), 1);
     format!("gblur=sigma={sigma}:sigmaV=0.1")
 }
 
-fn fx_temperature(p: &Params) -> String {
+fn fx_temperature(p: &Params, _index: usize) -> String {
     let temperature = round(p.get("temperature"));
     format!("colortemperature=temperature={temperature}")
 }
 
-fn fx_vibrance(p: &Params) -> String {
+fn fx_vibrance(p: &Params, _index: usize) -> String {
     let intensity = fixed(p.get("intensity"), 2);
     format!("vibrance=intensity={intensity}")
 }
 
-fn fx_contrast_pop(p: &Params) -> String {
+fn fx_contrast_pop(p: &Params, _index: usize) -> String {
     let contrast = fixed(p.get("contrast"), 2);
     format!("eq=contrast={contrast}")
 }
 
-fn fx_vignette(p: &Params) -> String {
+fn fx_vignette(p: &Params, _index: usize) -> String {
     // The filter's angle runs 0..PI/2, wider being darker corners; the slider
     // maps into the range that reads as a vignette rather than a tunnel.
     let angle = fixed(0.25 + (p.get("strength") / 100.0) * 1.05, 3);
     format!("vignette=angle={angle}")
 }
 
-fn fx_film_grain(p: &Params) -> String {
+fn fx_film_grain(p: &Params, _index: usize) -> String {
     // Temporal (t) so the grain dances like film instead of sitting still.
     let amount = round(p.get("amount"));
     format!("noise=alls={amount}:allf=t+u")
 }
 
-/// KNOWN QUIRK, ported deliberately: the fixed `[glowa]`/`[glowb]`/`[glowg]`
-/// labels mean two glows on one clip duplicate filtergraph labels and FFmpeg
+/// Graph labels embed the emitted index so two glows on one clip cannot
+/// collide in a single filtergraph - the old fixed labels made FFmpeg
 /// rejects the graph. The TS entry has the same bug; parity comes first, and
 /// the fix must land on both sides together.
-fn fx_glow(p: &Params) -> String {
+fn fx_glow(p: &Params, index: usize) -> String {
     // Screen-blend a blurred copy over itself - the classic bloom.
     let opacity = fixed(p.get("amount") / 100.0, 2);
     format!(
-        "split[glowa][glowb];[glowb]gblur=sigma=18[glowg];\
-         [glowa][glowg]blend=all_mode=screen:all_opacity={opacity}"
+        "split[glowa{index}][glowb{index}];[glowb{index}]gblur=sigma=18[glowg{index}];\
+         [glowa{index}][glowg{index}]blend=all_mode=screen:all_opacity={opacity}"
     )
 }
 
-fn fx_posterize(p: &Params) -> String {
+fn fx_posterize(p: &Params, _index: usize) -> String {
     let size = round(256.0 / round(p.get("levels")).max(2) as f64);
     let band = format!("trunc(val/{size})*{size}");
     format!("lutrgb=r={band}:g={band}:b={band}")
 }
 
-fn fx_pixelate(p: &Params) -> String {
+fn fx_pixelate(p: &Params, _index: usize) -> String {
     let size = round(p.get("size"));
     format!("pixelize=width={size}:height={size}")
 }
 
-/// KNOWN QUIRK, ported deliberately: the fixed `[mirl]`/`[mirr]`/`[mirf]`
+/// KNOWN QUIRK, ported deliberately: the fixed `[mirl0]`/`[mirr0]`/`[mirf0]`
 /// labels mean stacking mirror twice duplicates filtergraph labels and FFmpeg
 /// rejects the graph. Same bug as the TS entry; the fix lands on both sides
 /// together or not at all.
-fn fx_mirror(_: &Params) -> String {
-    "crop=iw/2:ih:0:0,split[mirl][mirr];[mirr]hflip[mirf];[mirl][mirf]hstack".to_owned()
+fn fx_mirror(_: &Params, index: usize) -> String {
+    format!(
+        "crop=iw/2:ih:0:0,split[mirl{index}][mirr{index}];[mirr{index}]hflip[mirf{index}];\
+         [mirl{index}][mirf{index}]hstack"
+    )
 }
 
-fn fx_fisheye(p: &Params) -> String {
+fn fx_fisheye(p: &Params, _index: usize) -> String {
     // Negative correction coefficients produce barrel distortion - the bulge.
     let k = p.get("strength") / 100.0;
     let k1 = fixed(-0.55 * k, 3);
@@ -186,7 +192,7 @@ fn fx_fisheye(p: &Params) -> String {
     format!("lenscorrection=k1={k1}:k2={k2}:i=bilinear")
 }
 
-fn fx_shake(p: &Params) -> String {
+fn fx_shake(p: &Params, _index: usize) -> String {
     // A jittering crop window; the decoder's guard scale stretches the
     // slightly smaller window back to full size afterwards.
     let a = round(p.get("amount"));
@@ -306,7 +312,7 @@ fn pitch_shift(semitone_shift: f64) -> Vec<String> {
     ]
 }
 
-fn af_sweet(p: &Params) -> String {
+fn af_sweet(p: &Params, _index: usize) -> String {
     let strength = p.get("amount").clamp(0.0, 100.0) / 100.0;
     let pitch = p.get("pitch");
 
@@ -333,7 +339,7 @@ fn af_sweet(p: &Params) -> String {
     parts.join(",")
 }
 
-fn af_deep(p: &Params) -> String {
+fn af_deep(p: &Params, _index: usize) -> String {
     let body = fixed(p.get("body"), 2);
     let mut parts = pitch_shift(p.get("pitch"));
     parts.extend([
@@ -345,13 +351,13 @@ fn af_deep(p: &Params) -> String {
     parts.join(",")
 }
 
-fn af_chipmunk(p: &Params) -> String {
+fn af_chipmunk(p: &Params, _index: usize) -> String {
     let mut parts = pitch_shift(p.get("pitch"));
     parts.extend(["highpass=f=120".to_owned(), "alimiter=limit=0.94".to_owned()]);
     parts.join(",")
 }
 
-fn af_robot(p: &Params) -> String {
+fn af_robot(p: &Params, _index: usize) -> String {
     // aphaser caps speed at 2, so depth maps into 0.4-2.0 rather than being
     // halved - which put it out of range and made the filter refuse.
     let speed = fixed(0.4 + (p.get("depth") / 10.0) * 1.6, 2);
@@ -364,17 +370,17 @@ fn af_robot(p: &Params) -> String {
     .join(",")
 }
 
-fn af_bass(p: &Params) -> String {
+fn af_bass(p: &Params, _index: usize) -> String {
     let gain = fixed(p.get("gain"), 2);
     format!("bass=g={gain}:f=110:w=0.6,alimiter=limit=0.95")
 }
 
-fn af_treble(p: &Params) -> String {
+fn af_treble(p: &Params, _index: usize) -> String {
     let gain = fixed(p.get("gain"), 2);
     format!("treble=g={gain}:f=9000:w=0.7,alimiter=limit=0.95")
 }
 
-fn af_telephone(p: &Params) -> String {
+fn af_telephone(p: &Params, _index: usize) -> String {
     let gain = fixed(3.0 + p.get("drive") / 2.0, 2);
     [
         "highpass=f=400".to_owned(),
@@ -385,13 +391,13 @@ fn af_telephone(p: &Params) -> String {
     .join(",")
 }
 
-fn af_echo(p: &Params) -> String {
+fn af_echo(p: &Params, _index: usize) -> String {
     let delay = round(p.get("delay") * 1000.0);
     let decay = fixed(p.get("decay"), 2);
     format!("aecho=0.8:0.85:{delay}:{decay}")
 }
 
-fn af_room(p: &Params) -> String {
+fn af_room(p: &Params, _index: usize) -> String {
     let scale = 0.4 + (p.get("size") / 100.0) * 1.6;
     let taps = [23.0, 41.0, 67.0, 97.0]
         .iter()
@@ -485,14 +491,17 @@ fn resolve(entry: &Entry, set: &BTreeMap<String, f64>) -> Params {
 /// joined; bypassed entries and ids the catalogue does not know contribute
 /// nothing. Empty result is the empty string.
 fn compose(catalogue: &[Entry], applied: &[AppliedFilter]) -> String {
-    let fragments: Vec<String> = applied
-        .iter()
-        .filter(|applied| applied.enabled)
-        .filter_map(|applied| {
-            let entry = catalogue.iter().find(|entry| entry.id == applied.id)?;
-            Some((entry.chain)(&resolve(entry, &applied.params)))
-        })
-        .collect();
+    // The index passed to each builder is the fragment's *emitted* position,
+    // not its list position - labels stay stable when a bypassed entry sits
+    // earlier in the list. Mirrors buildEffectChain exactly.
+    let mut fragments: Vec<String> = Vec::new();
+    for applied in applied.iter().filter(|applied| applied.enabled) {
+        let Some(entry) = catalogue.iter().find(|entry| entry.id == applied.id) else {
+            continue;
+        };
+        let fragment = (entry.chain)(&resolve(entry, &applied.params), fragments.len());
+        fragments.push(fragment);
+    }
     fragments.join(",")
 }
 
@@ -585,12 +594,12 @@ mod tests {
         ("film-grain", "noise=alls=12:allf=t+u"),
         (
             "glow",
-            "split[glowa][glowb];[glowb]gblur=sigma=18[glowg];\
-             [glowa][glowg]blend=all_mode=screen:all_opacity=0.45",
+            "split[glowa0][glowb0];[glowb0]gblur=sigma=18[glowg0];\
+             [glowa0][glowg0]blend=all_mode=screen:all_opacity=0.45",
         ),
         ("posterize", "lutrgb=r=trunc(val/64)*64:g=trunc(val/64)*64:b=trunc(val/64)*64"),
         ("pixelate", "pixelize=width=16:height=16"),
-        ("mirror", "crop=iw/2:ih:0:0,split[mirl][mirr];[mirr]hflip[mirf];[mirl][mirf]hstack"),
+        ("mirror", "crop=iw/2:ih:0:0,split[mirl0][mirr0];[mirr0]hflip[mirf0];[mirl0][mirf0]hstack"),
         ("fisheye", "lenscorrection=k1=-0.275:k2=-0.100:i=bilinear"),
         ("shake", "crop=iw-24:ih-24:12+12*sin(t*13):12+12*cos(t*17)"),
     ];
@@ -608,8 +617,8 @@ mod tests {
         ("film-grain", "noise=alls=2:allf=t+u"),
         (
             "glow",
-            "split[glowa][glowb];[glowb]gblur=sigma=18[glowg];\
-             [glowa][glowg]blend=all_mode=screen:all_opacity=0.10",
+            "split[glowa0][glowb0];[glowb0]gblur=sigma=18[glowg0];\
+             [glowa0][glowg0]blend=all_mode=screen:all_opacity=0.10",
         ),
         ("posterize", "lutrgb=r=trunc(val/128)*128:g=trunc(val/128)*128:b=trunc(val/128)*128"),
         ("pixelate", "pixelize=width=2:height=2"),
@@ -630,8 +639,8 @@ mod tests {
         ("film-grain", "noise=alls=40:allf=t+u"),
         (
             "glow",
-            "split[glowa][glowb];[glowb]gblur=sigma=18[glowg];\
-             [glowa][glowg]blend=all_mode=screen:all_opacity=1.00",
+            "split[glowa0][glowb0];[glowb0]gblur=sigma=18[glowg0];\
+             [glowa0][glowg0]blend=all_mode=screen:all_opacity=1.00",
         ),
         ("posterize", "lutrgb=r=trunc(val/32)*32:g=trunc(val/32)*32:b=trunc(val/32)*32"),
         ("pixelate", "pixelize=width=64:height=64"),
@@ -827,6 +836,23 @@ mod tests {
             video_effect_chain(&[applied("invert", &[]), sepia, applied("black-white", &[])]),
             "negate,hue=s=0"
         );
+    }
+
+    #[test]
+    fn stacking_one_labelled_effect_twice_keeps_its_graph_labels_distinct() {
+        // Labels embed the emitted index. With the old fixed labels, two
+        // glows on one clip duplicated [glowa] in a single filtergraph and
+        // FFmpeg rejected it - the whole export failed. Mirrors the TS test
+        // of the same name.
+        let chain = video_effect_chain(&[applied("glow", &[]), applied("glow", &[])]);
+        assert!(chain.contains("[glowa0]"), "was: {chain}");
+        assert!(chain.contains("[glowa1]"), "was: {chain}");
+
+        // A bypassed entry does not consume an index: labels follow emission.
+        let mut sepia = applied("sepia", &[]);
+        sepia.enabled = false;
+        let skipped = video_effect_chain(&[sepia, applied("mirror", &[])]);
+        assert!(skipped.contains("[mirl0]"), "was: {skipped}");
     }
 
     #[test]
