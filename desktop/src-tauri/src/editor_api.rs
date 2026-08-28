@@ -101,7 +101,7 @@ fn with_session<T>(
 /// but a *corrupt* document is an error, because silently replacing an
 /// edit with emptiness is how projects get lost.
 #[tauri::command]
-pub fn editor_open(
+pub async fn editor_open(
     state: tauri::State<'_, EditorState>,
     path: String,
     name: String,
@@ -110,28 +110,36 @@ pub fn editor_open(
     rate_num: i64,
     rate_den: i64,
 ) -> Result<EditorView, String> {
-    let mut settings = DocumentSettings { name, width, height, rate_num, rate_den };
-    let editor = match projects::read_document(&path) {
-        Ok(document) => {
-            // The document's frame wins over the manifest: it is where an
-            // edited output size was saved.
-            if let Some(video) = document.get("video") {
-                if let (Some(width), Some(height)) = (
-                    video.get("width").and_then(|value| value.as_u64()),
-                    video.get("height").and_then(|value| value.as_u64()),
-                ) {
-                    if width > 0 && height > 0 {
-                        settings.width = width as u32;
-                        settings.height = height as u32;
+    // Reading and parsing the document is the slow part and needs no state,
+    // so it runs on a blocking thread; the session lock is taken only for the
+    // in-memory install below.
+    let (path, settings, editor) = tauri::async_runtime::spawn_blocking(move || {
+        let mut settings = DocumentSettings { name, width, height, rate_num, rate_den };
+        let editor = match projects::read_document(&path) {
+            Ok(document) => {
+                // The document's frame wins over the manifest: it is where an
+                // edited output size was saved.
+                if let Some(video) = document.get("video") {
+                    if let (Some(width), Some(height)) = (
+                        video.get("width").and_then(|value| value.as_u64()),
+                        video.get("height").and_then(|value| value.as_u64()),
+                    ) {
+                        if width > 0 && height > 0 {
+                            settings.width = width as u32;
+                            settings.height = height as u32;
+                        }
                     }
                 }
+                Editor::from_document(&document)
+                    .ok_or_else(|| format!("{path} holds a document this build cannot read"))?
             }
-            Editor::from_document(&document)
-                .ok_or_else(|| format!("{path} holds a document this build cannot read"))?
-        }
-        // No document yet - a project created moments ago.
-        Err(_) => Editor::new(),
-    };
+            // No document yet - a project created moments ago.
+            Err(_) => Editor::new(),
+        };
+        Ok::<_, String>((path, settings, editor))
+    })
+    .await
+    .map_err(|error| format!("open task failed: {error}"))??;
 
     let mut guard = state.0.lock().map_err(|_| "editor state poisoned".to_owned())?;
     *guard = Some(Session { path, settings, editor });
@@ -177,28 +185,35 @@ pub fn editor_state(state: tauri::State<'_, EditorState>) -> Result<EditorView, 
 /// have been edited in the preview footer and the name in the project
 /// details dialog, so both ride along here.
 #[tauri::command]
-pub fn editor_save(
+pub async fn editor_save(
     state: tauri::State<'_, EditorState>,
     name: Option<String>,
     width: Option<u32>,
     height: Option<u32>,
 ) -> Result<(), String> {
-    with_session(&state, |session| {
+    // Settings mutation and serialisation happen under the lock; the disk
+    // write - the slow, blockable part - happens off the main thread with the
+    // lock released.
+    let (path, document) = with_session(&state, |session| {
         if let Some(name) = name {
             let trimmed = name.trim();
             if !trimmed.is_empty() {
                 session.settings.name = trimmed.to_owned();
             }
         }
-        if let Some(width) = width {
+        // A zero dimension is never a real output size, only a caller bug -
+        // saving it would poison the document until the next open.
+        if let Some(width) = width.filter(|width| *width > 0) {
             session.settings.width = width;
         }
-        if let Some(height) = height {
+        if let Some(height) = height.filter(|height| *height > 0) {
             session.settings.height = height;
         }
-        let document = session.editor.to_document(&session.settings);
-        projects::save(&session.path, &document)
-    })
+        Ok((session.path.clone(), session.editor.to_document(&session.settings)))
+    })?;
+    tauri::async_runtime::spawn_blocking(move || projects::save(&path, &document))
+        .await
+        .map_err(|error| format!("save task failed: {error}"))?
 }
 
 /// Closes the session, dropping its undo history.

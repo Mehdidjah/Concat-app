@@ -9,6 +9,7 @@
 // Public so the integration tests can drive a real export; see tests/.
 pub mod export;
 mod editor_api;
+mod jobs;
 mod playback;
 mod projects;
 mod templates;
@@ -117,9 +118,17 @@ impl From<wolfcut_media::MediaInfo> for MediaSummary {
 }
 
 /// Reports what is inside a media file.
+///
+/// Async because ffprobe on a slow or network volume takes real time, and a
+/// synchronous command runs on the main thread - the one place a stall is a
+/// frozen window.
 #[tauri::command]
-fn probe_media(path: String) -> Result<MediaSummary, String> {
-    wolfcut_media::probe(&path).map(MediaSummary::from).map_err(describe)
+async fn probe_media(path: String) -> Result<MediaSummary, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        wolfcut_media::probe(&path).map(MediaSummary::from).map_err(describe)
+    })
+    .await
+    .map_err(|error| format!("probe task failed: {error}"))?
 }
 
 /// The version of the app the UI is talking to. Also a liveness check on the
@@ -139,10 +148,13 @@ fn engine_version() -> &'static str {
 /// It loads the entire file into memory, so it is not a general-purpose
 /// reader and must not become one.
 #[tauri::command]
-fn read_media_bytes(path: String) -> Result<tauri::ipc::Response, String> {
-    std::fs::read(&path)
-        .map(tauri::ipc::Response::new)
-        .map_err(|error| format!("could not read {path}: {error}"))
+async fn read_media_bytes(path: String) -> Result<tauri::ipc::Response, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        std::fs::read(&path).map_err(|error| format!("could not read {path}: {error}"))
+    })
+    .await
+    .map_err(|error| format!("read task failed: {error}"))?
+    .map(tauri::ipc::Response::new)
 }
 
 /// Where one artwork file lives inside a project's cache.
@@ -169,23 +181,30 @@ fn artwork_file(project: &str, key: &str) -> Result<std::path::PathBuf, String> 
 
 /// Returns one cached artwork file, or an error the frontend treats as a miss.
 #[tauri::command]
-fn read_artwork(project: String, key: String) -> Result<tauri::ipc::Response, String> {
+async fn read_artwork(project: String, key: String) -> Result<tauri::ipc::Response, String> {
     let file = artwork_file(&project, &key)?;
-    std::fs::read(&file)
-        .map(tauri::ipc::Response::new)
-        .map_err(|error| format!("no cached artwork {key}: {error}"))
+    tauri::async_runtime::spawn_blocking(move || {
+        std::fs::read(&file).map_err(|error| format!("no cached artwork {key}: {error}"))
+    })
+    .await
+    .map_err(|error| format!("artwork task failed: {error}"))?
+    .map(tauri::ipc::Response::new)
 }
 
 /// Stores one artwork file in the project's cache. Best-effort: the caller
 /// fires and forgets, and a failed write only means regenerating next launch.
 #[tauri::command]
-fn write_artwork(project: String, key: String, bytes: Vec<u8>) -> Result<(), String> {
+async fn write_artwork(project: String, key: String, bytes: Vec<u8>) -> Result<(), String> {
     let file = artwork_file(&project, &key)?;
-    if let Some(parent) = file.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|error| format!("could not create {}: {error}", parent.display()))?;
-    }
-    std::fs::write(&file, bytes).map_err(|error| format!("could not write {key}: {error}"))
+    tauri::async_runtime::spawn_blocking(move || {
+        if let Some(parent) = file.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|error| format!("could not create {}: {error}", parent.display()))?;
+        }
+        std::fs::write(&file, bytes).map_err(|error| format!("could not write {key}: {error}"))
+    })
+    .await
+    .map_err(|error| format!("artwork task failed: {error}"))?
 }
 
 /// Renders a strip of evenly spaced frames from a video as one JPEG.
@@ -413,20 +432,29 @@ async fn open_project(app: tauri::AppHandle, path: String) -> Result<projects::P
 
 /// The recents list, most recent first, with vanished folders left out.
 #[tauri::command]
-fn recent_projects(app: tauri::AppHandle) -> Result<Vec<projects::ProjectInfo>, String> {
-    Ok(projects::list(&config_dir(&app)?))
+async fn recent_projects(app: tauri::AppHandle) -> Result<Vec<projects::ProjectInfo>, String> {
+    let config = config_dir(&app)?;
+    tauri::async_runtime::spawn_blocking(move || projects::list(&config))
+        .await
+        .map_err(|error| format!("recents task failed: {error}"))
 }
 
 /// Removes a project from the recents list. The folder itself is left alone.
 #[tauri::command]
-fn forget_project(app: tauri::AppHandle, path: String) -> Result<(), String> {
-    projects::forget(&config_dir(&app)?, &path)
+async fn forget_project(app: tauri::AppHandle, path: String) -> Result<(), String> {
+    let config = config_dir(&app)?;
+    tauri::async_runtime::spawn_blocking(move || projects::forget(&config, &path))
+        .await
+        .map_err(|error| format!("forget task failed: {error}"))?
 }
 
 /// The template library, for the gallery.
 #[tauri::command]
-fn template_list(app: tauri::AppHandle) -> Result<Vec<templates::TemplateInfo>, String> {
-    Ok(templates::list(&config_dir(&app)?))
+async fn template_list(app: tauri::AppHandle) -> Result<Vec<templates::TemplateInfo>, String> {
+    let config = config_dir(&app)?;
+    tauri::async_runtime::spawn_blocking(move || templates::list(&config))
+        .await
+        .map_err(|error| format!("template list task failed: {error}"))
 }
 
 /// Packs the open project into a new template bundle.
@@ -469,14 +497,20 @@ async fn template_instantiate(
 
 /// Removes one template bundle for good.
 #[tauri::command]
-fn template_delete(app: tauri::AppHandle, path: String) -> Result<(), String> {
-    templates::delete(&config_dir(&app)?, &path)
+async fn template_delete(app: tauri::AppHandle, path: String) -> Result<(), String> {
+    let config = config_dir(&app)?;
+    tauri::async_runtime::spawn_blocking(move || templates::delete(&config, &path))
+        .await
+        .map_err(|error| format!("template delete task failed: {error}"))?
 }
 
 /// A template's poster, or an error the UI treats as "no art".
 #[tauri::command]
-fn template_poster(path: String) -> Result<tauri::ipc::Response, String> {
-    templates::poster(&path).map(tauri::ipc::Response::new)
+async fn template_poster(path: String) -> Result<tauri::ipc::Response, String> {
+    tauri::async_runtime::spawn_blocking(move || templates::poster(&path))
+        .await
+        .map_err(|error| format!("poster task failed: {error}"))?
+        .map(tauri::ipc::Response::new)
 }
 
 fn config_dir(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
@@ -486,8 +520,10 @@ fn config_dir(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
         .map_err(|error| format!("could not locate the config directory: {error}"))
 }
 
-/// The stop flag for the one export that can run at a time.
-struct ExportState(std::sync::Arc<std::sync::atomic::AtomicBool>);
+/// The slot for the one export that can run at a time - enforced, not
+/// documented: a second `export_project` while one runs is refused instead of
+/// racing the first for its temp files and cancel flag.
+struct ExportState(std::sync::Arc<jobs::SingleFlight>);
 
 /// The reader pool behind the paused monitor's true frames. One pool for the
 /// app's lifetime: its whole value is what stays warm between scrubs.
@@ -527,9 +563,8 @@ async fn export_project(
     state: tauri::State<'_, ExportState>,
     request: export::ExportRequest,
 ) -> Result<String, String> {
-    let cancel = std::sync::Arc::clone(&state.0);
-    cancel.store(false, std::sync::atomic::Ordering::Relaxed);
-    tauri::async_runtime::spawn_blocking(move || export::run(&app, request, &cancel))
+    let job = state.0.begin("export")?;
+    tauri::async_runtime::spawn_blocking(move || export::run(&app, request, job.cancel_flag()))
         .await
         .map_err(|error| format!("export task failed: {error}"))?
 }
@@ -537,7 +572,7 @@ async fn export_project(
 /// Asks the running export to stop at the next frame. Idle is a harmless no-op.
 #[tauri::command]
 fn cancel_export(state: tauri::State<'_, ExportState>) {
-    state.0.store(true, std::sync::atomic::Ordering::Relaxed);
+    state.0.cancel();
 }
 
 /// Flattens an error and its causes into one line.
@@ -607,15 +642,11 @@ pub fn run() {
             use tauri::Manager;
             use_bundled_ffmpeg(app);
             app.manage(playback::Playback::start(app.handle().clone()));
-            app.manage(ExportState(std::sync::Arc::new(
-                std::sync::atomic::AtomicBool::new(false),
-            )));
+            app.manage(ExportState(std::sync::Arc::new(jobs::SingleFlight::new())));
             app.manage(transcribe::DownloadState(std::sync::Arc::new(
-                std::sync::atomic::AtomicBool::new(false),
+                jobs::SingleFlight::new(),
             )));
-            app.manage(transcribe::TranscribeState(std::sync::Arc::new(
-                std::sync::Mutex::new(None),
-            )));
+            app.manage(transcribe::TranscribeState::new());
             app.manage(editor_api::EditorState(std::sync::Mutex::new(None)));
             app.manage(PoolState(std::sync::Arc::new(std::sync::Mutex::new(
                 wolfcut_media::ReaderPool::with_defaults(),

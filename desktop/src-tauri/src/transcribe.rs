@@ -27,11 +27,13 @@
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
 use tauri::{Emitter, Manager};
+
+use crate::jobs::SingleFlight;
 
 /// One downloadable Whisper model. Sizes are approximate, for progress bars
 /// when the server declines to send a Content-Length.
@@ -262,8 +264,10 @@ struct DownloadProgress {
     done: bool,
 }
 
-/// The stop flag for the one model download that can run at a time.
-pub struct DownloadState(pub Arc<AtomicBool>);
+/// The slot for the one model download that can run at a time. Enforced by
+/// `SingleFlight`: a second download is refused rather than sharing (and
+/// resetting) the first one's cancel flag.
+pub struct DownloadState(pub Arc<SingleFlight>);
 
 /// Streams one model from Hugging Face into the models folder.
 ///
@@ -276,17 +280,25 @@ pub async fn download_transcriber_model(
     state: tauri::State<'_, DownloadState>,
     id: String,
 ) -> Result<(), String> {
-    let cancel = Arc::clone(&state.0);
-    cancel.store(false, Ordering::Relaxed);
+    let job = state.0.begin("model download")?;
 
     tauri::async_runtime::spawn_blocking(move || {
+        let cancel = job.cancel_flag();
         let destination = model_file(&app, &id)?;
         if destination.is_file() {
             return Ok(());
         }
         let estimate = known(&id).map(|model| model.approx_bytes).unwrap_or(0);
 
-        let response = ureq::get(&model_url(&id))
+        // A read timeout, or a stalled connection blocks in `read` forever
+        // with the cancel flag unreachable - the flag is only checked between
+        // reads. Thirty seconds without a byte means the download is dead.
+        let agent = ureq::AgentBuilder::new()
+            .timeout_connect(std::time::Duration::from_secs(20))
+            .timeout_read(std::time::Duration::from_secs(30))
+            .build();
+        let response = agent
+            .get(&model_url(&id))
             .call()
             .map_err(|error| format!("download failed: {error}"))?;
         let total = response
@@ -345,7 +357,7 @@ pub async fn download_transcriber_model(
 /// Asks the running download to stop. Idle is a harmless no-op.
 #[tauri::command]
 pub fn cancel_model_download(state: tauri::State<'_, DownloadState>) {
-    state.0.store(true, Ordering::Relaxed);
+    state.0.cancel();
 }
 
 /// Removes a downloaded model file.
@@ -365,8 +377,24 @@ pub struct Segment {
     text: String,
 }
 
-/// The child being run, so a cancel can kill it mid-transcription.
-pub struct TranscribeState(pub Arc<Mutex<Option<Child>>>);
+/// The one transcription that can run at a time: a gate that refuses a
+/// second concurrent run, and the child being run so a cancel can kill it
+/// mid-transcription. Without the gate, a second `transcribe_clip` used to
+/// overwrite the child slot - orphaning the first child unkilled and unwaited
+/// while both wait loops polled the second.
+pub struct TranscribeState {
+    gate: Arc<SingleFlight>,
+    child: Arc<Mutex<Option<Child>>>,
+}
+
+impl TranscribeState {
+    pub fn new() -> Self {
+        Self {
+            gate: Arc::new(SingleFlight::new()),
+            child: Arc::new(Mutex::new(None)),
+        }
+    }
+}
 
 /// Runs `command`, parking the child in `slot` so `cancel_transcribe` can
 /// reach it, and waits for it to finish.
@@ -462,16 +490,21 @@ pub async fn transcribe_clip(
     state: tauri::State<'_, TranscribeState>,
     request: TranscribeRequest,
 ) -> Result<Vec<Segment>, String> {
-    let slot = Arc::clone(&state.0);
-    tauri::async_runtime::spawn_blocking(move || run_transcription(&app, &slot, &request))
-        .await
-        .map_err(|error| format!("transcribe task failed: {error}"))?
+    let job = state.gate.begin("transcription")?;
+    let slot = Arc::clone(&state.child);
+    tauri::async_runtime::spawn_blocking(move || {
+        let result = run_transcription(&app, &slot, &request);
+        drop(job);
+        result
+    })
+    .await
+    .map_err(|error| format!("transcribe task failed: {error}"))?
 }
 
 /// Kills the running transcription's child process, if any.
 #[tauri::command]
 pub fn cancel_transcribe(state: tauri::State<'_, TranscribeState>) {
-    let mut guard = state.0.lock().expect("transcribe slot poisoned");
+    let mut guard = state.child.lock().expect("transcribe slot poisoned");
     if let Some(mut child) = guard.take() {
         let _ = child.kill();
         let _ = child.wait();
@@ -493,7 +526,8 @@ fn run_transcription(
             request.model_id
         ));
     }
-    if !(request.window > 0.0) {
+    // NaN is refused along with zero and negative windows.
+    if request.window.is_nan() || request.window <= 0.0 {
         return Err("nothing to transcribe: the clip covers no time".to_owned());
     }
 
