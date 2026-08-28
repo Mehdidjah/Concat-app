@@ -168,6 +168,14 @@ impl FfmpegDecoder {
     /// dimensions, because the pipe carries raw pixels with no header to say
     /// how big a frame is.
     pub fn open(path: impl AsRef<Path>, options: &DecodeOptions) -> Result<Self> {
+        // The same slot-escape rule the audio graph enforces: a chain with
+        // `;` or `[..]` is no longer a filter applied to this clip. Video
+        // rode without the guard only because every chain came from our own
+        // catalogue; "validated, not trusted" should not depend on that.
+        if let Some(chain) = &options.filter_chain {
+            crate::audio::validate_chain(chain)?;
+        }
+
         let path = path.as_ref();
         let (width, height) = match options.size {
             Some(size) => size,
@@ -358,6 +366,20 @@ mod tests {
     #[test]
     fn an_empty_chain_is_no_chain() {
         assert!(DecodeOptions::default().filtered("").filter_chain.is_none());
+    }
+
+    #[test]
+    fn a_chain_that_escapes_its_slot_is_refused_before_anything_spawns() {
+        for bad in ["hue=s=0;movie=x", "split[a][b]", "a\nb"] {
+            let result = FfmpegDecoder::open(
+                "irrelevant.mp4",
+                &DecodeOptions::default().scaled_to(64, 64).filtered(bad),
+            );
+            assert!(
+                matches!(result, Err(crate::error::Error::InvalidFilterChain { .. })),
+                "{bad:?} should have been refused",
+            );
+        }
     }
 
     #[test]
