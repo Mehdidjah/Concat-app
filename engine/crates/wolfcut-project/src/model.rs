@@ -17,6 +17,8 @@ use serde::{Deserialize, Serialize};
 /// What a piece of media is. A still is not a video with one frame: it has no
 /// intrinsic duration, so its length on a timeline is editorial.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "types", derive(ts_rs::TS))]
+#[cfg_attr(feature = "types", ts(export))]
 #[serde(rename_all = "lowercase")]
 pub enum MediaKind {
     /// Moving pictures, with or without embedded sound.
@@ -30,6 +32,8 @@ pub enum MediaKind {
 /// What a clip can be - wider than [`MediaKind`] because a text clip has no
 /// file behind it; it *is* its own content.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "types", derive(ts_rs::TS))]
+#[cfg_attr(feature = "types", ts(export))]
 #[serde(rename_all = "lowercase")]
 pub enum ClipKind {
     /// A cut of a video media item.
@@ -53,6 +57,8 @@ impl ClipKind {
 /// probe learned about it. The probe metadata is stored, not re-derived, so a
 /// document opens meaningfully even when the file itself is missing.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "types", derive(ts_rs::TS))]
+#[cfg_attr(feature = "types", ts(export))]
 #[serde(rename_all = "camelCase")]
 pub struct MediaItem {
     /// Minted by the editor ("m1", "m2", ...) and never re-issued, even
@@ -87,6 +93,7 @@ pub struct MediaItem {
     /// own file (`Command::FillSlot`). In a creator's own project the path is
     /// still real; only a packed template bundle blanks it. Skipped when
     /// false, so documents without templates stay byte-identical.
+    #[cfg_attr(feature = "types", ts(as = "Option<bool>", optional))]
     #[serde(default, skip_serializing_if = "is_false")]
     pub placeholder: bool,
 }
@@ -97,6 +104,8 @@ fn is_false(value: &bool) -> bool {
 
 /// A lane. Deliberately untyped: any media goes on any track.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "types", derive(ts_rs::TS))]
+#[cfg_attr(feature = "types", ts(export))]
 #[serde(rename_all = "camelCase")]
 pub struct Track {
     /// Minted per timeline ("t5", or "T1".."T4" for the first timeline's
@@ -115,6 +124,8 @@ pub struct Track {
 /// parameters were set. The catalogues themselves (and the FFmpeg strings
 /// they build) live in the UI today; the model only stores the numbers.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "types", derive(ts_rs::TS))]
+#[cfg_attr(feature = "types", ts(export))]
 #[serde(rename_all = "camelCase")]
 pub struct AppliedFilter {
     /// Which catalogue entry this is, e.g. "sepia". Not minted; an id the
@@ -125,6 +136,7 @@ pub struct AppliedFilter {
     #[serde(default)]
     pub params: BTreeMap<String, f64>,
     /// False bypasses without losing settings. Absent means enabled.
+    #[cfg_attr(feature = "types", ts(as = "Option<bool>", optional))]
     #[serde(default = "yes")]
     pub enabled: bool,
 }
@@ -135,6 +147,8 @@ fn yes() -> bool {
 
 /// A transition on the cut into a clip.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "types", derive(ts_rs::TS))]
+#[cfg_attr(feature = "types", ts(export))]
 #[serde(rename_all = "camelCase")]
 pub struct Transition {
     /// Which transition from the catalogue, e.g. "cross-fade".
@@ -146,6 +160,8 @@ pub struct Transition {
 /// How a title's lines sit within their block. The block itself is placed by
 /// the clip's transform, so this only matters for multi-line text.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "types", derive(ts_rs::TS))]
+#[cfg_attr(feature = "types", ts(export))]
 #[serde(rename_all = "lowercase")]
 pub enum TextAlign {
     /// Lines share a left edge.
@@ -160,6 +176,8 @@ pub enum TextAlign {
 /// A title's styling. Sizes are fractions of the frame, so a title composed
 /// against 1080p lands correctly exported at 4K.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "types", derive(ts_rs::TS))]
+#[cfg_attr(feature = "types", ts(export))]
 #[serde(rename_all = "camelCase")]
 pub struct TextStyle {
     /// The words themselves, newlines included. The clip's display name is
@@ -224,6 +242,8 @@ impl Default for TextStyle {
 /// timing, mix, transform, and effects. Everything an edit decision touches
 /// lives here, which is why most commands are clip commands.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "types", derive(ts_rs::TS))]
+#[cfg_attr(feature = "types", ts(export))]
 #[serde(rename_all = "camelCase")]
 pub struct Clip {
     /// Minted by the editor ("c1", "c2", ...); how every command names its
@@ -275,15 +295,19 @@ pub struct Clip {
     #[serde(default)]
     pub video_effects: Vec<AppliedFilter>,
     /// True when a video clip's embedded audio is detached out of it.
+    #[cfg_attr(feature = "types", ts(optional))]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub muted: Option<bool>,
     /// On a detached audio clip: the video clip the sound came from.
+    #[cfg_attr(feature = "types", ts(optional))]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detached_from: Option<String>,
     /// The transition on the cut into this clip, if any.
+    #[cfg_attr(feature = "types", ts(optional))]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transition_in: Option<Transition>,
     /// The overlay, when this is a text clip.
+    #[cfg_attr(feature = "types", ts(optional))]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text: Option<TextStyle>,
 }
@@ -293,6 +317,8 @@ pub struct Clip {
 /// operations could stay ignorant of timelines. Here every operation takes
 /// the project and works on whichever timeline is active.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "types", derive(ts_rs::TS))]
+#[cfg_attr(feature = "types", ts(export))]
 #[serde(rename_all = "camelCase")]
 pub struct Timeline {
     /// Minted by the editor ("tl2", ...), except the founding "TL1".
@@ -309,6 +335,8 @@ pub struct Timeline {
 
 /// A font the user added from disk.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "types", derive(ts_rs::TS))]
+#[cfg_attr(feature = "types", ts(export))]
 #[serde(rename_all = "camelCase")]
 pub struct CustomFont {
     /// The family name titles refer to; removal leaves referring clips
@@ -322,6 +350,8 @@ pub struct CustomFont {
 /// The edit: everything the document stores except the app-level settings
 /// (name, output format) that the host manages around it.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "types", derive(ts_rs::TS))]
+#[cfg_attr(feature = "types", ts(export))]
 #[serde(rename_all = "camelCase")]
 pub struct Project {
     /// The bin: every imported file, shared by all timelines.

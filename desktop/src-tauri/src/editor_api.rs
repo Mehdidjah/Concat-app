@@ -30,6 +30,8 @@ pub struct Session {
 /// What every mutating call returns: the authoritative state plus history
 /// availability, so the UI's undo/redo affordances are never guessing.
 #[derive(Serialize)]
+#[cfg_attr(feature = "types", derive(ts_rs::TS))]
+#[cfg_attr(feature = "types", ts(export))]
 #[serde(rename_all = "camelCase")]
 pub struct EditorView {
     project: wolfcut_project::Project,
@@ -41,16 +43,23 @@ pub struct EditorView {
     settings: SettingsView,
     /// The id a creating command minted, if any.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "types", ts(optional))]
     created_id: Option<String>,
 }
 
 #[derive(Serialize)]
+#[cfg_attr(feature = "types", derive(ts_rs::TS))]
+#[cfg_attr(feature = "types", ts(export))]
 #[serde(rename_all = "camelCase")]
 pub struct SettingsView {
     name: String,
     width: u32,
     height: u32,
+    // i64 over the wire is a plain JSON number, not a bigint - serde_json
+    // writes it bare and the UI reads it with JSON.parse.
+    #[cfg_attr(feature = "types", ts(type = "number"))]
     rate_num: i64,
+    #[cfg_attr(feature = "types", ts(type = "number"))]
     rate_den: i64,
 }
 
