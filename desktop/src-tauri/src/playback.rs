@@ -14,8 +14,9 @@
 //!   project pays nothing.
 //!
 //! - One cpal output stream mixes the mapped clips sample by sample, with
-//!   volume and fades applied at mix time (they mirror `clipGainAt` in the
-//!   frontend exactly). Gain-only edits therefore never re-decode.
+//!   volume and fades applied at mix time. Gain-only edits therefore never
+//!   re-decode, and what a fade sounds like has exactly one definition: this
+//!   file's `gain_at`.
 //!
 //! - The playback clock is the audio device's own sample counter. The UI
 //!   receives `transport` position events and interpolates between them;
@@ -140,8 +141,9 @@ struct ActiveClip {
     pcm: Arc<Pcm>,
 }
 
-/// Mirror of the frontend's `clipGainAt`, so preview loudness has exactly one
-/// definition even though it is computed in two languages.
+/// The one definition of a clip's gain envelope. It used to mirror a
+/// `clipGainAt` in the frontend; that copy died with the webview audio path
+/// (decision 0005), which is the better arrangement - nothing to drift.
 fn gain_at(clip: &ActiveClip, local: f64) -> f32 {
     if local < 0.0 || local > clip.duration {
         return 0.0;
@@ -172,11 +174,21 @@ struct Shared {
 pub struct Playback {
     tx: mpsc::Sender<Msg>,
     shared: Arc<Shared>,
+    /// For surfacing failures; a mute app must never be a mystery.
+    app: tauri::AppHandle,
     /// Decoded clips by decode key, for the lifetime of the app.
     cache: Mutex<HashMap<String, Arc<Pcm>>>,
     decoding: Mutex<HashSet<String>>,
     /// What the timeline currently wants audible.
     specs: Mutex<Vec<ClipSpec>>,
+}
+
+/// A playback failure the user would otherwise experience as unexplained
+/// silence. Logged for the dev console, emitted for the UI's toast - the
+/// difference between "audio is broken" and a bug report that names a file.
+fn report(app: &tauri::AppHandle, message: String) {
+    eprintln!("relay: {message}");
+    let _ = app.emit("audio://error", message);
 }
 
 impl Playback {
@@ -189,9 +201,10 @@ impl Playback {
 
         {
             let shared = Arc::clone(&shared);
+            let app = app.clone();
             std::thread::Builder::new()
                 .name("audio-output".into())
-                .spawn(move || audio_thread(rx, shared))
+                .spawn(move || audio_thread(rx, shared, app))
                 .expect("could not spawn the audio thread");
         }
 
@@ -199,6 +212,7 @@ impl Playback {
         // them, so this cadence bounds correction error, not smoothness.
         {
             let shared = Arc::clone(&shared);
+            let app = app.clone();
             std::thread::Builder::new()
                 .name("transport-events".into())
                 .spawn(move || loop {
@@ -215,6 +229,7 @@ impl Playback {
         Arc::new(Playback {
             tx,
             shared,
+            app,
             cache: Mutex::new(HashMap::new()),
             decoding: Mutex::new(HashSet::new()),
             specs: Mutex::new(Vec::new()),
@@ -264,7 +279,10 @@ impl Playback {
                         Ok(pcm) => {
                             this.cache.lock().unwrap().insert(key.clone(), Arc::new(pcm));
                         }
-                        Err(error) => eprintln!("audio decode failed for {}: {error}", spec.path),
+                        Err(error) => report(
+                            &this.app,
+                            format!("audio decode failed for {}: {error}", spec.path),
+                        ),
                     }
                     this.decoding.lock().unwrap().remove(&key);
                     this.resync();
@@ -387,16 +405,16 @@ fn decode(spec: &ClipSpec, project: &Path, key: &str) -> Result<Pcm, String> {
 ///
 /// The stream's callback owns all mix state and drains the message channel
 /// itself, so no lock is ever taken on the audio thread.
-fn audio_thread(rx: mpsc::Receiver<Msg>, shared: Arc<Shared>) {
+fn audio_thread(rx: mpsc::Receiver<Msg>, shared: Arc<Shared>, app: tauri::AppHandle) {
     use cpal::traits::{DeviceTrait, HostTrait};
 
     let host = cpal::default_host();
     let Some(device) = host.default_output_device() else {
-        eprintln!("no audio output device; preview will be silent");
+        report(&app, "no audio output device; playback will be silent".to_owned());
         return;
     };
     let Ok(config) = device.default_output_config() else {
-        eprintln!("no default output config; preview will be silent");
+        report(&app, "no default audio output config; playback will be silent".to_owned());
         return;
     };
 
@@ -404,13 +422,13 @@ fn audio_thread(rx: mpsc::Receiver<Msg>, shared: Arc<Shared>) {
     let config: cpal::StreamConfig = config.into();
 
     let result = match sample_format {
-        cpal::SampleFormat::F32 => run_stream::<f32>(&device, &config, rx, shared),
-        cpal::SampleFormat::I16 => run_stream::<i16>(&device, &config, rx, shared),
-        cpal::SampleFormat::U16 => run_stream::<u16>(&device, &config, rx, shared),
+        cpal::SampleFormat::F32 => run_stream::<f32>(&device, &config, rx, shared, app.clone()),
+        cpal::SampleFormat::I16 => run_stream::<i16>(&device, &config, rx, shared, app.clone()),
+        cpal::SampleFormat::U16 => run_stream::<u16>(&device, &config, rx, shared, app.clone()),
         other => Err(format!("unsupported sample format {other:?}")),
     };
     if let Err(error) = result {
-        eprintln!("audio output failed: {error}");
+        report(&app, format!("audio output failed: {error}; playback will be silent"));
     }
 }
 
@@ -419,6 +437,7 @@ fn run_stream<T>(
     config: &cpal::StreamConfig,
     rx: mpsc::Receiver<Msg>,
     shared: Arc<Shared>,
+    app: tauri::AppHandle,
 ) -> Result<(), String>
 where
     T: cpal::SizedSample + cpal::FromSample<f32>,
@@ -499,7 +518,7 @@ where
                     .position_micros
                     .store((position * 1_000_000.0) as u64, Ordering::Relaxed);
             },
-            |error| eprintln!("audio stream error: {error}"),
+            move |error| report(&app, format!("audio stream error: {error}")),
             None,
         )
         .map_err(|error| format!("could not build the output stream: {error}"))?;
