@@ -20,6 +20,7 @@
 //! filtergraph and mixed in a single pass.
 
 pub mod chains;
+pub mod flatten;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
