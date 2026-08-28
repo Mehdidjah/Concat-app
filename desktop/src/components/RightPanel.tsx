@@ -1,3 +1,5 @@
+import { memo } from "react";
+
 import type { AppliedEffect, ClipTransition } from "../lib/effects";
 import type { ClipFilter } from "../lib/filters";
 import {
@@ -49,8 +51,13 @@ const TEXT_TABS: { id: RightTab; label: string }[] = [{ id: "text", label: "Text
  * Filters is what you can add to it. Keeping those apart matters because the
  * first is read-only and the other two are not, and mixing them makes it
  * unclear which numbers you are allowed to touch.
+ *
+ * Memoised: playback re-renders the editor per animation frame, and nothing
+ * here reads the playhead - the panel shows the selection, not the clock.
+ * App.tsx keeps every callback and derived prop referentially stable
+ * (useCallback / useMemo / objects straight off the memoised project).
  */
-export function RightPanel({
+export const RightPanel = memo(function RightPanel({
   tab,
   onTab,
   clip,
@@ -181,4 +188,4 @@ export function RightPanel({
       )}
     </Panel>
   );
-}
+});

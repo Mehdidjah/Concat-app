@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { memo, useEffect, useState } from "react";
 import type { ReactNode } from "react";
 import { isTauri } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -28,8 +28,12 @@ import { Menu, type MenuOption } from "./Menu";
  *
  * In a plain browser (`npm run dev` without the host) the window APIs are
  * absent, so the controls hide themselves rather than throwing.
+ *
+ * Memoised: the editor re-renders at animation rate during playback and
+ * nothing up here depends on the playhead. App.tsx keeps `menus`, `actions`
+ * and the callbacks referentially stable so this actually holds.
  */
-export function TitleBar({
+export const TitleBar = memo(function TitleBar({
   projectName,
   menus,
   status,
@@ -164,7 +168,7 @@ export function TitleBar({
       )}
     </header>
   );
-}
+});
 
 /**
  * Window controls are wider than they are tall and reach the very top edge, so

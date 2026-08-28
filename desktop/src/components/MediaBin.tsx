@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { memo, useEffect, useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import type { PointerEvent as ReactPointerEvent, ReactNode } from "react";
 
@@ -59,8 +59,13 @@ const TABS: { id: LibraryTab; label: string }[] = [
  * at the drop position. That is the primary way material gets into an edit, so
  * it needs to be the obvious one - hence the whole card being the drag handle
  * rather than some grip affordance.
+ *
+ * Memoised: the editor re-renders per animation frame during playback and
+ * nothing in the library depends on the playhead. App.tsx keeps every
+ * callback here referentially stable (useCallback) so the memo actually
+ * skips those renders.
  */
-export function MediaBin({
+export const MediaBin = memo(function MediaBin({
   items,
   filter,
   selectedIds,
@@ -226,7 +231,7 @@ export function MediaBin({
       </div>
     </Panel>
   );
-}
+});
 
 // ── the category sidebar ─────────────────────────────────────────────────────
 

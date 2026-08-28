@@ -214,8 +214,10 @@ function Editor({
   const timeline = activeTimeline(project);
 
   const duration = projectDuration(project);
-  const transport = useTransport({ duration });
-  const { playhead, playing } = transport;
+  // `transport` is the stable controls object - safe in deps and memoised
+  // props without per-frame churn. Only `playhead`/`playing` move at
+  // animation rate, and only Preview and TimelinePanel take them as props.
+  const { playhead, playing, controls: transport } = useTransport({ duration });
 
   // Read by event listeners that outlive the render that installed them.
   const latest = useRef({ project, secondsPerPixel, scrollLeft, trackScroll, snap, playhead, frame });
@@ -749,6 +751,61 @@ function Editor({
     [duration],
   );
 
+  // ── stable prop identities ───────────────────────────────────────────────
+  // MediaBin, RightPanel and the TitleBar are React.memo'd so they sit out
+  // the per-frame renders playback causes here. That only holds if every
+  // callback they receive keeps its identity - an inline arrow minted per
+  // render would make the memo a no-op - so their handlers live here as
+  // useCallbacks over stable dependencies.
+
+  const selectMedia = useCallback((ids: string[]) => {
+    setSelectedMediaIds(ids);
+    // Bin and timeline selections are exclusive: picking media drops clips.
+    if (ids.length > 0) setSelectedClipIds([]);
+  }, []);
+
+  const importFiles = useCallback(
+    (paths: string[]) => void importPaths(paths),
+    [importPaths],
+  );
+
+  const removeMedia = useCallback(
+    (id: string) => void dispatch({ op: "removeMedia", mediaId: id }),
+    [dispatch],
+  );
+
+  const dismissError = useCallback(() => setError(null), []);
+
+  const toggleSlot = useCallback(
+    (mediaId: string, placeholder: boolean) =>
+      void dispatch({ op: "setMediaPlaceholder", mediaId, placeholder }),
+    [dispatch],
+  );
+
+  const openTemplateDialog = useCallback(() => setTemplateDialog({ busy: false }), []);
+
+  const leaveForTemplate = useCallback(
+    (template: TemplateInfo) => {
+      // Save what is open first: leaving for the fill flow closes this
+      // project, and the debounced autosave may not have fired.
+      void editorSave(latest.current.frame)
+        .catch(() => undefined)
+        .then(() => onUseTemplate(template));
+    },
+    [onUseTemplate],
+  );
+
+  const addFont = useCallback(() => void pickFont(), [pickFont]);
+
+  const removeFont = useCallback(
+    (family: string) => void dispatch({ op: "removeFont", family }),
+    [dispatch],
+  );
+
+  const openModifyProject = useCallback(() => setModifyingProject({ busy: false }), []);
+  const openSettings = useCallback(() => setSettingsOpen(true), []);
+  const openExport = useCallback(() => setExporting(true), []);
+
   // ── keyboard ─────────────────────────────────────────────────────────────
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -916,6 +973,177 @@ function Editor({
       ? findMedia(project, selectedMediaIds[0])
       : null;
 
+  // Walks every selected clip's neighbours, so not something to redo per
+  // frame of playback - only an edit or a selection change moves the answer.
+  const mergeBlockedBecause = useMemo(
+    () => whyNotMerge(project, selectedClipIds),
+    [project, selectedClipIds],
+  );
+
+  // The Export button, built once so the memoised TitleBar sees the same
+  // `actions` element across playback renders.
+  const exportAction = useMemo(
+    () => (
+      <button
+        type="button"
+        onClick={openExport}
+        className="flex cursor-pointer items-center gap-1.5 rounded-md bg-accent px-2.5 py-1
+                   text-xs font-medium text-on-accent transition-colors hover:bg-accent-hover"
+      >
+        <Icon name="export" size={13} />
+        Export
+      </button>
+    ),
+    [openExport],
+  );
+
+  // The whole menu structure, rebuilt only when something a menu shows or
+  // does actually changes. Building it inline in the JSX minted a new tree
+  // per render - 60 times a second during playback - and dragged the
+  // memoised TitleBar along with it. Nothing here reads the playhead (the
+  // File menu's "add at playhead" goes through `latest`), so playback never
+  // invalidates it.
+  const menus = useMemo<{ label: string; groups: MenuOption[][] }[]>(
+    () => [
+      {
+        label: "File",
+        groups: [
+          [
+            {
+              label: "Add selected to timeline",
+              icon: "plus",
+              disabled: selectedMediaIds.length === 0,
+              onSelect: () => placeMediaSet(selectedMediaIds, latest.current.playhead, null),
+            },
+            {
+              label: "Save",
+              icon: "folder",
+              hint: "Ctrl+S",
+              onSelect: () => saveAndNotify(),
+            },
+            {
+              label: "Export...",
+              icon: "export",
+              disabled: exportClips.length === 0,
+              onSelect: openExport,
+            },
+            {
+              label: "Save as template...",
+              icon: "slot",
+              onSelect: openTemplateDialog,
+            },
+          ],
+          [
+            {
+              label: "Settings...",
+              icon: "settings",
+              onSelect: openSettings,
+            },
+          ],
+          [
+            {
+              label: "Close project",
+              icon: "folder",
+              onSelect: onCloseProject,
+            },
+            {
+              label: "Close window",
+              icon: "close",
+              onSelect: () => void getCurrentWindow().close(),
+              danger: true,
+            },
+          ],
+        ],
+      },
+      {
+        label: "Edit",
+        groups: [
+          [
+            {
+              label: "Undo",
+              icon: "chevronUp",
+              hint: "Ctrl+Z",
+              disabled: !view?.canUndo,
+              onSelect: undoAction,
+            },
+            {
+              label: "Redo",
+              icon: "chevronDown",
+              hint: "Ctrl+Shift+Z",
+              disabled: !view?.canRedo,
+              onSelect: redoAction,
+            },
+          ],
+          [
+            { label: "Split at playhead", icon: "razor", hint: "Ctrl+B", onSelect: splitAtPlayhead },
+            {
+              label:
+                selectedClipIds.length > 1
+                  ? `Delete ${selectedClipIds.length} clips`
+                  : "Delete clip",
+              icon: "trash",
+              hint: "Del",
+              disabled: selectedClipIds.length === 0,
+              onSelect: deleteSelected,
+              danger: true,
+            },
+          ],
+          [
+            {
+              label: snap ? "Disable snapping" : "Enable snapping",
+              icon: "magnet",
+              hint: "N",
+              onSelect: () => setSnap((current) => !current),
+            },
+          ],
+        ],
+      },
+      {
+        label: "View",
+        groups: [
+          [
+            { label: "Zoom in", icon: "plus", onSelect: () => zoom(1 / 1.4) },
+            { label: "Zoom out", icon: "minus", onSelect: () => zoom(1.4) },
+          ],
+          [
+            {
+              label: "Go to start",
+              icon: "skipStart",
+              hint: "Home",
+              onSelect: () => transport.seek(0),
+            },
+            {
+              label: "Go to end",
+              icon: "skipEnd",
+              hint: "End",
+              onSelect: () => transport.seek(duration),
+            },
+          ],
+        ],
+      },
+    ],
+    [
+      deleteSelected,
+      duration,
+      exportClips,
+      onCloseProject,
+      openExport,
+      openSettings,
+      openTemplateDialog,
+      placeMediaSet,
+      redoAction,
+      saveAndNotify,
+      selectedClipIds,
+      selectedMediaIds,
+      snap,
+      splitAtPlayhead,
+      transport,
+      undoAction,
+      view,
+      zoom,
+    ],
+  );
+
   return (
     <div className="flex h-full flex-col overflow-hidden">
       <TitleBar
@@ -933,136 +1161,9 @@ function Editor({
         }
         theme={theme}
         onToggleTheme={onToggleTheme}
-        onOpenSettings={() => setSettingsOpen(true)}
-        actions={
-          <button
-            type="button"
-            onClick={() => setExporting(true)}
-            className="flex cursor-pointer items-center gap-1.5 rounded-md bg-accent px-2.5 py-1
-                       text-xs font-medium text-on-accent transition-colors hover:bg-accent-hover"
-          >
-            <Icon name="export" size={13} />
-            Export
-          </button>
-        }
-        menus={[
-          {
-            label: "File",
-            groups: [
-              [
-                {
-                  label: "Add selected to timeline",
-                  icon: "plus",
-                  disabled: selectedMediaIds.length === 0,
-                  onSelect: () => placeMediaSet(selectedMediaIds, latest.current.playhead, null),
-                },
-                {
-                  label: "Save",
-                  icon: "folder",
-                  hint: "Ctrl+S",
-                  onSelect: () => saveAndNotify(),
-                },
-                {
-                  label: "Export...",
-                  icon: "export",
-                  disabled: exportClips.length === 0,
-                  onSelect: () => setExporting(true),
-                },
-                {
-                  label: "Save as template...",
-                  icon: "slot",
-                  onSelect: () => setTemplateDialog({ busy: false }),
-                },
-              ],
-              [
-                {
-                  label: "Settings...",
-                  icon: "settings",
-                  onSelect: () => setSettingsOpen(true),
-                },
-              ],
-              [
-                {
-                  label: "Close project",
-                  icon: "folder",
-                  onSelect: onCloseProject,
-                },
-                {
-                  label: "Close window",
-                  icon: "close",
-                  onSelect: () => void getCurrentWindow().close(),
-                  danger: true,
-                },
-              ],
-            ],
-          },
-          {
-            label: "Edit",
-            groups: [
-              [
-                {
-                  label: "Undo",
-                  icon: "chevronUp",
-                  hint: "Ctrl+Z",
-                  disabled: !view?.canUndo,
-                  onSelect: undoAction,
-                },
-                {
-                  label: "Redo",
-                  icon: "chevronDown",
-                  hint: "Ctrl+Shift+Z",
-                  disabled: !view?.canRedo,
-                  onSelect: redoAction,
-                },
-              ],
-              [
-                { label: "Split at playhead", icon: "razor", hint: "Ctrl+B", onSelect: splitAtPlayhead },
-                {
-                  label:
-                    selectedClipIds.length > 1
-                      ? `Delete ${selectedClipIds.length} clips`
-                      : "Delete clip",
-                  icon: "trash",
-                  hint: "Del",
-                  disabled: selectedClipIds.length === 0,
-                  onSelect: deleteSelected,
-                  danger: true,
-                },
-              ],
-              [
-                {
-                  label: snap ? "Disable snapping" : "Enable snapping",
-                  icon: "magnet",
-                  hint: "N",
-                  onSelect: () => setSnap((current) => !current),
-                },
-              ],
-            ],
-          },
-          {
-            label: "View",
-            groups: [
-              [
-                { label: "Zoom in", icon: "plus", onSelect: () => zoom(1 / 1.4) },
-                { label: "Zoom out", icon: "minus", onSelect: () => zoom(1.4) },
-              ],
-              [
-                {
-                  label: "Go to start",
-                  icon: "skipStart",
-                  hint: "Home",
-                  onSelect: () => transport.seek(0),
-                },
-                {
-                  label: "Go to end",
-                  icon: "skipEnd",
-                  hint: "End",
-                  onSelect: () => transport.seek(duration),
-                },
-              ],
-            ],
-          },
-        ]}
+        onOpenSettings={openSettings}
+        actions={exportAction}
+        menus={menus}
       />
 
       <div className="flex min-h-0 flex-1 flex-col p-2">
@@ -1078,29 +1179,18 @@ function Editor({
               error={error}
               onFilter={setBinFilter}
               onAddText={addText}
-              onSelect={(ids) => {
-                setSelectedMediaIds(ids);
-                if (ids.length > 0) setSelectedClipIds([]);
-              }}
-              onImport={(paths) => void importPaths(paths)}
-              onRemove={(id) => void dispatch({ op: "removeMedia", mediaId: id })}
+              onSelect={selectMedia}
+              onImport={importFiles}
+              onRemove={removeMedia}
               onRemoveSelected={deleteSelectedMedia}
-              onDismissError={() => setError(null)}
+              onDismissError={dismissError}
               onBeginDrag={beginMediaDrag}
               onAddToTimeline={addToTimeline}
               onApplyEffect={applyEffect}
               onApplyTransition={applyTransition}
-              onToggleSlot={(mediaId, placeholder) =>
-                void dispatch({ op: "setMediaPlaceholder", mediaId, placeholder })
-              }
-              onSaveTemplate={() => setTemplateDialog({ busy: false })}
-              onUseTemplate={(template) => {
-                // Save what is open first: leaving for the fill flow closes
-                // this project, and the debounced autosave may not have fired.
-                void editorSave(latest.current.frame)
-                  .catch(() => undefined)
-                  .then(() => onUseTemplate(template));
-              }}
+              onToggleSlot={toggleSlot}
+              onSaveTemplate={openTemplateDialog}
+              onUseTemplate={leaveForTemplate}
             />
           </div>
 
@@ -1185,12 +1275,12 @@ function Editor({
               frame={frame}
               duration={duration}
               frameRate={frameRate}
-              onAddFont={() => void pickFont()}
-              onRemoveFont={(family) => void dispatch({ op: "removeFont", family })}
+              onAddFont={addFont}
+              onRemoveFont={removeFont}
               onChangeClip={changeClip}
               onCommitClip={commitEcho}
               onSpeedChange={changeSpeed}
-              onModifyProject={() => setModifyingProject({ busy: false })}
+              onModifyProject={openModifyProject}
             />
           </div>
         </div>
@@ -1232,7 +1322,7 @@ function Editor({
             onGestureEnd={commitEcho}
             onSplitAtPlayhead={splitAtPlayhead}
             onMergeSelected={mergeSelected}
-            mergeBlockedBecause={whyNotMerge(project, selectedClipIds)}
+            mergeBlockedBecause={mergeBlockedBecause}
             onDeleteSelected={deleteSelected}
             mediaDrag={mediaDrag ? { x: mediaDrag.x, y: mediaDrag.y } : null}
             onZoom={zoom}

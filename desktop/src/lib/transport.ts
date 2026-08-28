@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { isTauri } from "@tauri-apps/api/core";
 
 import { transportPause, transportPlay, transportSeek } from "./engine";
@@ -17,9 +17,16 @@ import { listen } from "@tauri-apps/api/event";
  * the anchor simply never gets corrected - the wall clock alone is the same
  * prototype behaviour this file always had there.
  */
-export interface Transport {
-  playhead: number;
-  playing: boolean;
+/**
+ * The methods, kept apart from the values on purpose. `playhead` changes
+ * every animation frame while playing; the methods never change at all. One
+ * object holding both would get a fresh identity per frame, and everything
+ * keyed on it - effect deps, memoised children - would churn at 60fps. So
+ * consumers that only *drive* the transport take `controls` (one stable
+ * identity for the life of the hook) and never re-render on playback, while
+ * the few that *display* the playhead subscribe to it explicitly.
+ */
+export interface TransportControls {
   play: () => void;
   pause: () => void;
   toggle: () => void;
@@ -27,6 +34,12 @@ export interface Transport {
   seek: (seconds: number) => void;
   /** Moves by a signed number of frames at the given rate. */
   step: (frames: number, frameRate: number) => void;
+}
+
+export interface Transport {
+  playhead: number;
+  playing: boolean;
+  controls: TransportControls;
 }
 
 export function useTransport({ duration }: { duration: number }): Transport {
@@ -122,5 +135,12 @@ export function useTransport({ duration }: { duration: number }): Transport {
     return () => cancelAnimationFrame(frame);
   }, [playing, native]);
 
-  return { playhead, playing, play, pause, toggle, seek, step };
+  // Every method is a useCallback keyed only on `native`, so this memo holds
+  // one identity for the hook's whole life - see the note on TransportControls.
+  const controls = useMemo<TransportControls>(
+    () => ({ play, pause, toggle, seek, step }),
+    [play, pause, toggle, seek, step],
+  );
+
+  return { playhead, playing, controls };
 }
