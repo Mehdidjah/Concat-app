@@ -72,8 +72,6 @@ import { useTransport } from "./lib/transport";
 
 const MIN_SECONDS_PER_PIXEL = 0.0005;
 const MAX_SECONDS_PER_PIXEL = 2;
-/** Matches the engine's default title length, for caption timing math. */
-const DEFAULT_TEXT_DURATION = 4;
 
 /** What the editor renders for the frame or two before the session opens. */
 const EMPTY_PROJECT: EditorProject = {
@@ -310,10 +308,11 @@ function Editor({
       setEcho(null);
       return;
     }
-    void (async () => {
-      for (const command of commands) await dispatch(command);
-      setEcho(null);
-    })();
+    // A gesture that resolves to several commands is still one gesture, so
+    // it lands as one batch: one round trip, one undo step.
+    const command: EditorCommand =
+      commands.length === 1 ? commands[0] : { op: "batch", commands };
+    void dispatch(command).then(() => setEcho(null));
   }, [dispatch]);
 
   // ── the session ──────────────────────────────────────────────────────────
@@ -724,25 +723,21 @@ function Editor({
           await dispatch({ op: "renameTrack", trackId, name: "Captions" });
         }
 
-        for (const segment of segments) {
-          const start = clip.start + segment.start / clip.speed;
-          const wanted = Math.max(0.4, (segment.end - segment.start) / clip.speed);
-          const clipId = await dispatch({
+        // One batch, one undo: "undo the captions" must not mean sixty
+        // presses. Each caption carries its own length and placement, so no
+        // per-clip follow-up commands are needed.
+        await dispatch({
+          op: "batch",
+          commands: segments.map((segment) => ({
             op: "addTextClip",
             trackId,
-            start,
+            start: clip.start + segment.start / clip.speed,
+            duration: Math.max(0.4, (segment.end - segment.start) / clip.speed),
+            offsetY: 0.38,
             // Caption-sized and lower-third, not title-sized and centred.
             style: { ...defaultTextStyle(), content: segment.text, fontSize: 0.045 },
-          });
-          if (!clipId) continue;
-          await dispatch({
-            op: "trimClip",
-            clipId,
-            edge: "end",
-            delta: wanted - DEFAULT_TEXT_DURATION,
-          });
-          await dispatch({ op: "setClipTransform", clipId, offsetY: 0.38 });
-        }
+          })),
+        });
         setToast({
           id: Date.now(),
           message: `Added ${segments.length} caption${segments.length === 1 ? "" : "s"}`,

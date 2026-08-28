@@ -507,11 +507,28 @@ mod tests {
                 track_id: None,
                 start: 2.0,
                 style: Some(TextStyle { content: "Lower third\nsecond line".to_owned(), ..TextStyle::default() }),
+                duration: Some(2.5),
+                offset_y: Some(0.38),
             })
             .expect("adds")
             .created_id
             .expect("id");
-        assert_eq!(editor.project().active().clip(&clip_id).expect("exists").name, "Lower third");
+        {
+            let clip = editor.project().active().clip(&clip_id).expect("exists");
+            assert_eq!(clip.name, "Lower third");
+            assert_eq!(clip.duration, 2.5, "a stated duration lands directly");
+            assert_eq!(clip.offset_y, 0.38, "and so does the placement");
+        }
+
+        // The pre-templates wire shape still parses: both fields default.
+        let bare: Command = serde_json::from_value(json!({
+            "op": "addTextClip", "trackId": null, "start": 1.0, "style": null
+        }))
+        .expect("old wire shape parses");
+        assert!(matches!(
+            bare,
+            Command::AddTextClip { duration: None, offset_y: None, .. }
+        ));
 
         let document = editor.to_document(&settings());
         let restored = Editor::from_document(&document).expect("loads");

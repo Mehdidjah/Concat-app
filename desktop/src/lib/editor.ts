@@ -169,7 +169,18 @@ export type EditorCommand =
   | { op: "batch"; commands: EditorCommand[] }
   | { op: "addClip"; mediaId: string; trackId: string; start: number }
   | { op: "addClipAtFirstFree"; mediaId: string; start: number }
-  | { op: "addTextClip"; trackId: string | null; start: number; style: TextStyle | null }
+  | {
+      op: "addTextClip";
+      trackId: string | null;
+      start: number;
+      style: TextStyle | null;
+      /** Seconds on the timeline; the editorial default when absent. Lets a
+       * caption run land as one batch - a batch cannot trim ids it cannot
+       * know yet. */
+      duration?: number;
+      /** Vertical placement as a frame-height fraction; lower thirds. */
+      offsetY?: number;
+    }
   | { op: "moveClips"; moves: ClipMove[] }
   | { op: "trimClip"; clipId: string; edge: "start" | "end"; delta: number }
   | { op: "splitClips"; clipIds: string[]; time: number }

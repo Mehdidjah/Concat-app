@@ -120,7 +120,20 @@ pub enum Command {
     Batch { commands: Vec<Command> },
     AddClip { media_id: String, track_id: String, start: f64 },
     AddClipAtFirstFree { media_id: String, start: f64 },
-    AddTextClip { track_id: Option<String>, start: f64, style: Option<TextStyle> },
+    AddTextClip {
+        track_id: Option<String>,
+        start: f64,
+        style: Option<TextStyle>,
+        /// Seconds on the timeline; the editorial default when absent. Here
+        /// so a caption run can land as one batch instead of add-then-trim
+        /// per clip - a batch cannot trim a clip whose id it cannot know yet.
+        #[serde(default)]
+        duration: Option<f64>,
+        /// Vertical placement as a frame-height fraction, clamped like
+        /// SetClipTransform. Lower thirds are made of this.
+        #[serde(default)]
+        offset_y: Option<f64>,
+    },
     MoveClips { moves: Vec<ClipMove> },
     TrimClip { clip_id: String, edge: TrimEdge, delta: f64 },
     SplitClips { clip_ids: Vec<String>, time: f64 },
@@ -455,13 +468,14 @@ pub fn apply(project: &mut Project, mint: &mut IdMint, command: Command) -> Resu
             Ok(Outcome { created_id: Some(id) })
         }
 
-        Command::AddTextClip { track_id, start, style } => {
+        Command::AddTextClip { track_id, start, style, duration, offset_y } => {
             let style = style.unwrap_or_default();
+            let duration = duration.unwrap_or(DEFAULT_TEXT_DURATION).max(MIN_CLIP_DURATION);
             let timeline = project.active_mut();
             let track_id = match track_id {
                 Some(id) if timeline.track(&id).is_some() => id,
                 Some(_) => return Err("That track no longer exists.".to_owned()),
-                None => first_free_track(timeline, start, DEFAULT_TEXT_DURATION)
+                None => first_free_track(timeline, start, duration)
                     .ok_or("There are no tracks.")?,
             };
             let id = mint.next("c");
@@ -472,14 +486,14 @@ pub fn apply(project: &mut Project, mint: &mut IdMint, command: Command) -> Resu
                 name: first_line(&style.content),
                 kind: ClipKind::Text,
                 start: start.max(0.0),
-                duration: DEFAULT_TEXT_DURATION,
+                duration,
                 source_start: 0.0,
                 volume: 1.0,
                 fade_in: 0.0,
                 fade_out: 0.0,
                 scale: 1.0,
                 offset_x: 0.0,
-                offset_y: 0.0,
+                offset_y: offset_y.unwrap_or(0.0).clamp(-MAX_OFFSET, MAX_OFFSET),
                 rotation: 0.0,
                 opacity: 1.0,
                 speed: 1.0,
