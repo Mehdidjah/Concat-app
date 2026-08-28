@@ -1,16 +1,48 @@
+import {
+  AdjustmentsHorizontalIcon,
+  ArrowDownTrayIcon,
+  ArrowUpTrayIcon,
+  CheckIcon,
+  ChevronDownIcon,
+  ChevronRightIcon,
+  ChevronUpIcon,
+  DocumentDuplicateIcon,
+  EyeIcon,
+  EyeSlashIcon,
+  FilmIcon,
+  FolderIcon,
+  InformationCircleIcon,
+  LockClosedIcon,
+  MagnifyingGlassIcon,
+  MinusIcon,
+  MoonIcon,
+  MusicalNoteIcon,
+  PhotoIcon,
+  PlusIcon,
+  QuestionMarkCircleIcon,
+  SparklesIcon,
+  SpeakerWaveIcon,
+  SpeakerXMarkIcon,
+  SunIcon,
+  TrashIcon,
+  XMarkIcon,
+} from "@heroicons/react/24/outline";
+
 import type { ReactNode } from "react";
 
 /**
- * The icon set.
+ * The icon set: Heroicons for everything generic, hand-authored glyphs for
+ * the editor's own vocabulary.
  *
- * Hand-authored rather than pulled from a library: an editor needs perhaps
- * thirty glyphs, several of which (razor, snap, ripple) no general-purpose set
- * draws well, and a dependency that ships a thousand SVGs to use thirty is a
- * bad trade in an app that has to start fast.
+ * The generic half (folders, chevrons, trash, eyes) comes from Heroicons -
+ * professionally drawn, MIT, tree-shaken to only the imports named below, so
+ * nothing ships that is not used. The hand-made half stays because no
+ * general-purpose set draws a razor, a snap magnet, a template slot or a
+ * frame-step well - and those are the glyphs this app lives in.
  *
- * All of them are 24x24, stroked with `currentColor` at width 2, round caps.
- * That uniformity is what makes them look like one family; if you add a glyph,
- * draw it on the same grid and do not fill it.
+ * Custom glyphs are 24x24, stroked with `currentColor` at width 2, round
+ * caps. Add to the HERO map when Heroicons has the right glyph; draw on the
+ * same grid when it does not.
  */
 
 const GLYPHS = {
@@ -300,6 +332,42 @@ const GLYPHS = {
 /** Every glyph the app can draw. A typo is a compile error. */
 export type IconName = keyof typeof GLYPHS;
 
+/**
+ * Heroicons stand in for every generic glyph - drawn by people who draw
+ * icons for a living. The hand-made set below remains for what no library
+ * carries: the editor's own vocabulary (razor, slot, waveform, transport,
+ * window controls). Same names, same call sites; only the pixels changed.
+ */
+const HERO: Partial<Record<IconName, typeof PlusIcon>> = {
+  plus: PlusIcon,
+  minus: MinusIcon,
+  close: XMarkIcon,
+  trash: TrashIcon,
+  import: ArrowDownTrayIcon,
+  export: ArrowUpTrayIcon,
+  folder: FolderIcon,
+  eye: EyeIcon,
+  eyeOff: EyeSlashIcon,
+  volume: SpeakerWaveIcon,
+  volumeOff: SpeakerXMarkIcon,
+  lock: LockClosedIcon,
+  sun: SunIcon,
+  moon: MoonIcon,
+  check: CheckIcon,
+  copy: DocumentDuplicateIcon,
+  chevronDown: ChevronDownIcon,
+  chevronUp: ChevronUpIcon,
+  chevronRight: ChevronRightIcon,
+  search: MagnifyingGlassIcon,
+  settings: AdjustmentsHorizontalIcon,
+  info: InformationCircleIcon,
+  help: QuestionMarkCircleIcon,
+  sparkles: SparklesIcon,
+  film: FilmIcon,
+  music: MusicalNoteIcon,
+  image: PhotoIcon,
+};
+
 export function Icon({
   name,
   size = 16,
@@ -311,6 +379,20 @@ export function Icon({
   className?: string;
   strokeWidth?: number;
 }) {
+  const Hero = HERO[name];
+  if (Hero) {
+    return (
+      <Hero
+        width={size}
+        height={size}
+        // Heroicons are drawn at 1.5; scaled towards the app's 2 so they
+        // sit next to the custom glyphs without reading as a lighter face.
+        strokeWidth={Math.max(1.6, strokeWidth - 0.2)}
+        aria-hidden="true"
+        className={className}
+      />
+    );
+  }
   return (
     <svg
       viewBox="0 0 24 24"
