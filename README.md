@@ -11,6 +11,7 @@
 [![Made with Rust](https://img.shields.io/badge/engine-Rust-DEA584?logo=rust&logoColor=white)](engine)
 [![UI](https://img.shields.io/badge/ui-React%20%2B%20Tauri-24C8DB?logo=tauri&logoColor=white)](desktop)
 [![Version](https://img.shields.io/badge/version-0.1.0-blue)](https://github.com/jub0t/WolfCut)
+[![Discord](https://img.shields.io/badge/Discord-join%20the%20server-5865F2?logo=discord&logoColor=white)](https://discord.gg/DVuPfpXfqP)
 
 <img src="assets/preview-dark.png" alt="WolfCut editor" width="100%" />
 
