@@ -217,7 +217,7 @@ function writeArtwork(project: string | null, key: string, bytes: Uint8Array): v
 }
 
 /** [bucketsPerSecond f32][count u32][min f32...][max f32...], little-endian. */
-function encodePeaks(peaks: Peaks): Uint8Array {
+export function encodePeaks(peaks: Peaks): Uint8Array {
   const count = peaks.min.length;
   const buffer = new ArrayBuffer(8 + count * 8);
   const view = new DataView(buffer);
@@ -228,7 +228,7 @@ function encodePeaks(peaks: Peaks): Uint8Array {
   return new Uint8Array(buffer);
 }
 
-function decodePeaks(bytes: ArrayBuffer): Peaks | null {
+export function decodePeaks(bytes: ArrayBuffer): Peaks | null {
   if (bytes.byteLength < 8) return null;
   const view = new DataView(bytes);
   const bucketsPerSecond = view.getFloat32(0, true);
