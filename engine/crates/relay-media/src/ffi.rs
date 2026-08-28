@@ -66,8 +66,25 @@ fn describe(code: i32) -> String {
 ///
 /// Spelled out rather than taken from the bindings because `EAGAIN` comes from
 /// the C library's `errno.h`, which is not part of the FFmpeg headers and is
-/// therefore not always present in generated bindings. 11 on every platform
-/// FFmpeg supports.
+/// therefore not always present in generated bindings. The value is *not* the
+/// same everywhere: 11 on Linux and on Windows FFmpeg builds, 35 on macOS,
+/// iOS and the BSDs - discovered the honest way, as "Resource temporarily
+/// unavailable" errors from a perfectly healthy decoder.
+#[cfg(any(
+    target_os = "macos",
+    target_os = "ios",
+    target_os = "freebsd",
+    target_os = "openbsd",
+    target_os = "netbsd",
+))]
+const AVERROR_EAGAIN: i32 = -35;
+#[cfg(not(any(
+    target_os = "macos",
+    target_os = "ios",
+    target_os = "freebsd",
+    target_os = "openbsd",
+    target_os = "netbsd",
+)))]
 const AVERROR_EAGAIN: i32 = -11;
 
 /// A decoder that links FFmpeg rather than spawning it.

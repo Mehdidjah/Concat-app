@@ -1,17 +1,21 @@
-# Where the FFmpeg development build lives.
+# Where the FFmpeg development build lives - machine configuration, not
+# repository configuration.
 #
-# Only the optional `ffi` feature of relay-media reads these. A normal build -
-# which talks to FFmpeg as a subprocess - ignores them entirely, so setting
-# them here is harmless even on a machine with no `vendor/` directory.
+# Only the optional `ffi` feature of relay-media needs FFmpeg headers and
+# libraries at build time. A normal build - which talks to FFmpeg as a
+# subprocess - needs nothing here. Do not commit machine paths into this
+# file: rusty_ffmpeg panics on an FFMPEG_INCLUDE_DIR that does not exist,
+# which breaks `--features ffi` for everyone else.
 #
-# `relative = true` resolves against this file's parent, so the paths follow
-# the repository rather than whoever checked it out.
-[env]
-# Note the deliberate absence of FFMPEG_DLL_PATH. rusty_ffmpeg turns that one
-# into the linker's /LIBPATH, which sends it hunting for `avcodec.lib` in
-# `bin/` - where only the DLLs live. The import libraries are in `lib/`, so
-# FFMPEG_LIBS_DIR is the one that matters at link time.
+# To build the ffi feature, set the variables in your own environment (or a
+# cargo config outside the repository):
 #
-# The DLLs still have to be findable at *run* time.
-FFMPEG_INCLUDE_DIR = { value = "../vendor/ffmpeg-n8.1-latest-win64-gpl-shared-8.1/include", relative = true }
-FFMPEG_LIBS_DIR = { value = "../vendor/ffmpeg-n8.1-latest-win64-gpl-shared-8.1/lib", relative = true }
+#   macOS / Linux, package-manager FFmpeg with dev files:
+#     export FFMPEG_PKG_CONFIG_PATH="$(brew --prefix ffmpeg)/lib/pkgconfig"
+#
+#   Windows, a -shared dev build (gyan.dev / BtbN) unpacked into vendor/:
+#     FFMPEG_INCLUDE_DIR = <build>/include
+#     FFMPEG_LIBS_DIR    = <build>/lib
+#     (Deliberately not FFMPEG_DLL_PATH: rusty_ffmpeg turns that into the
+#     linker's /LIBPATH, which hunts for import libraries in bin/ where only
+#     the DLLs live. The DLLs still have to be findable at run time.)
