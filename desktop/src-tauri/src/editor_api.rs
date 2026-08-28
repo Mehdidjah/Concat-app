@@ -102,6 +102,7 @@ fn with_session<T>(
 /// edit with emptiness is how projects get lost.
 #[tauri::command]
 pub async fn editor_open(
+    app: tauri::AppHandle,
     state: tauri::State<'_, EditorState>,
     path: String,
     name: String,
@@ -140,6 +141,13 @@ pub async fn editor_open(
     })
     .await
     .map_err(|error| format!("open task failed: {error}"))??;
+
+    // Everything the document lists is media the user already imported, so
+    // reopening a project restores exactly the asset scope importing built -
+    // no re-probe, and nothing beyond the document's own list.
+    for item in &editor.project().media {
+        crate::grant_asset(&app, &item.path);
+    }
 
     let mut guard = state.0.lock().map_err(|_| "editor state poisoned".to_owned())?;
     *guard = Some(Session { path, settings, editor });

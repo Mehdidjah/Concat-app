@@ -28,9 +28,7 @@
       "devCsp": "default-src * 'unsafe-inline' 'unsafe-eval' blob: data: asset: http://asset.localhost ws: wss: ipc: http://ipc.localhost",
       "assetProtocol": {
         "enable": true,
-        "scope": [
-          "**"
-        ]
+        "scope": []
       }
     }
   },

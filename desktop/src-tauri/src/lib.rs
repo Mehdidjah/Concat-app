@@ -122,13 +122,38 @@ impl From<wolfcut_media::MediaInfo> for MediaSummary {
 /// Async because ffprobe on a slow or network volume takes real time, and a
 /// synchronous command runs on the main thread - the one place a stall is a
 /// frozen window.
+///
+/// A successful probe also admits the file to the asset protocol scope, so
+/// the preview's media elements can play it. This is where user intent is
+/// expressed - importing a file IS asking the app to show it - and it is the
+/// whole grant: the static scope is empty, so the webview can only ever
+/// reach files that probed as media. See `grant_asset` for why.
 #[tauri::command]
-async fn probe_media(path: String) -> Result<MediaSummary, String> {
-    tauri::async_runtime::spawn_blocking(move || {
+async fn probe_media(app: tauri::AppHandle, path: String) -> Result<MediaSummary, String> {
+    let summary = tauri::async_runtime::spawn_blocking(move || {
         wolfcut_media::probe(&path).map(MediaSummary::from).map_err(describe)
     })
     .await
-    .map_err(|error| format!("probe task failed: {error}"))?
+    .map_err(|error| format!("probe task failed: {error}"))??;
+    grant_asset(&app, &summary.path);
+    Ok(summary)
+}
+
+/// Admits one file to the asset protocol scope.
+///
+/// The static scope used to be `**` - the whole filesystem - which made any
+/// script that ran in the webview a disk-wide read primitive. Now the scope
+/// starts empty and grows one file at a time, only at the two places the
+/// user expresses intent: importing media (a successful probe) and opening a
+/// project whose document lists it. A path that never probed as media is
+/// unreachable however the page is compromised.
+pub(crate) fn grant_asset(app: &tauri::AppHandle, path: &str) {
+    use tauri::Manager;
+    // Failure means the preview cannot show this one file - the import
+    // itself still stands, and the error names the path for the console.
+    if let Err(error) = app.asset_protocol_scope().allow_file(path) {
+        eprintln!("wolfcut: could not scope {path}: {error}");
+    }
 }
 
 /// The version of the app the UI is talking to. Also a liveness check on the
@@ -173,7 +198,10 @@ fn artwork_file(project: &str, key: &str) -> Result<std::path::PathBuf, String> 
         return Err(format!("refusing artwork key {key:?}"));
     }
     let root = std::path::Path::new(project);
-    if !root.is_dir() {
+    // A real project, not merely a directory: without the manifest check,
+    // this command was a write primitive into any folder on disk that could
+    // grow a `cache/` child. The manifest is what makes a folder ours.
+    if !projects::manifest_path(root).is_file() {
         return Err(format!("{project} is not a project folder"));
     }
     Ok(root.join("cache").join(key))
