@@ -70,3 +70,7 @@ desktop.ini
 # nothing.
 desktop/src-tauri/ffmpeg/*
 !desktop/src-tauri/ffmpeg/README.md
+
+# Guard against staging-script cwd mistakes: a `desktop/...`-relative copy run
+# from inside desktop/ once committed a whisper-cli binary to git history.
+desktop/desktop/
