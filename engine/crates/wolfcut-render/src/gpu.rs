@@ -110,9 +110,12 @@ pub struct WgpuCompositor {
     vertices: wgpu::Buffer,
     vertex_capacity: usize,
     /// Layer textures pooled by size; `used` counts how many of a size this
-    /// frame has claimed, and resets every composite.
+    /// frame has claimed, and resets every composite. `idle` counts the
+    /// composites a size has gone unclaimed: a timeline moves past a clip
+    /// size forever, and its textures should not outlive that by much.
     pool: HashMap<(u32, u32), Vec<PooledTexture>>,
     used: HashMap<(u32, u32), usize>,
+    idle: HashMap<(u32, u32), u32>,
     target: Option<Target>,
     /// Set when a readback fails - a lost or reset device. The compositor
     /// then answers every composite from the CPU reference instead: slower,
@@ -242,6 +245,7 @@ impl WgpuCompositor {
             pool: HashMap::new(),
             used: HashMap::new(),
             target: None,
+            idle: HashMap::new(),
             dead: false,
         })
     }
@@ -501,6 +505,26 @@ impl Compositor for WgpuCompositor {
         );
 
         self.queue.submit([encoder.finish()]);
+
+        // Retire texture sizes the timeline has moved past. 300 unclaimed
+        // composites (ten seconds of 30fps export) says a size is gone for
+        // good, not just between two clips of it.
+        for (&key, used) in &self.used {
+            let idle = self.idle.entry(key).or_insert(0);
+            *idle = if *used == 0 { *idle + 1 } else { 0 };
+        }
+        let doomed: Vec<(u32, u32)> = self
+            .idle
+            .iter()
+            .filter(|(_, idle)| **idle > 300)
+            .map(|(key, _)| *key)
+            .collect();
+        for key in doomed {
+            self.pool.remove(&key);
+            self.used.remove(&key);
+            self.idle.remove(&key);
+        }
+
         match self.read_back() {
             Some(frame) => frame,
             None => {
