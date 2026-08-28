@@ -13,11 +13,13 @@ import {
   type TransitionCategory,
 } from "../lib/effects";
 import type { MediaItem } from "../lib/editor";
+import { templateDelete, templateList, type TemplateInfo } from "../lib/engine";
 import { themeColor } from "../lib/theme";
 import { shortDuration } from "../lib/time";
 import { ErrorNotice } from "./ErrorNotice";
 import { Icon } from "./Icon";
 import { Empty, Panel } from "./Panel";
+import { TemplateThumb } from "./TemplateThumb";
 
 /** Which kinds of media the bin is showing. */
 export interface BinFilter {
@@ -29,13 +31,14 @@ export interface BinFilter {
 export const ALL_MEDIA: BinFilter = { video: true, audio: true, image: true };
 
 /** The pages of the library strip, in display order. */
-type LibraryTab = "media" | "text" | "transitions" | "effects";
+type LibraryTab = "media" | "text" | "transitions" | "effects" | "templates";
 
 const TABS: { id: LibraryTab; label: string }[] = [
   { id: "media", label: "Media" },
   { id: "text", label: "Text" },
   { id: "transitions", label: "Transitions" },
   { id: "effects", label: "Effects" },
+  { id: "templates", label: "Templates" },
 ];
 
 /**
@@ -72,6 +75,9 @@ export function MediaBin({
   onAddToTimeline,
   onApplyEffect,
   onApplyTransition,
+  onToggleSlot,
+  onUseTemplate,
+  onSaveTemplate,
   assets,
   dropping,
 }: {
@@ -98,6 +104,12 @@ export function MediaBin({
   onApplyEffect: (effectId: string) => void;
   /** Puts a transition on the selected clip's cut; the app validates. */
   onApplyTransition: (transitionId: string) => void;
+  /** Marks or unmarks a media item as a template slot. */
+  onToggleSlot: (mediaId: string, placeholder: boolean) => void;
+  /** Takes the user to the fill flow for one template. */
+  onUseTemplate: (template: TemplateInfo) => void;
+  /** Opens the save-as-template sheet for the current project. */
+  onSaveTemplate: () => void;
 }) {
   const [tab, setTab] = useState<LibraryTab>("media");
   const [effectCategory, setEffectCategory] = useState<EffectCategory>("basic");
@@ -120,8 +132,11 @@ export function MediaBin({
                 type="button"
                 aria-pressed={tab === entry.id}
                 onClick={() => setTab(entry.id)}
-                className={`flex-1 cursor-pointer truncate rounded-md px-1.5 py-1 text-[11px]
-                            transition-colors ${
+                // flex-auto, not flex-1: extra space is shared, but each tab's
+                // base is its own label, so "Transitions" is never crammed to
+                // make room for padding around "Text".
+                className={`min-w-0 flex-auto cursor-pointer truncate rounded-md px-1.5 py-1
+                            text-[11px] transition-colors ${
                               tab === entry.id
                                 ? "bg-panel text-primary shadow-[0_1px_2px_rgba(0,0,0,0.14)]"
                                 : "text-secondary hover:text-primary"
@@ -166,6 +181,11 @@ export function MediaBin({
                 ))}
               </CategoryGroup>
             )}
+            {tab === "templates" && (
+              <CategoryGroup title="Templates">
+                <CategoryRow label="My templates" selected onSelect={() => {}} />
+              </CategoryGroup>
+            )}
           </aside>
 
           <div className="thin-scroll min-w-0 flex-1 overflow-y-auto">
@@ -184,6 +204,7 @@ export function MediaBin({
                 onDismissError={onDismissError}
                 onBeginDrag={onBeginDrag}
                 onAddToTimeline={onAddToTimeline}
+                onToggleSlot={onToggleSlot}
               />
             )}
             {tab === "text" && <TextPage onAddText={onAddText} />}
@@ -191,6 +212,9 @@ export function MediaBin({
               <TransitionsPage category={transitionCategory} onApply={onApplyTransition} />
             )}
             {tab === "effects" && <EffectsPage category={effectCategory} onApply={onApplyEffect} />}
+            {tab === "templates" && (
+              <TemplatesPage onUse={onUseTemplate} onSaveTemplate={onSaveTemplate} />
+            )}
           </div>
         </div>
       </div>
@@ -315,6 +339,7 @@ function MediaPage({
   onDismissError,
   onBeginDrag,
   onAddToTimeline,
+  onToggleSlot,
 }: {
   items: MediaItem[];
   filter: BinFilter;
@@ -329,6 +354,7 @@ function MediaPage({
   onDismissError: () => void;
   onBeginDrag: (item: MediaItem, clientX: number, clientY: number) => void;
   onAddToTimeline: (mediaId: string) => void;
+  onToggleSlot: (mediaId: string, placeholder: boolean) => void;
 }) {
   const browse = async () => {
     if (busy) return;
@@ -455,6 +481,44 @@ Drag onto a track, or double-click to add at the playhead`}
                                  px-1 py-px font-technical text-[10px] text-white">
                   {item.kind === "image" ? "still" : shortDuration(item.duration)}
                 </span>
+
+                {/* The slot state stays visible; only the controls are hover-only.
+                    A template's whole point is which items are slots. */}
+                {item.placeholder && (
+                  <span className="pointer-events-none absolute bottom-1 left-1 flex items-center
+                                   gap-1 rounded bg-accent px-1 py-px font-technical text-[10px]
+                                   text-on-accent">
+                    <Icon name="slot" size={9} />
+                    Slot
+                  </span>
+                )}
+
+                <button
+                  type="button"
+                  aria-pressed={item.placeholder ?? false}
+                  aria-label={
+                    item.placeholder
+                      ? `Unmark ${item.name} as a template slot`
+                      : `Mark ${item.name} as a template slot`
+                  }
+                  title={
+                    item.placeholder
+                      ? "No longer a template slot"
+                      : "Make this a template slot: saved templates ask for the user's own media here"
+                  }
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    onToggleSlot(item.id, !item.placeholder);
+                  }}
+                  className={`absolute right-7 top-1 cursor-pointer rounded p-1 text-white
+                              transition-colors hover:bg-accent ${
+                                item.placeholder
+                                  ? "bg-accent"
+                                  : "invisible bg-black/55 group-hover:visible"
+                              }`}
+                >
+                  <Icon name="slot" size={10} />
+                </button>
 
                 <button
                   type="button"
@@ -614,6 +678,103 @@ function EffectsPage({
         </CatalogueCard>
       ))}
     </ul>
+  );
+}
+
+// ── the templates page ───────────────────────────────────────────────────────
+
+/**
+ * The template gallery, in the library where CapCut keeps its own.
+ *
+ * Using a template means leaving this project for the fill flow on the launch
+ * screen - a template makes a *new* project - so the card's verb hands off
+ * rather than pretending to drag. Loaded fresh each time the tab opens, which
+ * is what makes a just-saved template appear without any plumbing.
+ */
+function TemplatesPage({
+  onUse,
+  onSaveTemplate,
+}: {
+  onUse: (template: TemplateInfo) => void;
+  onSaveTemplate: () => void;
+}) {
+  const [templates, setTemplates] = useState<TemplateInfo[] | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    void templateList()
+      .then((list) => !cancelled && setTemplates(list))
+      .catch(() => !cancelled && setTemplates([]));
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const remove = async (doomed: TemplateInfo) => {
+    setTemplates((current) =>
+      current ? current.filter((entry) => entry.path !== doomed.path) : current,
+    );
+    await templateDelete(doomed.path).catch(() => undefined);
+  };
+
+  return (
+    <>
+      <div className="px-2 pb-2 pt-2">
+        <button
+          type="button"
+          onClick={onSaveTemplate}
+          className="flex w-full cursor-pointer items-center justify-center gap-2 rounded-lg
+                     border border-dashed border-hairline-strong px-3 py-2.5 text-xs text-secondary
+                     transition-colors hover:border-accent hover:bg-hover hover:text-primary"
+        >
+          <Icon name="slot" size={14} />
+          Save this project as a template
+        </button>
+      </div>
+
+      {templates !== null && templates.length === 0 ? (
+        <Empty icon={<Icon name="slot" size={28} strokeWidth={1.5} />}>
+          No templates yet. Mark media as slots, then save this project as a template - it will
+          ask for the user's own clips in those slots.
+        </Empty>
+      ) : (
+        <ul className={CARD_GRID}>
+          {(templates ?? []).map((template) => (
+            <li key={template.path} className="group relative select-none">
+              <button
+                type="button"
+                title={`${template.name}
+${template.slots.length} slot${template.slots.length === 1 ? "" : "s"} · ${template.width} x ${template.height}
+Click to start a new project from this template`}
+                onClick={() => onUse(template)}
+                className="w-full cursor-pointer text-left"
+              >
+                <TemplateThumb template={template} />
+                <span className="mt-1 block truncate text-[11px] leading-tight text-secondary">
+                  {template.name}
+                </span>
+                <span className="block font-technical text-[10px] text-tertiary">
+                  {template.slots.length} slot{template.slots.length === 1 ? "" : "s"}
+                </span>
+              </button>
+              <button
+                type="button"
+                aria-label={`Delete the template ${template.name}`}
+                title="Delete this template for good"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  void remove(template);
+                }}
+                className="invisible absolute right-1 top-1 cursor-pointer rounded bg-black/55 p-1
+                           text-white transition-colors hover:bg-danger group-hover:visible"
+              >
+                <Icon name="trash" size={10} />
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </>
   );
 }
 

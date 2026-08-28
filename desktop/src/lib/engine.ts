@@ -11,7 +11,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
-import type { EditorCommand, EditorView } from "./editor";
+import type { EditorCommand, EditorView, NewMedia } from "./editor";
 
 export interface VideoStreamInfo {
   index: number;
@@ -44,6 +44,23 @@ export interface MediaSummary {
 /** Asks the engine what is inside a media file. Throws with FFmpeg's message. */
 export async function probeMedia(path: string): Promise<MediaSummary> {
   return invoke<MediaSummary>("probe_media", { path });
+}
+
+/** A probe result in the shape `addMedia` and `fillSlot` take. */
+export function newMediaFromSummary(summary: MediaSummary): NewMedia {
+  return {
+    path: summary.path,
+    name: summary.path.split(/[\\/]/).pop() ?? summary.path,
+    duration: summary.duration,
+    kind: summary.kind,
+    width: summary.video?.width ?? null,
+    height: summary.video?.height ?? null,
+    frameRate: summary.video?.frameRate ?? null,
+    frameRateFraction: summary.video?.frameRateFraction ?? null,
+    videoCodec: summary.video?.codec ?? null,
+    audioCodec: summary.audio?.codec ?? null,
+    hasAudio: summary.audio !== null,
+  };
 }
 
 /** Reports the app version the UI is talking to. */
@@ -162,6 +179,74 @@ export async function forgetProject(path: string): Promise<void> {
  */
 export async function projectPreview(path: string): Promise<ArrayBuffer> {
   return invoke<ArrayBuffer>("project_preview", { path });
+}
+
+// ── templates ──────────────────────────────────────────────────────────────
+// A template is a project packed into a bundle: its design media (music,
+// overlays) ship inside, its placeholder media become slots the user fills.
+// The host owns the library; see src-tauri/src/templates.rs.
+
+/** One placeholder the user's media will replace. */
+export interface TemplateSlot {
+  mediaId: string;
+  name: string;
+  kind: "video" | "audio" | "image";
+  /** Timeline seconds this slot covers, for the fill list. */
+  seconds: number;
+}
+
+/** One template, as the gallery sees it. */
+export interface TemplateInfo {
+  /** The bundle folder on disk. */
+  path: string;
+  name: string;
+  width: number;
+  height: number;
+  rateNum: number;
+  rateDen: number;
+  /** Slots in the order they first appear on the timeline. */
+  slots: TemplateSlot[];
+  hasPoster: boolean;
+}
+
+/** The user's media for one slot, straight from a probe. */
+export interface SlotFill {
+  mediaId: string;
+  item: NewMedia;
+}
+
+/** The template library, in name order. */
+export async function templateList(): Promise<TemplateInfo[]> {
+  return invoke<TemplateInfo[]>("template_list");
+}
+
+/** Packs the open project into a new template bundle. */
+export async function templateSave(name: string): Promise<TemplateInfo> {
+  return invoke<TemplateInfo>("template_save", { name });
+}
+
+/**
+ * Unpacks a template into a fresh project with every slot filled, and
+ * returns it ready to open. Every slot needs a fill; the host refuses a
+ * partial set before anything is written.
+ */
+export async function templateInstantiate(request: {
+  template: string;
+  location: string;
+  name: string;
+  fills: SlotFill[];
+}): Promise<ProjectInfo> {
+  return invoke<ProjectInfo>("template_instantiate", request);
+}
+
+/** Removes one template bundle for good. */
+export async function templateDelete(path: string): Promise<void> {
+  return invoke<void>("template_delete", { path });
+}
+
+/** A template's poster as JPEG bytes; throws when there is none. */
+export async function templatePoster(path: string): Promise<ArrayBuffer> {
+  return invoke<ArrayBuffer>("template_poster", { path });
 }
 
 /** One clip, flattened for the exporter. */

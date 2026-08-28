@@ -60,6 +60,17 @@ pub struct MediaItem {
     pub video_codec: Option<String>,
     pub audio_codec: Option<String>,
     pub has_audio: bool,
+    /// True when this item is a template slot: a stand-in whose metadata says
+    /// what kind of media belongs here, waiting to be replaced by the user's
+    /// own file (`Command::FillSlot`). In a creator's own project the path is
+    /// still real; only a packed template bundle blanks it. Skipped when
+    /// false, so documents without templates stay byte-identical.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub placeholder: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !value
 }
 
 /// A lane. Deliberately untyped: any media goes on any track.

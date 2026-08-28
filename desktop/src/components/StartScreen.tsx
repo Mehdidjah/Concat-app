@@ -6,14 +6,23 @@ import { desktopDir, join } from "@tauri-apps/api/path";
 import {
   createProject,
   forgetProject,
+  newMediaFromSummary,
   openProject,
+  probeMedia,
   projectPreview,
   recentProjects,
+  templateDelete,
+  templateInstantiate,
+  templateList,
   type ProjectInfo,
+  type SlotFill,
+  type TemplateInfo,
+  type TemplateSlot,
 } from "../lib/engine";
 import { ErrorNotice } from "./ErrorNotice";
 import { relativeTime } from "../lib/time";
 import { Icon } from "./Icon";
+import { TemplateThumb } from "./TemplateThumb";
 
 /** The settings a project is created with. Fixed for its lifetime, for now. */
 export interface ProjectSession {
@@ -57,14 +66,27 @@ const FRAME_RATES = [
  * frame rate, size and location are decisions the whole edit depends on, and
  * choosing them after material is cut is how you end up conforming footage.
  */
-export function StartScreen({ onCreate }: { onCreate: (session: ProjectSession) => void }) {
-  const [name, setName] = useState("Untitled project");
+export function StartScreen({
+  onCreate,
+  initialTemplate = null,
+}: {
+  onCreate: (session: ProjectSession) => void;
+  /** Opens straight into a template's fill mode - how "Use template" from
+   * inside the editor lands here. */
+  initialTemplate?: TemplateInfo | null;
+}) {
+  const [name, setName] = useState(initialTemplate?.name ?? "Untitled project");
   const [location, setLocation] = useState("");
   const [resolution, setResolution] = useState<(typeof RESOLUTIONS)[number]>(RESOLUTIONS[0]);
   const [rate, setRate] = useState<(typeof FRAME_RATES)[number]>(FRAME_RATES[3]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [recents, setRecents] = useState<ProjectInfo[]>([]);
+  const [templates, setTemplates] = useState<TemplateInfo[]>([]);
+  /** A chosen template swaps the form into fill mode. */
+  const [template, setTemplate] = useState<TemplateInfo | null>(initialTemplate);
+  /** The chosen media per slot, keyed by the slot's media id. */
+  const [fills, setFills] = useState<Record<string, SlotFill>>({});
 
   // Default to Desktop/WolfCut. Failing to resolve it is not worth surfacing;
   // the field simply starts empty and Choose still works.
@@ -79,7 +101,79 @@ export function StartScreen({ onCreate }: { onCreate: (session: ProjectSession) 
     void recentProjects()
       .then(setRecents)
       .catch(() => undefined);
+    void templateList()
+      .then(setTemplates)
+      .catch(() => undefined);
   }, []);
+
+  const chooseTemplate = (chosen: TemplateInfo) => {
+    setTemplate(chosen);
+    setFills({});
+    setError(null);
+    setName(chosen.name);
+  };
+
+  const removeTemplate = async (doomed: TemplateInfo) => {
+    setTemplates((current) => current.filter((entry) => entry.path !== doomed.path));
+    if (template?.path === doomed.path) setTemplate(null);
+    await templateDelete(doomed.path).catch(() => undefined);
+  };
+
+  /** Asks for one slot's file and probes it into fill shape. */
+  const pickSlot = async (slot: TemplateSlot) => {
+    if (busy) return;
+    const chosen = await open({
+      multiple: false,
+      title: `Choose media for "${slot.name}"`,
+      filters: [
+        slot.kind === "audio"
+          ? { name: "Audio", extensions: ["mp3", "wav", "flac", "aac", "m4a", "ogg", "opus"] }
+          : {
+              // A photo in a video slot is fine - it freeze-frames for the
+              // slot's length - so visual slots take either.
+              name: "Video or images",
+              extensions: [
+                "mp4", "mov", "mkv", "webm", "avi", "m4v",
+                "png", "jpg", "jpeg", "webp", "bmp", "tif", "tiff", "avif", "gif",
+              ],
+            },
+        { name: "All files", extensions: ["*"] },
+      ],
+    });
+    if (typeof chosen !== "string") return;
+
+    setError(null);
+    try {
+      const summary = await probeMedia(chosen);
+      setFills((current) => ({
+        ...current,
+        [slot.mediaId]: { mediaId: slot.mediaId, item: newMediaFromSummary(summary) },
+      }));
+    } catch (cause) {
+      setError(String(cause));
+    }
+  };
+
+  const createFromTemplate = async () => {
+    if (!template || busy || !location.trim()) return;
+    const ready = template.slots.every((slot) => fills[slot.mediaId]);
+    if (!ready) return;
+
+    setBusy(true);
+    setError(null);
+    try {
+      const project = await templateInstantiate({
+        template: template.path,
+        location: location.trim(),
+        name: name.trim() || template.name,
+        fills: template.slots.map((slot) => fills[slot.mediaId]),
+      });
+      onCreate(toSession(project));
+    } catch (cause) {
+      setError(String(cause));
+      setBusy(false);
+    }
+  };
 
   const reopen = async (project: ProjectInfo) => {
     if (busy) return;
@@ -155,11 +249,25 @@ export function StartScreen({ onCreate }: { onCreate: (session: ProjectSession) 
       >
       <div className="min-w-0">
         <header className="mb-10">
+          {template && (
+            <button
+              type="button"
+              onClick={() => setTemplate(null)}
+              className="mb-3 flex cursor-pointer items-center gap-1 text-[12px] text-accent
+                         transition-opacity hover:opacity-70"
+            >
+              <Icon name="chevronRight" size={11} className="rotate-180" />
+              All templates
+            </button>
+          )}
           <h1 className="font-display text-[34px] font-semibold leading-tight tracking-[-0.03em] text-primary">
-            New project
+            {template ? template.name : "New project"}
           </h1>
           <p className="mt-1.5 text-sm text-secondary">
-            These settings apply to the whole edit and cannot be changed later.
+            {template
+              ? `Pick a clip for each slot. The template's timing, music and effects stay as designed - ` +
+                `${template.width} x ${template.height} at ${(template.rateNum / template.rateDen).toFixed(2)} fps.`
+              : "These settings apply to the whole edit and cannot be changed later."}
           </p>
         </header>
 
@@ -197,39 +305,96 @@ export function StartScreen({ onCreate }: { onCreate: (session: ProjectSession) 
           </div>
         </Field>
 
-        <Field label="Resolution">
-          <Segmented
-            options={RESOLUTIONS.map((option) => option.label)}
-            value={resolution.label}
-            onChange={(label) =>
-              setResolution(RESOLUTIONS.find((option) => option.label === label) ?? RESOLUTIONS[0])
-            }
-          />
-          <p className="mt-2 font-technical text-[11px] text-tertiary">
-            {resolution.width} x {resolution.height}
-          </p>
-        </Field>
+        {!template && (
+          <>
+            <Field label="Resolution">
+              <Segmented
+                options={RESOLUTIONS.map((option) => option.label)}
+                value={resolution.label}
+                onChange={(label) =>
+                  setResolution(
+                    RESOLUTIONS.find((option) => option.label === label) ?? RESOLUTIONS[0],
+                  )
+                }
+              />
+              <p className="mt-2 font-technical text-[11px] text-tertiary">
+                {resolution.width} x {resolution.height}
+              </p>
+            </Field>
 
-        <Field label="Frame rate" last>
-          <Segmented
-            options={FRAME_RATES.map((option) => option.label)}
-            value={rate.label}
-            onChange={(label) =>
-              setRate(FRAME_RATES.find((option) => option.label === label) ?? FRAME_RATES[3])
-            }
-          />
-          <p className="mt-2 font-technical text-[11px] text-tertiary">
-            {rate.num}/{rate.den} fps
-          </p>
-        </Field>
+            <Field label="Frame rate" last>
+              <Segmented
+                options={FRAME_RATES.map((option) => option.label)}
+                value={rate.label}
+                onChange={(label) =>
+                  setRate(FRAME_RATES.find((option) => option.label === label) ?? FRAME_RATES[3])
+                }
+              />
+              <p className="mt-2 font-technical text-[11px] text-tertiary">
+                {rate.num}/{rate.den} fps
+              </p>
+            </Field>
+          </>
+        )}
+
+        {template && (
+          <Field label={`Slots (${template.slots.length})`} last>
+            <ul className="flex flex-col gap-1.5">
+              {template.slots.map((slot, index) => {
+                const fill = fills[slot.mediaId];
+                return (
+                  <li key={slot.mediaId} className="flex items-center gap-2.5">
+                    <span
+                      className={`flex h-8 w-12 shrink-0 items-center justify-center rounded-md
+                                  ${fill ? "bg-accent-soft text-accent" : "bg-sunken text-tertiary"}`}
+                    >
+                      <Icon
+                        name={
+                          slot.kind === "audio" ? "music" : slot.kind === "image" ? "image" : "film"
+                        }
+                        size={13}
+                      />
+                    </span>
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate text-[13px] text-primary">
+                        {fill ? fill.item.name : `${index + 1}. ${slot.name}`}
+                      </span>
+                      <span className="block font-technical text-[11px] text-tertiary">
+                        {slot.kind} · {slot.seconds.toFixed(1)}s on the timeline
+                      </span>
+                    </span>
+                    <button
+                      type="button"
+                      disabled={busy}
+                      onClick={() => void pickSlot(slot)}
+                      className="shrink-0 cursor-pointer text-[13px] text-accent transition-opacity
+                                 hover:opacity-70 disabled:cursor-not-allowed disabled:opacity-40"
+                    >
+                      {fill ? "Change..." : "Choose..."}
+                    </button>
+                  </li>
+                );
+              })}
+              {template.slots.length === 0 && (
+                <li className="text-[12px] text-tertiary">
+                  This template has no slots - it opens ready-made.
+                </li>
+              )}
+            </ul>
+          </Field>
+        )}
 
         {error && <ErrorNotice message={error} onDismiss={() => setError(null)} className="mt-6" />}
 
         <div className="mt-10 flex items-center gap-4">
           <button
             type="button"
-            onClick={() => void create()}
-            disabled={busy || !location.trim()}
+            onClick={() => void (template ? createFromTemplate() : create())}
+            disabled={
+              busy ||
+              !location.trim() ||
+              (template !== null && !template.slots.every((slot) => fills[slot.mediaId]))
+            }
             className="cursor-pointer rounded-full bg-accent px-6 py-2.5 text-[14px] font-medium
                        text-on-accent transition-colors hover:bg-accent-hover
                        disabled:cursor-not-allowed disabled:opacity-40"
@@ -238,9 +403,55 @@ export function StartScreen({ onCreate }: { onCreate: (session: ProjectSession) 
           </button>
           <p className="flex items-center gap-1.5 text-[11px] text-tertiary">
             <Icon name="info" size={12} className="shrink-0" />
-            The timeline is not saved to disk yet.
+            {template
+              ? (() => {
+                  const missing = template.slots.filter((slot) => !fills[slot.mediaId]).length;
+                  return missing > 0
+                    ? `${missing} slot${missing === 1 ? "" : "s"} still need${missing === 1 ? "s" : ""} a clip.`
+                    : "Every slot is filled.";
+                })()
+              : "The timeline is not saved to disk yet."}
           </p>
         </div>
+
+        {!template && templates.length > 0 && (
+          <section className="mt-14 border-t border-hairline pt-7">
+            <h2 className="mb-3 text-[13px] font-semibold text-secondary">Start from a template</h2>
+            <ul className="grid grid-cols-[repeat(auto-fill,minmax(9.5rem,1fr))] gap-3">
+              {templates.map((entry) => (
+                <li key={entry.path} className="group relative">
+                  <button
+                    type="button"
+                    disabled={busy}
+                    title={entry.path}
+                    onClick={() => chooseTemplate(entry)}
+                    className="w-full cursor-pointer text-left disabled:cursor-not-allowed"
+                  >
+                    <TemplateThumb template={entry} />
+                    <span className="mt-1.5 block truncate text-[13px] text-primary">
+                      {entry.name}
+                    </span>
+                    <span className="block font-technical text-[11px] text-tertiary">
+                      {entry.slots.length} slot{entry.slots.length === 1 ? "" : "s"} · {entry.width}{" "}
+                      x {entry.height}
+                    </span>
+                  </button>
+                  <button
+                    type="button"
+                    aria-label={`Delete the template ${entry.name}`}
+                    title="Delete this template for good"
+                    onClick={() => void removeTemplate(entry)}
+                    className="invisible absolute right-1.5 top-1.5 cursor-pointer rounded
+                               bg-black/55 p-1 text-white transition-colors hover:bg-danger
+                               group-hover:visible"
+                  >
+                    <Icon name="trash" size={11} />
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </section>
+        )}
       </div>
 
         {/* No empty state: a "Recent" heading over nothing is worse than no

@@ -40,6 +40,9 @@ export interface MediaItem {
   videoCodec: string | null;
   audioCodec: string | null;
   hasAudio: boolean;
+  /** True when this item is a template slot awaiting the user's own media.
+   * Absent from documents that predate templates, which means false. */
+  placeholder?: boolean;
 }
 
 export interface Track {
@@ -161,6 +164,9 @@ export interface NewMedia {
 export type EditorCommand =
   | { op: "addMedia"; item: NewMedia }
   | { op: "removeMedia"; mediaId: string }
+  | { op: "setMediaPlaceholder"; mediaId: string; placeholder: boolean }
+  | { op: "fillSlot"; mediaId: string; item: NewMedia }
+  | { op: "batch"; commands: EditorCommand[] }
   | { op: "addClip"; mediaId: string; trackId: string; start: number }
   | { op: "addClipAtFirstFree"; mediaId: string; start: number }
   | { op: "addTextClip"; trackId: string | null; start: number; style: TextStyle | null }

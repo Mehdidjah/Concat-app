@@ -262,6 +262,13 @@ const GLYPHS = {
     </>
   ),
   // a four-point star with a smaller companion, for "effects"
+  // slot: a dashed placeholder box - the frame a template fills in later
+  slot: (
+    <>
+      <rect x="3.5" y="5.5" width="17" height="13" rx="2.5" strokeDasharray="3.2 2.6" />
+      <path d="M12 9.5v5M9.5 12h5" />
+    </>
+  ),
   sparkles: (
     <>
       <path d="M10 3.5l1.7 4.3 4.3 1.7-4.3 1.7L10 15.5l-1.7-4.3L4 9.5l4.3-1.7z" />

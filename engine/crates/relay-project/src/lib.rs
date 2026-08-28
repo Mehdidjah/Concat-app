@@ -33,7 +33,7 @@ mod tests {
     use serde_json::json;
 
     use crate::commands::{ClipMove, ClipPatch, Command, TrimEdge};
-    use crate::doc::{DocumentSettings, from_document};
+    use crate::doc::DocumentSettings;
     use crate::editor::Editor;
     use crate::model::{ClipKind, MediaKind, TextStyle};
 
@@ -301,7 +301,7 @@ mod tests {
 
     #[test]
     fn restored_ids_can_never_be_reissued() {
-        let (mut editor, _, _) = fixture();
+        let (editor, _, _) = fixture();
         let document = editor.to_document(&settings());
         let mut restored = Editor::from_document(&document).expect("loads");
         let media_id = restored
@@ -332,6 +332,27 @@ mod tests {
         .expect("optional camelCase fields deserialize");
         assert!(matches!(transform, Command::SetClipTransform { .. }));
 
+        // The template commands ride the same wire.
+        let mark: Command = serde_json::from_value(json!({
+            "op": "setMediaPlaceholder", "mediaId": "m1", "placeholder": true
+        }))
+        .expect("parses");
+        assert!(matches!(mark, Command::SetMediaPlaceholder { placeholder: true, .. }));
+
+        let batch: Command = serde_json::from_value(json!({
+            "op": "batch",
+            "commands": [{ "op": "fillSlot", "mediaId": "m1", "item": {
+                "path": "/b.mp4", "name": "b.mp4", "duration": 3.0, "kind": "video",
+                "width": null, "height": null, "frameRate": null, "frameRateFraction": null,
+                "videoCodec": null, "audioCodec": null, "hasAudio": false
+            }}]
+        }))
+        .expect("parses");
+        assert!(matches!(
+            &batch,
+            Command::Batch { commands } if matches!(commands[0], Command::FillSlot { .. })
+        ));
+
         // ClipPatch double-options: absent leaves alone, null clears.
         let patch: crate::commands::ClipPatch =
             serde_json::from_value(json!({ "transitionIn": null })).expect("parses");
@@ -339,6 +360,137 @@ mod tests {
         let untouched: crate::commands::ClipPatch =
             serde_json::from_value(json!({})).expect("parses");
         assert_eq!(untouched.transition_in, None);
+    }
+
+    #[test]
+    fn a_slot_fills_in_place_keeping_the_template_timing() {
+        let (mut editor, media_id, clip_id) = fixture();
+        // Shape the clip the way a template slot looks: trimmed off the front,
+        // so it has a real in-point to forget.
+        editor
+            .apply(Command::TrimClip { clip_id, edge: TrimEdge::Start, delta: 2.0 })
+            .expect("trims");
+        editor
+            .apply(Command::SetMediaPlaceholder { media_id: media_id.clone(), placeholder: true })
+            .expect("marks");
+        assert!(editor.project().media[0].placeholder);
+
+        editor
+            .apply(Command::FillSlot {
+                media_id: media_id.clone(),
+                item: crate::commands::NewMedia {
+                    path: "/photo.jpg".to_owned(),
+                    name: "photo.jpg".to_owned(),
+                    duration: None,
+                    kind: MediaKind::Image,
+                    width: Some(4000),
+                    height: Some(3000),
+                    frame_rate: None,
+                    frame_rate_fraction: None,
+                    video_codec: None,
+                    audio_codec: None,
+                    has_audio: false,
+                },
+            })
+            .expect("fills");
+
+        let project = editor.project();
+        let media = &project.media[0];
+        assert!(!media.placeholder, "a filled slot is ordinary media again");
+        assert_eq!(media.id, media_id, "the id survives, so clips keep working");
+        assert_eq!(media.path, "/photo.jpg");
+
+        let clip = &project.active().clips[0];
+        assert_eq!(clip.start, 2.0, "slot position is the template's");
+        assert_eq!(clip.duration, 8.0, "slot length is the template's");
+        assert_eq!(clip.source_start, 0.0, "the in-point referred to the old footage");
+        assert_eq!(clip.kind, ClipKind::Image);
+        assert_eq!(clip.name, "photo.jpg");
+    }
+
+    #[test]
+    fn filling_ordinary_media_is_refused() {
+        let (mut editor, media_id, _) = fixture();
+        let refused = editor.apply(Command::FillSlot {
+            media_id,
+            item: crate::commands::NewMedia {
+                path: "/b.mp4".to_owned(),
+                name: "b.mp4".to_owned(),
+                duration: Some(3.0),
+                kind: MediaKind::Video,
+                width: None,
+                height: None,
+                frame_rate: None,
+                frame_rate_fraction: None,
+                video_codec: None,
+                audio_codec: None,
+                has_audio: false,
+            },
+        });
+        assert!(refused.unwrap_err().contains("not a template slot"));
+    }
+
+    #[test]
+    fn a_batch_is_one_undo_step() {
+        let (mut editor, _, clip_id) = fixture();
+        editor
+            .apply(Command::Batch {
+                commands: vec![
+                    Command::SplitClips { clip_ids: vec![clip_id.clone()], time: 4.0 },
+                    Command::SetClipSpeed { clip_id, speed: 2.0 },
+                ],
+            })
+            .expect("applies");
+        assert_eq!(editor.project().active().clips.len(), 2);
+        assert_eq!(editor.project().active().clips[0].speed, 2.0);
+
+        assert!(editor.undo());
+        let clips = &editor.project().active().clips;
+        assert_eq!(clips.len(), 1, "one undo reverses the whole batch");
+        assert_eq!(clips[0].speed, 1.0);
+    }
+
+    #[test]
+    fn a_failed_batch_changes_nothing() {
+        let (mut editor, _, clip_id) = fixture();
+        let before = editor.project().clone();
+        let refused = editor.apply(Command::Batch {
+            commands: vec![
+                Command::SplitClips { clip_ids: vec![clip_id], time: 4.0 },
+                Command::MergeClips { clip_ids: vec!["nope".to_owned()] },
+            ],
+        });
+        assert!(refused.is_err());
+        assert_eq!(editor.project(), &before, "the successful half was rolled back");
+
+        assert!(editor.undo());
+        assert!(
+            editor.project().active().clips.is_empty(),
+            "the first undo steps over the fixture's add-clip, so the batch recorded nothing"
+        );
+    }
+
+    #[test]
+    fn the_placeholder_flag_round_trips_and_defaults_off() {
+        let (mut editor, media_id, _) = fixture();
+        editor
+            .apply(Command::SetMediaPlaceholder { media_id, placeholder: true })
+            .expect("marks");
+
+        let document = editor.to_document(&settings());
+        let restored = Editor::from_document(&document).expect("loads");
+        assert!(restored.project().media[0].placeholder, "the flag survives the document");
+
+        // A document from a build that predates templates has no such field.
+        let legacy = json!({
+            "name": "Old", "version": 1,
+            "media": [{ "id": "m1", "path": "/a.mp4", "name": "a.mp4", "kind": "video",
+                        "hasAudio": false }],
+            "tracks": [{ "id": "T1", "name": "Track 1", "visible": true, "muted": false }],
+            "clips": []
+        });
+        let editor = Editor::from_document(&legacy).expect("loads");
+        assert!(!editor.project().media[0].placeholder);
     }
 
     #[test]

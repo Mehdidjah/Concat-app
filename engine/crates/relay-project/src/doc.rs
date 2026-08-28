@@ -63,6 +63,7 @@ fn read_media(raw: Option<&Value>) -> Vec<MediaItem> {
                 video_codec: opt_string(entry.get("videoCodec")),
                 audio_codec: opt_string(entry.get("audioCodec")),
                 has_audio: flag(entry.get("hasAudio"), false),
+                placeholder: flag(entry.get("placeholder"), false),
                 id,
                 path,
             })

@@ -115,6 +115,9 @@ pub struct NewMedia {
 pub enum Command {
     AddMedia { item: NewMedia },
     RemoveMedia { media_id: String },
+    SetMediaPlaceholder { media_id: String, placeholder: bool },
+    FillSlot { media_id: String, item: NewMedia },
+    Batch { commands: Vec<Command> },
     AddClip { media_id: String, track_id: String, start: f64 },
     AddClipAtFirstFree { media_id: String, start: f64 },
     AddTextClip { track_id: Option<String>, start: f64, style: Option<TextStyle> },
@@ -335,8 +338,80 @@ pub fn apply(project: &mut Project, mint: &mut IdMint, command: Command) -> Resu
                 video_codec: item.video_codec,
                 audio_codec: item.audio_codec,
                 has_audio: item.has_audio,
+                placeholder: false,
             });
             Ok(Outcome { created_id: Some(id) })
+        }
+
+        Command::SetMediaPlaceholder { media_id, placeholder } => {
+            if let Some(item) = project.media.iter_mut().find(|item| item.id == media_id) {
+                item.placeholder = placeholder;
+            }
+            Ok(Outcome::default())
+        }
+
+        Command::FillSlot { media_id, item } => {
+            let media = project
+                .media
+                .iter_mut()
+                .find(|existing| existing.id == media_id)
+                .ok_or("That template slot no longer exists.")?;
+            if !media.placeholder {
+                return Err("That media is not a template slot.".to_owned());
+            }
+
+            // The slot keeps its id, so every clip that references it keeps
+            // working; only the identity behind the id changes.
+            media.path = item.path;
+            media.name = item.name.clone();
+            media.duration = item.duration;
+            media.kind = item.kind;
+            media.width = item.width;
+            media.height = item.height;
+            media.frame_rate = item.frame_rate;
+            media.frame_rate_fraction = item.frame_rate_fraction;
+            media.video_codec = item.video_codec;
+            media.audio_codec = item.audio_codec;
+            media.has_audio = item.has_audio;
+            media.placeholder = false;
+            let kind = match item.kind {
+                MediaKind::Video => ClipKind::Video,
+                MediaKind::Audio => ClipKind::Audio,
+                MediaKind::Image => ClipKind::Image,
+            };
+
+            // Slot timing is the template's: start, duration and speed stay
+            // put, which is what keeps cuts on the beat. The in-point resets
+            // because it referred to the old footage; a clip shorter than its
+            // slot freeze-frames on its last frame downstream, which is the
+            // renderer's existing behaviour for a trim past the media's end.
+            // All timelines, like RemoveMedia: slots are not per-timeline.
+            for timeline in &mut project.timelines {
+                for clip in &mut timeline.clips {
+                    if clip.media_id == media_id {
+                        clip.source_start = 0.0;
+                        clip.kind = kind;
+                        clip.name = item.name.clone();
+                    }
+                }
+            }
+            Ok(Outcome::default())
+        }
+
+        Command::Batch { commands } => {
+            // All or nothing: apply to a staged copy and commit only a fully
+            // successful run, so one bad command cannot leave a half-applied
+            // batch behind (and the editor records it as one undo step).
+            let mut staged = project.clone();
+            let mut created = None;
+            for command in commands {
+                let outcome = apply(&mut staged, mint, command)?;
+                if outcome.created_id.is_some() {
+                    created = outcome.created_id;
+                }
+            }
+            *project = staged;
+            Ok(Outcome { created_id: created })
         }
 
         Command::RemoveMedia { media_id } => {

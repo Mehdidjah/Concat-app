@@ -70,6 +70,21 @@ fn view(session: &Session, created_id: Option<String>) -> EditorView {
     }
 }
 
+/// The open session's document, project folder and settings, for features
+/// that package the current edit (saving it as a template) rather than
+/// editing it.
+pub fn session_snapshot(
+    state: &EditorState,
+) -> Result<(serde_json::Value, String, DocumentSettings), String> {
+    with_session(state, |session| {
+        Ok((
+            session.editor.to_document(&session.settings),
+            session.path.clone(),
+            session.settings.clone(),
+        ))
+    })
+}
+
 fn with_session<T>(
     state: &EditorState,
     operation: impl FnOnce(&mut Session) -> Result<T, String>,

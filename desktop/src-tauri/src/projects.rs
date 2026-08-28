@@ -224,8 +224,9 @@ fn same_path(left: &str, right: &str) -> bool {
     left.eq_ignore_ascii_case(right)
 }
 
-/// Turns a project name into something a filesystem will accept.
-fn folder_name(name: &str) -> String {
+/// Turns a project name into something a filesystem will accept. Also used
+/// for template bundle folders and the files inside them.
+pub(crate) fn folder_name(name: &str) -> String {
     let cleaned: String = name
         .trim()
         .chars()

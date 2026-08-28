@@ -11,6 +11,7 @@ pub mod export;
 mod editor_api;
 mod playback;
 mod projects;
+mod templates;
 mod transcribe;
 
 use serde::Serialize;
@@ -438,6 +439,62 @@ fn forget_project(app: tauri::AppHandle, path: String) -> Result<(), String> {
     projects::forget(&config_dir(&app)?, &path)
 }
 
+/// The template library, for the gallery.
+#[tauri::command]
+fn template_list(app: tauri::AppHandle) -> Result<Vec<templates::TemplateInfo>, String> {
+    Ok(templates::list(&config_dir(&app)?))
+}
+
+/// Packs the open project into a new template bundle.
+#[tauri::command]
+async fn template_save(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, editor_api::EditorState>,
+    name: String,
+) -> Result<templates::TemplateInfo, String> {
+    let (document, project_path, _) = editor_api::session_snapshot(&state)?;
+    let config = config_dir(&app)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        templates::save(&config, &document, &project_path, &name)
+    })
+    .await
+    .map_err(|error| format!("template save task failed: {error}"))?
+}
+
+/// Unpacks a template into a fresh project with every slot filled, and
+/// records it as recent - the caller opens it like any other project.
+#[tauri::command]
+async fn template_instantiate(
+    app: tauri::AppHandle,
+    template: String,
+    location: String,
+    name: String,
+    fills: Vec<templates::SlotFill>,
+) -> Result<projects::ProjectInfo, String> {
+    let config = config_dir(&app)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let project = templates::instantiate(&template, &location, &name, fills)?;
+        if let Err(error) = projects::remember(&config, &project) {
+            eprintln!("relay: {error}");
+        }
+        Ok(project)
+    })
+    .await
+    .map_err(|error| format!("template task failed: {error}"))?
+}
+
+/// Removes one template bundle for good.
+#[tauri::command]
+fn template_delete(app: tauri::AppHandle, path: String) -> Result<(), String> {
+    templates::delete(&config_dir(&app)?, &path)
+}
+
+/// A template's poster, or an error the UI treats as "no art".
+#[tauri::command]
+fn template_poster(path: String) -> Result<tauri::ipc::Response, String> {
+    templates::poster(&path).map(tauri::ipc::Response::new)
+}
+
 fn config_dir(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
     use tauri::Manager;
     app.path()
@@ -601,6 +658,11 @@ pub fn run() {
             export_project,
             cancel_export,
             preview_frame,
+            template_list,
+            template_save,
+            template_instantiate,
+            template_delete,
+            template_poster,
             editor_api::editor_open,
             editor_api::editor_apply,
             editor_api::editor_undo,

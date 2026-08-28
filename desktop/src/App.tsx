@@ -13,6 +13,7 @@ import type { MenuOption } from "./components/Menu";
 import { Preview, type PreviewSource, type TextOverlay } from "./components/Preview";
 import { Resizer } from "./components/Resizer";
 import { RightPanel, type RightTab } from "./components/RightPanel";
+import { SaveTemplateDialog } from "./components/SaveTemplateDialog";
 import { SettingsDialog } from "./components/SettingsDialog";
 import { StartScreen, type ProjectSession } from "./components/StartScreen";
 import { TitleBar } from "./components/TitleBar";
@@ -51,11 +52,14 @@ import {
   editorSave,
   editorUndo,
   engineVersion,
+  newMediaFromSummary,
   previewFrame,
   probeMedia,
   readMediaBytes,
+  templateSave,
   transcribeClip,
   type ExportClip,
+  type TemplateInfo,
 } from "./lib/engine";
 import { getTranscriberLanguage, getTranscriberModel } from "./lib/settings";
 import { buildChain } from "./lib/filters";
@@ -98,6 +102,9 @@ const EMPTY_PROJECT: EditorProject = {
  */
 export function App() {
   const [session, setSession] = useState<ProjectSession | null>(null);
+  // Choosing "use template" inside the editor closes the project and lands
+  // the launch screen straight in that template's fill mode.
+  const [pendingTemplate, setPendingTemplate] = useState<TemplateInfo | null>(null);
   // Owned here rather than in the editor so the launch screen is themed too,
   // and so the choice survives closing a project.
   const { theme, toggle } = useTheme();
@@ -107,7 +114,13 @@ export function App() {
       <div className="flex h-full flex-col overflow-hidden">
         <TitleBar projectName="" menus={[]} theme={theme} onToggleTheme={toggle} />
         <div className="min-h-0 flex-1">
-          <StartScreen onCreate={setSession} />
+          <StartScreen
+            initialTemplate={pendingTemplate}
+            onCreate={(next) => {
+              setPendingTemplate(null);
+              setSession(next);
+            }}
+          />
         </div>
       </div>
     );
@@ -119,6 +132,10 @@ export function App() {
       theme={theme}
       onToggleTheme={toggle}
       onCloseProject={() => setSession(null)}
+      onUseTemplate={(template) => {
+        setPendingTemplate(template);
+        setSession(null);
+      }}
     />
   );
 }
@@ -138,11 +155,14 @@ function Editor({
   theme,
   onToggleTheme,
   onCloseProject,
+  onUseTemplate,
 }: {
   session: ProjectSession;
   theme: Theme;
   onToggleTheme: () => void;
   onCloseProject: () => void;
+  /** Leaves this project for the launch screen's fill flow on a template. */
+  onUseTemplate: (template: TemplateInfo) => void;
 }) {
   const [view, setView] = useState<EditorView | null>(null);
   const [echo, setEcho] = useState<Echo | null>(null);
@@ -171,7 +191,9 @@ function Editor({
   const [frame, setFrame] = useState({ width: session.width, height: session.height });
 
   // Panel geometry.
-  const [leftWidth, setLeftWidth] = useState(340);
+  // Wide enough that the library's five tabs and a row of cards breathe;
+  // the resizer still allows 220-560.
+  const [leftWidth, setLeftWidth] = useState(420);
   const [rightWidth, setRightWidth] = useState(300);
   const [timelineHeight, setTimelineHeight] = useState(340);
 
@@ -397,6 +419,9 @@ function Editor({
   );
 
   const [settingsOpen, setSettingsOpen] = useState(false);
+  // The save-as-template sheet: null closed, otherwise whether the host is
+  // packing the bundle right now.
+  const [templateDialog, setTemplateDialog] = useState<null | { busy: boolean }>(null);
   const [transcribing, setTranscribing] = useState(false);
 
   useEffect(() => {
@@ -446,22 +471,9 @@ function Editor({
       for (const path of paths) {
         try {
           const summary = await probeMedia(path);
-          const name = summary.path.split(/[\\/]/).pop() ?? summary.path;
           const mediaId = await dispatch({
             op: "addMedia",
-            item: {
-              path: summary.path,
-              name,
-              duration: summary.duration,
-              kind: summary.kind,
-              width: summary.video?.width ?? null,
-              height: summary.video?.height ?? null,
-              frameRate: summary.video?.frameRate ?? null,
-              frameRateFraction: summary.video?.frameRateFraction ?? null,
-              videoCodec: summary.video?.codec ?? null,
-              audioCodec: summary.audio?.codec ?? null,
-              hasAudio: summary.audio !== null,
-            },
+            item: newMediaFromSummary(summary),
           });
           if (mediaId) {
             setSelectedMediaId(mediaId);
@@ -1280,6 +1292,11 @@ function Editor({
                   disabled: exportClips.length === 0,
                   onSelect: () => setExporting(true),
                 },
+                {
+                  label: "Save as template...",
+                  icon: "slot",
+                  onSelect: () => setTemplateDialog({ busy: false }),
+                },
               ],
               [
                 {
@@ -1396,6 +1413,17 @@ function Editor({
               onAddToTimeline={addToTimeline}
               onApplyEffect={applyEffect}
               onApplyTransition={applyTransition}
+              onToggleSlot={(mediaId, placeholder) =>
+                void dispatch({ op: "setMediaPlaceholder", mediaId, placeholder })
+              }
+              onSaveTemplate={() => setTemplateDialog({ busy: false })}
+              onUseTemplate={(template) => {
+                // Save what is open first: leaving for the fill flow closes
+                // this project, and the debounced autosave may not have fired.
+                void editorSave(latest.current.frame)
+                  .catch(() => undefined)
+                  .then(() => onUseTemplate(template));
+              }}
             />
           </div>
 
@@ -1662,6 +1690,31 @@ function Editor({
 
       {context && <ContextMenu target={context} onClose={() => setContext(null)} />}
       {settingsOpen && <SettingsDialog onClose={() => setSettingsOpen(false)} />}
+
+      {templateDialog && (
+        <SaveTemplateDialog
+          defaultName={session.name}
+          slotCount={project.media.filter((item) => item.placeholder).length}
+          busy={templateDialog.busy}
+          onSave={(name) => {
+            setTemplateDialog({ busy: true });
+            templateSave(name)
+              .then((info) => {
+                setTemplateDialog(null);
+                setToast({
+                  id: Date.now(),
+                  message: `Saved template "${info.name}"`,
+                  failed: false,
+                });
+              })
+              .catch((cause: unknown) => {
+                setTemplateDialog({ busy: false });
+                setToast({ id: Date.now(), message: String(cause), failed: true });
+              });
+          }}
+          onCancel={() => setTemplateDialog(null)}
+        />
+      )}
 
       {timelineToDelete && (
         <ConfirmDialog
