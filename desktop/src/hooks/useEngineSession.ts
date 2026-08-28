@@ -204,16 +204,31 @@ export function useEngineSession({
 
   // Autosave, debounced. The engine writes the document; the UI only says
   // when, and carries the output frame the preview footer can edit.
+  //
+  // A failure toasts once per losing streak - the first failed autosave is
+  // news the user must not miss (their edits are not reaching disk), but a
+  // full disk would otherwise toast every keystroke and a half. The streak
+  // resets on the next success so a recurrence speaks up again.
+  const autosaveFailing = useRef(false);
   useEffect(() => {
     if (!loaded) return;
     const timer = window.setTimeout(() => {
       setSaveState("saving");
       editorSave(frameRef.current)
-        .then(() => setSaveState("saved"))
-        .catch(() => setSaveState("failed"));
+        .then(() => {
+          setSaveState("saved");
+          autosaveFailing.current = false;
+        })
+        .catch((cause: unknown) => {
+          setSaveState("failed");
+          if (!autosaveFailing.current) {
+            autosaveFailing.current = true;
+            onSaved(false, String(cause));
+          }
+        });
     }, 1500);
     return () => clearTimeout(timer);
-  }, [view, frame, loaded]);
+  }, [view, frame, loaded, onSaved]);
 
   const saveAndNotify = useCallback(() => {
     setSaveState("saving");

@@ -390,8 +390,12 @@ export function TimelinePanel({
     context.rect(0, RULER_HEIGHT, width, Math.max(0, height - RULER_HEIGHT));
     context.clip();
 
+    // Row index per track id, once per repaint - the loop below runs per
+    // clip per frame during playback, and a caption run puts hundreds of
+    // clips on the timeline.
+    const rowByTrack = new Map(state.rows.map((track, index) => [track.id, index]));
     for (const clip of state.timeline.clips) {
-      const rowIndex = state.rows.findIndex((track) => track.id === clip.trackId);
+      const rowIndex = rowByTrack.get(clip.trackId) ?? -1;
       if (rowIndex < 0) continue;
 
       const x = toX(clip.start);
