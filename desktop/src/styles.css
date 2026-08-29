@@ -180,7 +180,11 @@
      separate. */
   --color-base: #050506;
   --color-panel: #18181b;
-  --color-sunken: #050506;
+  /* Between the stage and the panels, never equal to the stage: a sunken
+     surface that matches --color-base reads as a hole punched through the
+     panel - the timeline tab tray was pitch black and its top edge
+     vanished into the background. */
+  --color-sunken: #0e0e11;
   --color-elevated: #1f1f22;
   --color-hover: rgba(255, 255, 255, 0.07);
   --color-active: rgba(255, 255, 255, 0.12);
