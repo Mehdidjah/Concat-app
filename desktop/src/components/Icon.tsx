@@ -436,11 +436,14 @@ export function IconButton({
   size?: 7 | 9;
   tone?: "default" | "danger" | "go";
 }) {
+  // "go" idles in the same lime as active states, not the success green:
+  // the transport's play button is the one "go" and a green glyph beside
+  // lime-active tools read as two systems.
   const idle =
     tone === "danger"
       ? "text-danger hover:bg-hover"
       : tone === "go"
-        ? "text-success hover:bg-hover"
+        ? "text-tool-active hover:bg-hover"
         : "text-primary hover:bg-hover";
 
   // Active is the one lime everywhere - including the transport's play
