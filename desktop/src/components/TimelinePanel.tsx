@@ -15,6 +15,7 @@ import {
   type TimelineMeta,
   type Track,
 } from "../lib/editor";
+import { useLocale, type MsgKey } from "../lib/i18n";
 import { timecode } from "../lib/time";
 import { Icon, IconButton } from "./Icon";
 import { Menu, type MenuOption } from "./Menu";
@@ -187,7 +188,7 @@ export function TimelinePanel({
   onSplitAtPlayhead: () => void;
   onMergeSelected: () => void;
   /** Null when the selection can be merged; otherwise why it cannot. */
-  mergeBlockedBecause: string | null;
+  mergeBlockedBecause: MsgKey | null;
   onDeleteSelected: () => void;
   /** A bin item currently being dragged, in client coordinates. */
   mediaDrag: { x: number; y: number } | null;
@@ -216,6 +217,7 @@ export function TimelinePanel({
   /** A move or trim drag finished; the echoed change becomes one command. */
   onGestureEnd: () => void;
 }) {
+  const { t } = useLocale();
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const drag = useRef<DragState | null>(null);
   /** Last pointer position, replayed by the edge-scroll loop. */
@@ -932,30 +934,30 @@ export function TimelinePanel({
           );
         })()}
         <span className="self-center">
-          <IconButton icon="plus" label="New timeline" size={7} onClick={onAddTimeline} />
+          <IconButton icon="plus" label={t("timeline.newTimeline")} size={7} onClick={onAddTimeline} />
         </span>
       </div>
 
       <Bar>
         <IconButton
           icon="select"
-          label="Select tool (V)"
+          label={t("timeline.selectTool")}
           active={tool === "select"}
           onClick={() => onToolChange("select")}
         />
         <IconButton
           icon="razor"
-          label="Razor tool (C)"
+          label={t("timeline.razorTool")}
           active={tool === "razor"}
           onClick={() => onToolChange("razor")}
         />
         <Divider />
-        <IconButton icon="split" label="Split at playhead (Ctrl+B)" onClick={onSplitAtPlayhead} />
+        <IconButton icon="split" label={t("timeline.split")} onClick={onSplitAtPlayhead} />
         <IconButton
           icon="merge"
           // The reason lives in the tooltip: a button that greys out without
           // saying why leaves you guessing at the rule.
-          label={mergeBlockedBecause ?? "Merge selected clips (M)"}
+          label={mergeBlockedBecause ? t(mergeBlockedBecause) : t("timeline.merge")}
           disabled={mergeBlockedBecause !== null}
           onClick={onMergeSelected}
         />
@@ -963,8 +965,8 @@ export function TimelinePanel({
           icon="trash"
           label={
             selectedClipIds.length > 1
-              ? `Delete ${selectedClipIds.length} clips (Del)`
-              : "Delete selected (Del)"
+              ? t("timeline.deleteClips", { count: selectedClipIds.length })
+              : t("timeline.deleteSelected")
           }
           tone="danger"
           disabled={selectedClipIds.length === 0}
@@ -978,7 +980,7 @@ export function TimelinePanel({
         <Divider />
         <IconButton
           icon="magnet"
-          label="Snapping (N)"
+          label={t("timeline.snapping")}
           active={snap}
           onClick={() => onSnapChange(!snap)}
         />
@@ -991,7 +993,7 @@ export function TimelinePanel({
               groups={clipTools}
               trigger={(open) => (
                 <span
-                  title="Audio & video tools"
+                  title={t("timeline.avTools")}
                   className={`flex h-9 items-center gap-0.5 rounded-lg px-1.5 transition-colors
                               duration-150 ${
                                 open
@@ -1007,7 +1009,7 @@ export function TimelinePanel({
           </>
         )}
         <Divider />
-        <IconButton icon="plus" label="Add track" onClick={onAddTrack} />
+        <IconButton icon="plus" label={t("timeline.addTrack")} onClick={onAddTrack} />
 
         <Spacer />
 
@@ -1019,11 +1021,16 @@ export function TimelinePanel({
         <Divider />
         <IconButton
           icon="fit"
-          label="Fit to window (F)"
+          label={t("timeline.fit")}
           onClick={() => onFit(canvasRef.current?.clientWidth ?? 0)}
         />
-        <IconButton icon="minus" label="Zoom out" size={7} onClick={() => onZoom(1.4)} />
-        <IconButton icon="plus" label="Zoom in" size={7} onClick={() => onZoom(1 / 1.4)} />
+        <IconButton icon="minus" label={t("timeline.zoomOut")} size={7} onClick={() => onZoom(1.4)} />
+        <IconButton
+          icon="plus"
+          label={t("timeline.zoomIn")}
+          size={7}
+          onClick={() => onZoom(1 / 1.4)}
+        />
       </Bar>
 
       <div className="flex min-h-0 flex-1">
@@ -1118,6 +1125,7 @@ function TimelineTab({
   onDragPointerUp: (event: React.PointerEvent) => void;
 }) {
   const [renaming, setRenaming] = useState(false);
+  const { t } = useLocale();
 
   if (renaming) {
     return (
@@ -1147,7 +1155,7 @@ function TimelineTab({
     <span
       role="tab"
       aria-selected={active}
-      title={active ? timeline.name : `Switch to ${timeline.name}`}
+      title={active ? timeline.name : t("timeline.switchTo", { name: timeline.name })}
       onClick={() => onSelect(timeline.id)}
       onDoubleClick={() => setRenaming(true)}
       onPointerDown={(event) => onDragPointerDown(timeline.id, event)}
@@ -1175,8 +1183,8 @@ function TimelineTab({
       {closable && (
         <button
           type="button"
-          aria-label={`Delete ${timeline.name}`}
-          title={`Delete ${timeline.name}`}
+          aria-label={t("timeline.deleteNamed", { name: timeline.name })}
+          title={t("timeline.deleteNamed", { name: timeline.name })}
           onClick={(event) => {
             // The x must not also switch tabs: deleting an inactive timeline
             // should not first drag the editor onto it.
@@ -1215,6 +1223,7 @@ function TrackHeader({
 }) {
   const silent = !track.visible && track.muted;
   const [renaming, setRenaming] = useState(false);
+  const { t } = useLocale();
 
   return (
     <div
@@ -1246,7 +1255,7 @@ function TrackHeader({
       ) : (
         <span
           onDoubleClick={() => setRenaming(true)}
-          title="Double-click to rename"
+          title={t("timeline.renameHint")}
           className={`min-w-0 flex-1 cursor-default truncate text-xs ${
             silent ? "text-tertiary" : "text-primary"
           }`}
@@ -1258,8 +1267,8 @@ function TrackHeader({
       {removable && !renaming && (
         <button
           type="button"
-          aria-label={`Remove ${track.name}`}
-          title={`Remove ${track.name} and its clips`}
+          aria-label={t("timeline.removeTrack", { name: track.name })}
+          title={t("timeline.removeTrackHint", { name: track.name })}
           onClick={() => onRemove(track.id)}
           className="invisible shrink-0 cursor-pointer rounded p-1 text-tertiary transition-colors
                      hover:bg-danger-soft hover:text-danger group-hover:visible"
@@ -1269,14 +1278,14 @@ function TrackHeader({
       )}
       <IconButton
         icon={track.visible ? "eye" : "eyeOff"}
-        label={track.visible ? "Hide picture on this track" : "Show picture on this track"}
+        label={track.visible ? t("timeline.hideTrack") : t("timeline.showTrack")}
         size={7}
         active={!track.visible}
         onClick={() => onFlag(track.id, "visible", !track.visible)}
       />
       <IconButton
         icon={track.muted ? "volumeOff" : "volume"}
-        label={track.muted ? "Unmute this track" : "Mute this track"}
+        label={track.muted ? t("timeline.unmuteTrack") : t("timeline.muteTrack")}
         size={7}
         active={track.muted}
         onClick={() => onFlag(track.id, "muted", !track.muted)}

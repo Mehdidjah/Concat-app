@@ -18,6 +18,7 @@
  * the echo never survives past its commit.
  */
 
+import type { MsgKey } from "./i18n";
 import type { Clip } from "./generated/Clip";
 import type { ClipPatch } from "./generated/ClipPatch";
 import type { Command as EditorCommand } from "./generated/Command";
@@ -147,36 +148,36 @@ const JOIN_EPSILON = 1e-6;
  * twin of the engine's own check, for the disabled button's tooltip. The
  * engine re-validates on the command; this only phrases the reason early.
  */
-export function whyNotMerge(project: EditorProject, clipIds: readonly string[]): string | null {
-  if (clipIds.length < 2) return "Select two or more clips to merge.";
+export function whyNotMerge(project: EditorProject, clipIds: readonly string[]): MsgKey | null {
+  if (clipIds.length < 2) return "timeline.mergeNeedTwo";
   const timeline = activeTimeline(project);
   const clips = clipIds.flatMap((id) => {
     const clip = timeline.clips.find((candidate) => candidate.id === id);
     return clip ? [clip] : [];
   });
-  if (clips.length < 2) return "Select two or more clips to merge.";
+  if (clips.length < 2) return "timeline.mergeNeedTwo";
   if (clips.some((clip) => clip.trackId !== clips[0].trackId)) {
-    return "Merged clips must be on the same track.";
+    return "timeline.mergeSameTrack";
   }
   if (clips.some((clip) => clip.mediaId !== clips[0].mediaId)) {
-    return "Merged clips must come from the same file.";
+    return "timeline.mergeSameFile";
   }
   if (clips.some((clip) => clip.speed !== clips[0].speed)) {
-    return "Merged clips must play at the same speed.";
+    return "timeline.mergeSameSpeed";
   }
   const ordered = [...clips].sort((left, right) => left.start - right.start);
   for (let index = 1; index < ordered.length; index += 1) {
     const previous = ordered[index - 1];
     const current = ordered[index];
     if (Math.abs(current.start - (previous.start + previous.duration)) > JOIN_EPSILON) {
-      return "Merged clips must touch, with no gap or overlap.";
+      return "timeline.mergeMustTouch";
     }
     if (
       Math.abs(
         current.sourceStart - (previous.sourceStart + previous.duration * previous.speed),
       ) > JOIN_EPSILON
     ) {
-      return "These pieces are no longer in their original order.";
+      return "timeline.mergeOutOfOrder";
     }
   }
   return null;

@@ -1,6 +1,7 @@
 import { useRef, useState } from "react";
 import type { KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent } from "react";
 
+import { useLocale } from "../lib/i18n";
 import { Icon } from "./Icon";
 
 /**
@@ -91,6 +92,7 @@ export function Slider({
   /** Double-clicking the label returns the control to this value. */
   onReset?: () => void;
 }) {
+  const { t } = useLocale();
   const track = useRef<HTMLDivElement>(null);
   // Where the last pointer event landed, so a shift-drag can be relative to
   // the previous position rather than jumping to the pointer.
@@ -138,7 +140,7 @@ export function Slider({
       <div className="mb-1 flex items-baseline justify-between gap-2">
         <span
           onDoubleClick={onReset}
-          title={onReset ? "Double-click to reset" : undefined}
+          title={onReset ? t("controls.resetHint") : undefined}
           className={`text-[12px] text-secondary ${onReset ? "cursor-pointer" : ""}`}
         >
           {label}
@@ -206,7 +208,7 @@ export function Slider({
           value={typing ?? String(Number(value.toFixed(4)))}
           inputMode="decimal"
           spellCheck={false}
-          aria-label={`${label} value`}
+          aria-label={t("controls.sliderValue", { label })}
           onChange={(event) => setTyping(event.target.value)}
           onFocus={(event) => event.target.select()}
           onBlur={commitTyped}

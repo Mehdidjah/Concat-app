@@ -10,6 +10,7 @@ import {
   type FilterDefinition,
 } from "../lib/filters";
 import type { Clip } from "../lib/editor";
+import { useLocale } from "../lib/i18n";
 import { HelpTip, Slider } from "./controls";
 import { Icon, IconButton } from "./Icon";
 import { Empty } from "./Panel";
@@ -38,11 +39,12 @@ export function FiltersPanel({
 }) {
   const [category, setCategory] = useState<FilterCategory>("voice");
   const [query, setQuery] = useState("");
+  const { t } = useLocale();
 
   if (!clip) {
     return (
       <Empty icon={<Icon name="settings" size={26} strokeWidth={1.5} />}>
-        Select a single clip to add filters.
+        {t("filters.panel.empty")}
       </Empty>
     );
   }
@@ -50,7 +52,7 @@ export function FiltersPanel({
   if (clip.kind === "image") {
     return (
       <Empty icon={<Icon name="image" size={26} strokeWidth={1.5} />}>
-        A still has no audio to filter.
+        {t("filters.panel.emptyImage")}
       </Empty>
     );
   }
@@ -94,8 +96,8 @@ export function FiltersPanel({
       {applied.length > 0 && (
         <section className="mb-5">
           <h3 className="mb-2 flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-tertiary">
-            Applied
-            <HelpTip text="Filters run top to bottom, and order is audible. The eye bypasses one without losing its settings - flick it to compare." />
+            {t("filters.panel.applied")}
+            <HelpTip text={t("filters.panel.appliedHelp")} />
           </h3>
 
           <ul className="flex flex-col gap-2">
@@ -117,27 +119,31 @@ export function FiltersPanel({
                     </span>
                     <IconButton
                       icon={active ? "eye" : "eyeOff"}
-                      label={active ? `Bypass ${definition.label}` : `Enable ${definition.label}`}
+                      label={
+                        active
+                          ? t("filters.panel.bypass", { name: definition.label })
+                          : t("filters.panel.enable", { name: definition.label })
+                      }
                       size={7}
                       onClick={() => patch(index, { enabled: !active })}
                     />
                     <IconButton
                       icon="chevronUp"
-                      label="Move earlier in the chain"
+                      label={t("filters.panel.moveEarlier")}
                       size={7}
                       disabled={index === 0}
                       onClick={() => move(index, -1)}
                     />
                     <IconButton
                       icon="chevronDown"
-                      label="Move later in the chain"
+                      label={t("filters.panel.moveLater")}
                       size={7}
                       disabled={index === applied.length - 1}
                       onClick={() => move(index, 1)}
                     />
                     <IconButton
                       icon="close"
-                      label={`Remove ${definition.label}`}
+                      label={t("filters.panel.remove", { name: definition.label })}
                       size={7}
                       tone="danger"
                       onClick={() => remove(index)}
@@ -177,14 +183,14 @@ export function FiltersPanel({
         <input
           value={query}
           onChange={(event) => setQuery(event.target.value)}
-          placeholder="Search filters"
+          placeholder={t("filters.panel.searchPlaceholder")}
           className="h-7 w-full bg-transparent text-xs text-primary outline-none
                      placeholder:text-tertiary"
         />
         {query !== "" && (
           <button
             type="button"
-            aria-label="Clear search"
+            aria-label={t("filters.panel.clearSearch")}
             onClick={() => setQuery("")}
             className="cursor-pointer text-tertiary transition-colors hover:text-primary"
           >
@@ -215,7 +221,7 @@ export function FiltersPanel({
 
       {browsable.length === 0 ? (
         <p className="px-2 py-3 text-center text-[11px] text-tertiary">
-          Nothing matches "{query.trim()}".
+          {t("filters.panel.noMatches", { query: query.trim() })}
         </p>
       ) : (
         <ul className="flex flex-col gap-0.5">

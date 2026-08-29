@@ -12,6 +12,7 @@ import { buildPreviewLook, type AppliedEffect, type CanvasOp } from "../lib/effe
 import type { PreviewSource, TextOverlay } from "../lib/monitor";
 import { timecode } from "../lib/time";
 import { MAX_SCALE, MIN_SCALE } from "../lib/editor";
+import { useLocale, type MsgKey } from "../lib/i18n";
 import { textCss } from "../lib/text";
 import { Icon, IconButton } from "./Icon";
 import { Menu } from "./Menu";
@@ -318,6 +319,7 @@ export function Preview({
   onStep: (frames: number) => void;
   onSeek: (seconds: number) => void;
 }) {
+  const { t } = useLocale();
   const video = useRef<HTMLVideoElement>(null);
   const still = useRef<HTMLImageElement>(null);
   const loadedClip = useRef<string | null>(null);
@@ -687,7 +689,7 @@ export function Preview({
             <div className="absolute inset-0 flex flex-col items-center justify-center gap-3
                             text-on-stage">
               <Icon name="film" size={30} strokeWidth={1.5} />
-              <p className="text-xs">Nothing under the playhead</p>
+              <p className="text-xs">{t("preview.nothingUnderPlayhead")}</p>
             </div>
           )}
         </div>
@@ -717,29 +719,34 @@ export function Preview({
         </span>
 
         <div className="flex items-center gap-0.5">
-          <IconButton icon="skipStart" label="Go to start" size={7} onClick={() => onSeek(0)} />
+          <IconButton
+            icon="skipStart"
+            label={t("preview.goToStart")}
+            size={7}
+            onClick={() => onSeek(0)}
+          />
           <IconButton
             icon="stepBack"
-            label="Previous frame"
+            label={t("preview.prevFrame")}
             size={7}
             onClick={() => onStep(-1)}
           />
           <IconButton
             icon={playing ? "pause" : "play"}
-            label={playing ? "Pause (Space)" : "Play (Space)"}
+            label={playing ? t("preview.pause") : t("preview.play")}
             onClick={onTogglePlay}
             tone="go"
             active={playing}
           />
           <IconButton
             icon="stepForward"
-            label="Next frame"
+            label={t("preview.nextFrame")}
             size={7}
             onClick={() => onStep(1)}
           />
           <IconButton
             icon="skipEnd"
-            label="Go to end"
+            label={t("preview.goToEnd")}
             size={7}
             onClick={() => onSeek(duration)}
           />
@@ -767,7 +774,11 @@ export function Preview({
               // and the numbers live in the tooltip and the menu rows -
               // spelling them out here crowded the tray for nothing.
               <span
-                title={`Output size: ${ratioLabel(frame.width, frame.height)} · ${frame.width} x ${frame.height}`}
+                title={t("preview.outputSize", {
+                  ratio: ratioLabel(frame.width, frame.height),
+                  width: frame.width,
+                  height: frame.height,
+                })}
                 className={`flex items-center gap-1 rounded-md px-1.5 py-1 transition-colors ${
                   open
                     ? "bg-active text-primary"
@@ -790,11 +801,11 @@ export function Preview({
  * Engine-preview resolutions, as fractions of the output frame. The labels
  * follow the convention every editor uses; the pixels follow the project.
  */
-const PREVIEW_QUALITIES = [
-  { label: "Full", ratio: "1:1", value: 1 },
-  { label: "Half", ratio: "1:2", value: 0.5 },
-  { label: "Quarter", ratio: "1:4", value: 0.25 },
-] as const;
+const PREVIEW_QUALITIES: { labelKey: MsgKey; ratio: string; value: number }[] = [
+  { labelKey: "preview.full", ratio: "1:1", value: 1 },
+  { labelKey: "preview.half", ratio: "1:2", value: 0.5 },
+  { labelKey: "preview.quarter", ratio: "1:4", value: 0.25 },
+];
 
 /**
  * The preview-quality picker, next to the output-size menu it modifies:
@@ -809,6 +820,7 @@ function QualityMenu({
   quality: number;
   onQualityChange: (quality: number) => void;
 }) {
+  const { t } = useLocale();
   const active =
     PREVIEW_QUALITIES.find((option) => option.value === quality) ?? PREVIEW_QUALITIES[1];
   return (
@@ -817,7 +829,7 @@ function QualityMenu({
       direction="up"
       groups={[
         PREVIEW_QUALITIES.map((option) => ({
-          label: `${option.label} — ${option.ratio}`,
+          label: `${t(option.labelKey)} — ${option.ratio}`,
           leading: (
             <span
               className={`h-1 w-1 rounded-full ${
@@ -830,7 +842,7 @@ function QualityMenu({
       ]}
       trigger={(open) => (
         <span
-          title={`Preview quality: ${active.label} (${active.ratio})`}
+          title={t("preview.qualityHint", { label: t(active.labelKey), ratio: active.ratio })}
           className={`flex items-center gap-1 rounded-md px-1.5 py-1 transition-colors ${
             open
               ? "bg-active text-primary"

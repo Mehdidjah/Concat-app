@@ -131,8 +131,10 @@ describe("transformPatch mirrors SetClipTransform", () => {
 });
 
 describe("whyNotMerge phrases the engine's refusals", () => {
-  // The strings are the contract: the engine re-validates on the command and
-  // its error becomes the toast, so the tooltip and the toast must match.
+  // The keys' en.json values are the engine's own refusal sentences: the
+  // engine re-validates on the command and its error becomes the toast, so
+  // in English the tooltip and the toast must match. Other locales translate
+  // the tooltip while engine errors stay English.
   const halves = [
     clip({ id: "a", duration: 4 }),
     clip({ id: "b", start: 4, duration: 6, sourceStart: 4 }),
@@ -142,23 +144,23 @@ describe("whyNotMerge phrases the engine's refusals", () => {
     expect(whyNotMerge(project(halves), ["a", "b"])).toBeNull();
   });
 
-  test("each refusal uses the engine's own sentence", () => {
-    expect(whyNotMerge(project(halves), ["a"])).toBe("Select two or more clips to merge.");
+  test("each refusal names its reason", () => {
+    expect(whyNotMerge(project(halves), ["a"])).toBe("timeline.mergeNeedTwo");
     expect(
       whyNotMerge(project([halves[0], { ...halves[1], trackId: "T2" }]), ["a", "b"]),
-    ).toBe("Merged clips must be on the same track.");
+    ).toBe("timeline.mergeSameTrack");
     expect(
       whyNotMerge(project([halves[0], { ...halves[1], mediaId: "m2" }]), ["a", "b"]),
-    ).toBe("Merged clips must come from the same file.");
+    ).toBe("timeline.mergeSameFile");
     expect(
       whyNotMerge(project([halves[0], { ...halves[1], speed: 2 }]), ["a", "b"]),
-    ).toBe("Merged clips must play at the same speed.");
+    ).toBe("timeline.mergeSameSpeed");
     expect(
       whyNotMerge(project([halves[0], { ...halves[1], start: 5 }]), ["a", "b"]),
-    ).toBe("Merged clips must touch, with no gap or overlap.");
+    ).toBe("timeline.mergeMustTouch");
     expect(
       whyNotMerge(project([halves[0], { ...halves[1], sourceStart: 0 }]), ["a", "b"]),
-    ).toBe("These pieces are no longer in their original order.");
+    ).toBe("timeline.mergeOutOfOrder");
   });
 });
 

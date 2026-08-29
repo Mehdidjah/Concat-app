@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 
+import { useLocale, type MsgKey } from "../lib/i18n";
 import { Icon } from "./Icon";
 
 /** Output bounds the encoder accepts comfortably; also the preview footer's. */
@@ -32,6 +33,7 @@ export function ModifyProjectDialog({
   const [draftName, setDraftName] = useState(name);
   const [width, setWidth] = useState(String(frame.width));
   const [height, setHeight] = useState(String(frame.height));
+  const { t } = useLocale();
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -69,12 +71,12 @@ export function ModifyProjectDialog({
       <div className="surface w-full max-w-sm rounded-2xl p-6">
         <div className="mb-4 flex items-center gap-2">
           <Icon name="settings" size={16} className="text-accent" />
-          <h2 className="text-sm font-semibold text-primary">Project details</h2>
+          <h2 className="text-sm font-semibold text-primary">{t("modifyProject.title")}</h2>
         </div>
 
         <label className="mb-3 block">
           <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wider text-tertiary">
-            Name
+            {t("modifyProject.name")}
           </span>
           <input
             value={draftName}
@@ -90,13 +92,13 @@ export function ModifyProjectDialog({
         <div className="mb-3 grid grid-cols-2 gap-3">
           {(
             [
-              ["Width", width, setWidth],
-              ["Height", height, setHeight],
-            ] as const
-          ).map(([label, value, set]) => (
-            <label key={label} className="block">
+              ["modifyProject.width", width, setWidth],
+              ["modifyProject.height", height, setHeight],
+            ] as [MsgKey, string, (value: string) => void][]
+          ).map(([labelKey, value, set]) => (
+            <label key={labelKey} className="block">
               <span className="mb-1 block text-[11px] font-semibold uppercase tracking-wider text-tertiary">
-                {label}
+                {t(labelKey)}
               </span>
               <input
                 value={value}
@@ -112,13 +114,9 @@ export function ModifyProjectDialog({
         </div>
 
         <p className="mb-5 flex items-baseline justify-between text-xs text-secondary">
-          <span>Frame rate</span>
-          <span
-            className="font-technical text-primary"
-            title="Fixed for the project's lifetime: every cut is quantised to this grid,
-and changing it would re-time the whole edit."
-          >
-            {frameRate.toFixed(2)} fps · fixed
+          <span>{t("modifyProject.frameRate")}</span>
+          <span className="font-technical text-primary" title={t("modifyProject.frameRateHint")}>
+            {t("modifyProject.frameRateValue", { rate: frameRate.toFixed(2) })}
           </span>
         </p>
 
@@ -129,7 +127,7 @@ and changing it would re-time the whole edit."
             className="flex-1 cursor-pointer rounded-lg bg-hover px-4 py-2 text-sm text-primary
                        transition-colors hover:bg-active"
           >
-            Cancel
+            {t("common.cancel")}
           </button>
           <button
             type="button"
@@ -139,7 +137,7 @@ and changing it would re-time the whole edit."
                        text-on-accent transition-colors hover:bg-accent-hover
                        disabled:cursor-not-allowed disabled:opacity-40"
           >
-            {busy ? "Saving..." : "Save"}
+            {busy ? t("modifyProject.saving") : t("modifyProject.save")}
           </button>
         </div>
       </div>

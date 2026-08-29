@@ -1,6 +1,7 @@
 import type { ReactNode } from "react";
 
 import { activeTimeline, type Clip, type EditorProject, type MediaItem } from "../lib/editor";
+import { useLocale } from "../lib/i18n";
 import { shortDuration, timecode } from "../lib/time";
 
 /**
@@ -34,22 +35,32 @@ export function Inspector({
   /** Opens the project-details editor (name, output frame). */
   onModify: () => void;
 }) {
+  const { t } = useLocale();
+
   return (
     <div className="flex min-h-full flex-col">
       {!clip && !media ? (
         <>
           <div className="selectable flex-1 px-3 py-2">
-            <Section title="Project">
-              <Row label="Name" value={projectName} />
-              <Row label="Folder" value={projectPath} mono wrap />
-              <Row label="Output" value={`${frame.width} x ${frame.height}`} mono />
-              <Row label="Rate" value={`${frameRate.toFixed(2)} fps`} mono />
-              <Row label="Duration" value={timecode(duration, frameRate)} mono />
+            <Section title={t("inspector.project")}>
+              <Row label={t("inspector.name")} value={projectName} />
+              <Row label={t("inspector.folder")} value={projectPath} mono wrap />
+              <Row label={t("inspector.output")} value={`${frame.width} x ${frame.height}`} mono />
+              <Row label={t("inspector.rate")} value={`${frameRate.toFixed(2)} fps`} mono />
+              <Row label={t("inspector.duration")} value={timecode(duration, frameRate)} mono />
             </Section>
-            <Section title="Contents">
-              <Row label="Media" value={`${project.media.length}`} mono />
-              <Row label="Tracks" value={`${activeTimeline(project).tracks.length}`} mono />
-              <Row label="Clips" value={`${activeTimeline(project).clips.length}`} mono />
+            <Section title={t("inspector.contents")}>
+              <Row label={t("inspector.media")} value={`${project.media.length}`} mono />
+              <Row
+                label={t("inspector.tracks")}
+                value={`${activeTimeline(project).tracks.length}`}
+                mono
+              />
+              <Row
+                label={t("inspector.clips")}
+                value={`${activeTimeline(project).clips.length}`}
+                mono
+              />
             </Section>
           </div>
           <div className="flex justify-end border-t border-hairline px-3 py-2">
@@ -59,47 +70,67 @@ export function Inspector({
               className="cursor-pointer rounded-lg bg-hover px-3.5 py-1.5 text-xs font-medium
                          text-primary transition-colors hover:bg-active"
             >
-              Modify
+              {t("inspector.modify")}
             </button>
           </div>
         </>
       ) : (
         <div className="selectable px-3 py-2">
           {clip && (
-            <Section title="Clip">
-              <Row label="Name" value={clip.name} />
-              <Row label="Track" value={clip.trackId} mono />
-              <Row label="Start" value={timecode(clip.start, frameRate)} mono />
-              <Row label="Duration" value={timecode(clip.duration, frameRate)} mono />
-              <Row label="End" value={timecode(clip.start + clip.duration, frameRate)} mono />
-              <Row label="In point" value={timecode(clip.sourceStart, frameRate)} mono />
+            <Section title={t("inspector.clip")}>
+              <Row label={t("inspector.name")} value={clip.name} />
+              <Row label={t("inspector.track")} value={clip.trackId} mono />
+              <Row label={t("inspector.start")} value={timecode(clip.start, frameRate)} mono />
+              <Row label={t("inspector.duration")} value={timecode(clip.duration, frameRate)} mono />
+              <Row
+                label={t("inspector.end")}
+                value={timecode(clip.start + clip.duration, frameRate)}
+                mono
+              />
+              <Row
+                label={t("inspector.inPoint")}
+                value={timecode(clip.sourceStart, frameRate)}
+                mono
+              />
             </Section>
           )}
 
           {media && (
             <>
-              <Section title="Source">
-                <Row label="Name" value={media.name} />
-                <Row label="Path" value={media.path} mono wrap />
-                <Row label="Duration" value={shortDuration(media.duration)} mono />
+              <Section title={t("inspector.source")}>
+                <Row label={t("inspector.name")} value={media.name} />
+                <Row label={t("inspector.path")} value={media.path} mono wrap />
+                <Row label={t("inspector.duration")} value={shortDuration(media.duration)} mono />
               </Section>
 
               {media.width !== null && (
-                <Section title="Video">
-                  <Row label="Codec" value={media.videoCodec ?? "unknown"} />
-                  <Row label="Size" value={`${media.width} x ${media.height}`} mono />
+                <Section title={t("inspector.video")}>
                   <Row
-                    label="Rate"
-                    value={media.frameRate ? `${media.frameRate.toFixed(3)} fps` : "unknown"}
+                    label={t("inspector.codec")}
+                    value={media.videoCodec ?? t("inspector.unknown")}
+                  />
+                  <Row label={t("inspector.size")} value={`${media.width} x ${media.height}`} mono />
+                  <Row
+                    label={t("inspector.rate")}
+                    value={
+                      media.frameRate ? `${media.frameRate.toFixed(3)} fps` : t("inspector.unknown")
+                    }
                     mono
                   />
-                  <Row label="Exact" value={media.frameRateFraction ?? "unknown"} mono />
+                  <Row
+                    label={t("inspector.exact")}
+                    value={media.frameRateFraction ?? t("inspector.unknown")}
+                    mono
+                  />
                 </Section>
               )}
 
               {media.hasAudio && (
-                <Section title="Audio">
-                  <Row label="Codec" value={media.audioCodec ?? "unknown"} />
+                <Section title={t("inspector.audio")}>
+                  <Row
+                    label={t("inspector.codec")}
+                    value={media.audioCodec ?? t("inspector.unknown")}
+                  />
                 </Section>
               )}
             </>

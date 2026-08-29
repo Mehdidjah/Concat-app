@@ -13,6 +13,7 @@ import {
   type TransitionCategory,
 } from "../lib/effects";
 import type { MediaItem } from "../lib/editor";
+import { t, useLocale, type MsgKey } from "../lib/i18n";
 import { templateDelete, templateList, type TemplateInfo } from "../lib/engine";
 import { themeColor } from "../lib/theme";
 import { shortDuration } from "../lib/time";
@@ -33,12 +34,12 @@ export const ALL_MEDIA: BinFilter = { video: true, audio: true, image: true };
 /** The pages of the library strip, in display order. */
 type LibraryTab = "media" | "text" | "transitions" | "effects" | "templates";
 
-const TABS: { id: LibraryTab; label: string }[] = [
-  { id: "media", label: "Media" },
-  { id: "text", label: "Text" },
-  { id: "transitions", label: "Transitions" },
-  { id: "effects", label: "Effects" },
-  { id: "templates", label: "Templates" },
+const TABS: { id: LibraryTab; labelKey: MsgKey }[] = [
+  { id: "media", labelKey: "mediaBin.tabMedia" },
+  { id: "text", labelKey: "mediaBin.tabText" },
+  { id: "transitions", labelKey: "mediaBin.tabTransitions" },
+  { id: "effects", labelKey: "mediaBin.tabEffects" },
+  { id: "templates", labelKey: "mediaBin.tabTemplates" },
 ];
 
 /**
@@ -124,6 +125,7 @@ export const MediaBin = memo(function MediaBin({
   const [tab, setTab] = useState<LibraryTab>("media");
   const [effectCategory, setEffectCategory] = useState<EffectCategory>("basic");
   const [transitionCategory, setTransitionCategory] = useState<TransitionCategory>("basic");
+  const { t } = useLocale();
 
   return (
     <Panel
@@ -152,7 +154,7 @@ export const MediaBin = memo(function MediaBin({
                                 : "text-secondary hover:text-primary"
                             }`}
               >
-                {entry.label}
+                {t(entry.labelKey)}
               </button>
             ))}
           </div>
@@ -163,12 +165,12 @@ export const MediaBin = memo(function MediaBin({
           <aside className="thin-scroll w-26 shrink-0 overflow-y-auto border-r border-hairline py-1">
             {tab === "media" && <MediaCategories items={items} filter={filter} onFilter={onFilter} />}
             {tab === "text" && (
-              <CategoryGroup title="Text">
-                <CategoryRow label="Titles" selected onSelect={() => {}} />
+              <CategoryGroup title={t("mediaBin.tabText")}>
+                <CategoryRow label={t("mediaBin.titles")} selected onSelect={() => {}} />
               </CategoryGroup>
             )}
             {tab === "transitions" && (
-              <CategoryGroup title="Transitions">
+              <CategoryGroup title={t("mediaBin.tabTransitions")}>
                 {TRANSITION_CATEGORIES.map((category) => (
                   <CategoryRow
                     key={category.id}
@@ -180,7 +182,7 @@ export const MediaBin = memo(function MediaBin({
               </CategoryGroup>
             )}
             {tab === "effects" && (
-              <CategoryGroup title="Video Effects">
+              <CategoryGroup title={t("mediaBin.videoEffects")}>
                 {EFFECT_CATEGORIES.map((category) => (
                   <CategoryRow
                     key={category.id}
@@ -192,8 +194,8 @@ export const MediaBin = memo(function MediaBin({
               </CategoryGroup>
             )}
             {tab === "templates" && (
-              <CategoryGroup title="Templates">
-                <CategoryRow label="My templates" selected onSelect={() => {}} />
+              <CategoryGroup title={t("mediaBin.tabTemplates")}>
+                <CategoryRow label={t("mediaBin.myTemplates")} selected onSelect={() => {}} />
               </CategoryGroup>
             )}
           </aside>
@@ -293,7 +295,11 @@ function onlyKind(kind: keyof BinFilter): BinFilter {
   return { video: false, audio: false, image: false, [kind]: true };
 }
 
-const KIND_LABELS = { video: "Video", audio: "Audio", image: "Images" } as const;
+const KIND_LABEL_KEYS: Record<keyof BinFilter, MsgKey> = {
+  video: "mediaBin.kindVideo",
+  audio: "mediaBin.kindAudio",
+  image: "mediaBin.kindImages",
+};
 
 function MediaCategories({
   items,
@@ -310,10 +316,12 @@ function MediaCategories({
   // row for that state, so nothing highlights until a category is clicked.
   const selected = enabled.length === 3 ? "all" : enabled.length === 1 ? enabled[0] : null;
 
+  const { t } = useLocale();
+
   return (
-    <CategoryGroup title="Media">
+    <CategoryGroup title={t("mediaBin.tabMedia")}>
       <CategoryRow
-        label="All media"
+        label={t("mediaBin.allMedia")}
         count={items.length}
         selected={selected === "all"}
         onSelect={() => onFilter(ALL_MEDIA)}
@@ -321,7 +329,7 @@ function MediaCategories({
       {kinds.map((kind) => (
         <CategoryRow
           key={kind}
-          label={KIND_LABELS[kind]}
+          label={t(KIND_LABEL_KEYS[kind])}
           count={items.filter((item) => item.kind === kind).length}
           selected={selected === kind}
           onSelect={() => onFilter(onlyKind(kind))}
@@ -370,21 +378,23 @@ function MediaPage({
   onAddToTimeline: (mediaId: string) => void;
   onToggleSlot: (mediaId: string, placeholder: boolean) => void;
 }) {
+  const { t } = useLocale();
+
   const browse = async () => {
     if (busy) return;
     const chosen = await open({
       multiple: true,
-      title: "Import media",
+      title: t("mediaBin.importMedia"),
       filters: [
         {
-          name: "Media",
+          name: t("mediaBin.mediaFilter"),
           extensions: [
             "mp4", "mov", "mkv", "webm", "avi", "m4v",
             "mp3", "wav", "flac", "aac", "m4a", "ogg", "opus",
             "png", "jpg", "jpeg", "webp", "bmp", "tif", "tiff", "avif", "gif",
           ],
         },
-        { name: "All files", extensions: ["*"] },
+        { name: t("mediaBin.allFilesFilter"), extensions: ["*"] },
       ],
     });
 
@@ -492,7 +502,7 @@ function MediaPage({
                      disabled:cursor-not-allowed disabled:opacity-40"
         >
           <Icon name="import" size={14} />
-          {busy ? "Importing..." : "Import media"}
+          {busy ? t("mediaBin.importing") : t("mediaBin.importMedia")}
         </button>
       </div>
 
@@ -500,7 +510,7 @@ function MediaPage({
         <div className="mx-2 mb-2 flex items-center justify-between rounded-lg bg-sunken
                         px-2.5 py-1.5">
           <span className="text-[11px] text-secondary">
-            {selectedIds.length} selected - drag any of them to place all
+            {t("mediaBin.selectedCount", { count: selectedIds.length })}
           </span>
           <button
             type="button"
@@ -508,7 +518,7 @@ function MediaPage({
             className="cursor-pointer rounded px-2 py-0.5 text-[11px] font-medium text-danger
                        transition-colors hover:bg-danger-soft"
           >
-            Delete
+            {t("mediaBin.delete")}
           </button>
         </div>
       )}
@@ -526,9 +536,7 @@ function MediaPage({
             />
           }
         >
-          {dropping
-            ? "Release to import"
-            : "Drop video and audio files anywhere in the window, or paste a path above."}
+          {dropping ? t("mediaBin.releaseToImport") : t("mediaBin.dropHint")}
         </Empty>
       ) : (
         <ul className={CARD_GRID}>
@@ -550,9 +558,7 @@ function MediaPage({
               onDoubleClick={() => onAddToTimeline(item.id)}
               // The details that used to sit on a second line live here now.
               // They are worth having, but not worth a permanent row each.
-              title={`${item.name}
-${describe(item)}
-Drag onto a track, or double-click to add at the playhead`}
+              title={`${item.name}\n${describe(item)}\n${t("mediaBin.cardHint")}`}
               className="group cursor-grab select-none active:cursor-grabbing"
             >
               <div
@@ -578,7 +584,7 @@ Drag onto a track, or double-click to add at the playhead`}
 
                 <span className="pointer-events-none absolute bottom-1 right-1 rounded bg-black/55
                                  px-1 py-px font-technical text-[10px] text-white">
-                  {item.kind === "image" ? "still" : shortDuration(item.duration)}
+                  {item.kind === "image" ? t("mediaBin.still") : shortDuration(item.duration)}
                 </span>
 
                 {/* The slot state stays visible; only the controls are hover-only.
@@ -588,7 +594,7 @@ Drag onto a track, or double-click to add at the playhead`}
                                    gap-1 rounded bg-accent px-1 py-px font-technical text-[10px]
                                    text-on-accent">
                     <Icon name="slot" size={9} />
-                    Slot
+                    {t("mediaBin.slotBadge")}
                   </span>
                 )}
 
@@ -597,13 +603,11 @@ Drag onto a track, or double-click to add at the playhead`}
                   aria-pressed={item.placeholder ?? false}
                   aria-label={
                     item.placeholder
-                      ? `Unmark ${item.name} as a template slot`
-                      : `Mark ${item.name} as a template slot`
+                      ? t("mediaBin.unmarkSlot", { name: item.name })
+                      : t("mediaBin.markSlot", { name: item.name })
                   }
                   title={
-                    item.placeholder
-                      ? "No longer a template slot"
-                      : "Make this a template slot: saved templates ask for the user's own media here"
+                    item.placeholder ? t("mediaBin.unmarkSlotHint") : t("mediaBin.markSlotHint")
                   }
                   onClick={(event) => {
                     event.stopPropagation();
@@ -621,8 +625,8 @@ Drag onto a track, or double-click to add at the playhead`}
 
                 <button
                   type="button"
-                  aria-label={`Remove ${item.name}`}
-                  title="Remove from bin"
+                  aria-label={t("mediaBin.removeItem", { name: item.name })}
+                  title={t("mediaBin.removeFromBin")}
                   onClick={(event) => {
                     event.stopPropagation();
                     onRemove(item.id);
@@ -662,20 +666,23 @@ Drag onto a track, or double-click to add at the playhead`}
 
 /** The second line that used to be shown for every item, now on hover. */
 function describe(item: MediaItem): string {
-  if (item.kind === "audio") return item.audioCodec ?? "audio";
+  if (item.kind === "audio") return item.audioCodec ?? t("mediaBin.audioFallback");
   const size = `${item.width}x${item.height}`;
-  return item.kind === "image" ? `${size} still` : `${size} · ${item.frameRate?.toFixed(2)} fps`;
+  return item.kind === "image"
+    ? t("mediaBin.sizeStill", { size })
+    : `${size} · ${item.frameRate?.toFixed(2)} fps`;
 }
 
 // ── the text page ────────────────────────────────────────────────────────────
 
 function TextPage({ onAddText }: { onAddText: () => void }) {
+  const { t } = useLocale();
   return (
     <ul className={`${CARD_GRID} pt-2`}>
       <li
         onClick={onAddText}
         onDoubleClick={onAddText}
-        title="Adds a title at the playhead"
+        title={t("mediaBin.addTitleHint")}
         className="group cursor-pointer select-none"
       >
         <div
@@ -690,7 +697,7 @@ function TextPage({ onAddText }: { onAddText: () => void }) {
           </span>
         </div>
         <span className="mt-1 block truncate text-[11px] leading-tight text-secondary">
-          Default title
+          {t("mediaBin.defaultTitle")}
         </span>
       </li>
     </ul>
@@ -716,9 +723,12 @@ function CatalogueCard({
   onApply?: () => void;
   children: ReactNode;
 }) {
+  const { t } = useLocale();
   return (
     <li
-      title={`${label}\n${blurb}\n${onApply ? "Click to apply to the selected clip" : "Not available yet"}`}
+      title={`${label}\n${blurb}\n${
+        onApply ? t("mediaBin.applyHint") : t("mediaBin.notAvailable")
+      }`}
       onClick={onApply}
       className={`group select-none ${onApply ? "cursor-pointer" : ""}`}
     >
@@ -741,7 +751,7 @@ function CatalogueCard({
             className="absolute bottom-1 right-1 rounded bg-black/55 px-1 py-px font-technical
                        text-[10px] text-white"
           >
-            Soon
+            {t("mediaBin.soon")}
           </span>
         )}
       </div>
@@ -858,6 +868,7 @@ function TemplatesPage({
   onSaveTemplate: () => void;
 }) {
   const [templates, setTemplates] = useState<TemplateInfo[] | null>(null);
+  const { t, tp } = useLocale();
 
   useEffect(() => {
     let cancelled = false;
@@ -887,14 +898,13 @@ function TemplatesPage({
                      transition-colors hover:border-accent hover:bg-hover hover:text-primary"
         >
           <Icon name="slot" size={14} />
-          Save this project as a template
+          {t("mediaBin.saveAsTemplate")}
         </button>
       </div>
 
       {templates !== null && templates.length === 0 ? (
         <Empty icon={<Icon name="slot" size={28} strokeWidth={1.5} />}>
-          No templates yet. Mark media as slots, then save this project as a template - it will
-          ask for the user's own clips in those slots.
+          {t("mediaBin.noTemplates")}
         </Empty>
       ) : (
         <ul className={CARD_GRID}>
@@ -902,9 +912,9 @@ function TemplatesPage({
             <li key={template.path} className="group relative select-none">
               <button
                 type="button"
-                title={`${template.name}
-${template.slots.length} slot${template.slots.length === 1 ? "" : "s"} · ${template.width} x ${template.height}
-Click to start a new project from this template`}
+                title={`${template.name}\n${tp("mediaBin.slotCount", template.slots.length)} · ${
+                  template.width
+                } x ${template.height}\n${t("mediaBin.useTemplateHint")}`}
                 onClick={() => onUse(template)}
                 className="w-full cursor-pointer text-left"
               >
@@ -913,13 +923,13 @@ Click to start a new project from this template`}
                   {template.name}
                 </span>
                 <span className="block font-technical text-[10px] text-tertiary">
-                  {template.slots.length} slot{template.slots.length === 1 ? "" : "s"}
+                  {tp("mediaBin.slotCount", template.slots.length)}
                 </span>
               </button>
               <button
                 type="button"
-                aria-label={`Delete the template ${template.name}`}
-                title="Delete this template for good"
+                aria-label={t("mediaBin.deleteTemplate", { name: template.name })}
+                title={t("mediaBin.deleteTemplateHint")}
                 onClick={(event) => {
                   event.stopPropagation();
                   void remove(template);

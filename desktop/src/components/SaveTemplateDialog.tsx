@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 
+import { useLocale } from "../lib/i18n";
 import { Icon } from "./Icon";
 
 /**
@@ -26,6 +27,7 @@ export function SaveTemplateDialog({
   onCancel: () => void;
 }) {
   const [name, setName] = useState(defaultName);
+  const { t, tp } = useLocale();
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -51,21 +53,17 @@ export function SaveTemplateDialog({
       <div className="surface w-full max-w-sm rounded-2xl p-6">
         <div className="mb-2 flex items-center gap-2">
           <Icon name="slot" size={16} className="text-accent" />
-          <h2 className="text-sm font-semibold text-primary">Save as template</h2>
+          <h2 className="text-sm font-semibold text-primary">{t("saveTemplate.title")}</h2>
         </div>
         <p className="mb-4 text-xs leading-relaxed text-secondary">
-          {slotCount > 0
-            ? `${slotCount} slot${slotCount === 1 ? "" : "s"} will ask for the user's own media. ` +
-              "Everything else - music, overlays, titles - is copied into the template."
-            : "No media is marked as a slot, so this template opens as a ready-made project. " +
-              "Mark slots in the bin first if users should supply their own clips."}
+          {slotCount > 0 ? tp("saveTemplate.slots", slotCount) : t("saveTemplate.noSlots")}
         </p>
 
         <input
           value={name}
           autoFocus
           spellCheck={false}
-          placeholder="Template name"
+          placeholder={t("saveTemplate.namePlaceholder")}
           onChange={(event) => setName(event.target.value)}
           onFocus={(event) => event.currentTarget.select()}
           onKeyDown={(event) => event.key === "Enter" && save()}
@@ -80,7 +78,7 @@ export function SaveTemplateDialog({
             className="flex-1 cursor-pointer rounded-lg bg-hover px-4 py-2 text-sm text-primary
                        transition-colors hover:bg-active"
           >
-            Cancel
+            {t("common.cancel")}
           </button>
           <button
             type="button"
@@ -90,7 +88,7 @@ export function SaveTemplateDialog({
                        text-on-accent transition-colors hover:bg-accent-hover
                        disabled:cursor-not-allowed disabled:opacity-40"
           >
-            {busy ? "Saving..." : "Save template"}
+            {busy ? t("saveTemplate.saving") : t("saveTemplate.save")}
           </button>
         </div>
       </div>

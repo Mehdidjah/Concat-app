@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 
+import { useLocale } from "../lib/i18n";
 import { Icon } from "./Icon";
 
 /**
@@ -21,6 +22,7 @@ export function ErrorNotice({
   className?: string;
 }) {
   const [copied, setCopied] = useState(false);
+  const { t } = useLocale();
   const timer = useRef<number | undefined>(undefined);
   useEffect(() => () => window.clearTimeout(timer.current), []);
 
@@ -50,8 +52,8 @@ export function ErrorNotice({
       </p>
       <button
         type="button"
-        title={copied ? "Copied" : "Copy error"}
-        aria-label="Copy error"
+        title={copied ? t("errorNotice.copied") : t("errorNotice.copy")}
+        aria-label={t("errorNotice.copy")}
         onClick={() => void copy()}
         className="shrink-0 cursor-pointer text-danger opacity-70 hover:opacity-100"
       >
@@ -60,7 +62,7 @@ export function ErrorNotice({
       {onDismiss && (
         <button
           type="button"
-          aria-label="Dismiss"
+          aria-label={t("errorNotice.dismiss")}
           onClick={onDismiss}
           className="shrink-0 cursor-pointer text-danger opacity-70 hover:opacity-100"
         >

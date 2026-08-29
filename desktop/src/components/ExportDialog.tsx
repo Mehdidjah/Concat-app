@@ -6,17 +6,28 @@ import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import type { ExportClip, ExportProgress } from "../lib/engine";
 import type { ExportTitle } from "../lib/monitor";
 import { cancelExport, exportProject, onExportProgress, writeCacheFile } from "../lib/engine";
+import { useLocale, type MsgKey } from "../lib/i18n";
 import { rasterizeTitle } from "../lib/rasterize";
 import { shortDuration } from "../lib/time";
 import { ErrorNotice } from "./ErrorNotice";
 import { Icon } from "./Icon";
 
 /** Quality presets, in the terms a person picking one actually thinks in. */
-const QUALITIES = [
-  { label: "High", crf: 18, preset: "slow", hint: "large" },
-  { label: "Balanced", crf: 22, preset: "medium", hint: "default" },
-  { label: "Small", crf: 27, preset: "fast", hint: "compact" },
-] as const;
+const QUALITIES: {
+  labelKey: MsgKey;
+  crf: number;
+  preset: string;
+  hintKey: MsgKey;
+}[] = [
+  { labelKey: "export.quality.high", crf: 18, preset: "slow", hintKey: "export.quality.highHint" },
+  {
+    labelKey: "export.quality.balanced",
+    crf: 22,
+    preset: "medium",
+    hintKey: "export.quality.balancedHint",
+  },
+  { labelKey: "export.quality.small", crf: 27, preset: "fast", hintKey: "export.quality.smallHint" },
+];
 
 /**
  * A title bound for the file. The engine composites pixels, not fonts, so the
@@ -105,6 +116,7 @@ export function ExportDialog({
   const [output, setOutput] = useState(`${projectPath}/${projectName}.mp4`);
   const [quality, setQuality] = useState<(typeof QUALITIES)[number]>(QUALITIES[1]);
   const [phase, setPhase] = useState<Phase>({ kind: "idle" });
+  const { t, tp } = useLocale();
   const unlisten = useRef<(() => void) | null>(null);
   // When the engine started counting frames, for the time-left estimate.
   const startedAt = useRef<number | null>(null);
@@ -118,9 +130,9 @@ export function ExportDialog({
 
   const browse = async () => {
     const chosen = await save({
-      title: "Export to",
+      title: t("export.saveTitle"),
       defaultPath: output,
-      filters: [{ name: "MP4 video", extensions: ["mp4"] }],
+      filters: [{ name: t("export.mp4Filter"), extensions: ["mp4"] }],
     });
     if (chosen) setOutput(chosen);
   };
@@ -138,7 +150,7 @@ export function ExportDialog({
       for (const [index, title] of titles.entries()) {
         setPhase({
           kind: "running",
-          progress: { frame: index, total: titles.length, stage: "drawing titles" },
+          progress: { frame: index, total: titles.length, stage: t("export.stageTitles") },
         });
         const bytes = await rasterizeTitle(title.style, title.offsetX, title.offsetY, width, height);
         const key = `title-${index}-${title.clipId.replace(/[^A-Za-z0-9_-]/g, "")}.png`;
@@ -188,7 +200,9 @@ export function ExportDialog({
     const { frame, total } = phase.progress;
     const elapsed = (performance.now() - startedAt.current) / 1000;
     if (frame > rateNum / rateDen && total > frame && elapsed > 1) {
-      remaining = `about ${shortDuration((elapsed / frame) * (total - frame))} left`;
+      remaining = t("export.timeLeft", {
+        duration: shortDuration((elapsed / frame) * (total - frame)),
+      });
     }
   }
 
@@ -205,11 +219,11 @@ export function ExportDialog({
       <div className="surface w-full max-w-md rounded-2xl p-6">
         <div className="mb-5 flex items-center gap-2">
           <Icon name="export" size={17} className="text-accent" />
-          <h2 className="flex-1 text-sm font-semibold text-primary">Export</h2>
+          <h2 className="flex-1 text-sm font-semibold text-primary">{t("common.export")}</h2>
           {!running && (
             <button
               type="button"
-              aria-label="Close"
+              aria-label={t("common.close")}
               onClick={onClose}
               className="cursor-pointer rounded p-1 text-secondary hover:bg-hover hover:text-primary"
             >
@@ -219,20 +233,23 @@ export function ExportDialog({
         </div>
 
         <dl className="mb-5 space-y-1 rounded-lg bg-sunken px-3 py-2.5">
-          <Row label="Format" value={`${width} x ${height} · ${(rateNum / rateDen).toFixed(2)} fps`} />
-          <Row label="Duration" value={shortDuration(duration)} />
           <Row
-            label="Contents"
+            label={t("export.format")}
+            value={`${width} x ${height} · ${(rateNum / rateDen).toFixed(2)} fps`}
+          />
+          <Row label={t("export.duration")} value={shortDuration(duration)} />
+          <Row
+            label={t("export.contents")}
             value={
-              `${clipCount} clip${clipCount === 1 ? "" : "s"}` +
-              (titles.length > 0 ? ` · ${titles.length} title${titles.length === 1 ? "" : "s"}` : "")
+              tp("export.clips", clipCount) +
+              (titles.length > 0 ? ` · ${tp("export.titles", titles.length)}` : "")
             }
           />
         </dl>
 
         {phase.kind === "idle" || phase.kind === "failed" ? (
           <>
-            <Label>Save to</Label>
+            <Label>{t("export.saveTo")}</Label>
             <div className="mb-5 flex gap-1.5">
               <input
                 value={output}
@@ -248,27 +265,27 @@ export function ExportDialog({
                            text-xs text-primary transition-colors hover:bg-active"
               >
                 <Icon name="folder" size={13} />
-                Browse
+                {t("export.browse")}
               </button>
             </div>
 
-            <Label>Quality</Label>
+            <Label>{t("export.qualityTitle")}</Label>
             <div className="mb-5 grid grid-cols-3 gap-1.5">
               {QUALITIES.map((option) => (
                 <button
-                  key={option.label}
+                  key={option.labelKey}
                   type="button"
-                  aria-pressed={option.label === quality.label}
+                  aria-pressed={option.crf === quality.crf}
                   onClick={() => setQuality(option)}
                   className={`flex cursor-pointer flex-col items-center gap-0.5 rounded-lg px-2 py-2
                               transition-colors ${
-                                option.label === quality.label
+                                option.crf === quality.crf
                                   ? "bg-accent text-on-accent"
                                   : "bg-hover text-secondary hover:bg-active"
                               }`}
                 >
-                  <span className="text-xs">{option.label}</span>
-                  <span className="text-[10px] opacity-60">{option.hint}</span>
+                  <span className="text-xs">{t(option.labelKey)}</span>
+                  <span className="text-[10px] opacity-60">{t(option.hintKey)}</span>
                 </button>
               ))}
             </div>
@@ -286,14 +303,18 @@ export function ExportDialog({
                          hover:bg-accent-hover disabled:cursor-not-allowed disabled:opacity-40"
             >
               <Icon name="export" size={15} />
-              {empty ? "Nothing to export" : phase.kind === "failed" ? "Try again" : "Export"}
+              {empty
+                ? t("export.nothing")
+                : phase.kind === "failed"
+                  ? t("export.tryAgain")
+                  : t("common.export")}
             </button>
           </>
         ) : phase.kind === "running" ? (
           <div className="py-2">
             <div className="mb-2 flex items-baseline justify-between gap-3">
               <span className="min-w-0 truncate text-xs text-primary">
-                {phase.progress?.stage ?? "starting"}
+                {phase.progress?.stage ?? t("export.starting")}
               </span>
               <span className="shrink-0 font-technical text-sm tabular-nums text-primary">
                 {percent === null ? "" : `${percent}%`}
@@ -308,7 +329,10 @@ export function ExportDialog({
             <div className="mt-2 flex items-baseline justify-between gap-3">
               {phase.progress && phase.progress.total > 0 ? (
                 <p className="font-technical text-[10px] text-tertiary">
-                  frame {phase.progress.frame} of {phase.progress.total}
+                  {t("export.frameOf", {
+                    frame: phase.progress.frame,
+                    total: phase.progress.total,
+                  })}
                 </p>
               ) : (
                 <span />
@@ -323,14 +347,14 @@ export function ExportDialog({
               className="mt-4 w-full cursor-pointer rounded-lg bg-hover px-4 py-2 text-xs
                          text-secondary transition-colors hover:bg-active hover:text-primary"
             >
-              Cancel
+              {t("common.cancel")}
             </button>
           </div>
         ) : (
           <div className="py-1">
             <p className="mb-1 flex items-center gap-2 text-sm text-success">
               <Icon name="check" size={14} />
-              Export finished
+              {t("export.finished")}
             </p>
             <p className="mb-5 wrap-break-word font-technical text-[10px] text-secondary">{phase.path}</p>
             <div className="flex gap-1.5">
@@ -341,7 +365,7 @@ export function ExportDialog({
                            bg-hover px-4 py-2.5 text-sm text-primary transition-colors hover:bg-active"
               >
                 <Icon name="folder" size={13} />
-                Show in Finder
+                {t("export.reveal")}
               </button>
               <button
                 type="button"
@@ -349,7 +373,7 @@ export function ExportDialog({
                 className="flex-1 cursor-pointer rounded-lg bg-accent px-4 py-2.5 text-sm font-medium
                            text-on-accent transition-colors hover:bg-accent-hover"
               >
-                Done
+                {t("export.done")}
               </button>
             </div>
           </div>

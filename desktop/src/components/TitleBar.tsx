@@ -4,6 +4,7 @@ import { isTauri } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 
 import logo from "../assets/wolfcut-logo.png";
+import { useLocale } from "../lib/i18n";
 import type { Theme } from "../lib/theme";
 import { Icon } from "./Icon";
 import { Menu, type MenuOption } from "./Menu";
@@ -54,6 +55,7 @@ export const TitleBar = memo(function TitleBar({
   onOpenSettings?: () => void;
 }) {
   const [maximized, setMaximized] = useState(false);
+  const { t } = useLocale();
   const native = isTauri();
   const macOS = navigator.userAgent.includes("Mac");
 
@@ -127,8 +129,8 @@ export const TitleBar = memo(function TitleBar({
       {onOpenSettings && (
         <button
           type="button"
-          title="Settings"
-          aria-label="Open settings"
+          title={t("settings.title")}
+          aria-label={t("titleBar.openSettings")}
           onClick={onOpenSettings}
           className="flex h-6 w-6 cursor-pointer items-center justify-center rounded-md
                      text-secondary transition-colors hover:bg-hover hover:text-primary"
@@ -139,8 +141,10 @@ export const TitleBar = memo(function TitleBar({
 
       <button
         type="button"
-        title={theme === "dark" ? "Switch to light" : "Switch to dark"}
-        aria-label={theme === "dark" ? "Switch to light theme" : "Switch to dark theme"}
+        title={theme === "dark" ? t("titleBar.switchLight") : t("titleBar.switchDark")}
+        aria-label={
+          theme === "dark" ? t("titleBar.switchLightAria") : t("titleBar.switchDarkAria")
+        }
         onClick={onToggleTheme}
         className="mr-1 flex h-6 w-6 cursor-pointer items-center justify-center rounded-md
                    text-secondary transition-colors hover:bg-hover hover:text-primary"
@@ -152,16 +156,16 @@ export const TitleBar = memo(function TitleBar({
 
       {native && !macOS && (
         <div className="flex h-full items-stretch">
-          <WindowButton label="Minimise" onClick={() => void control("minimize")}>
+          <WindowButton label={t("titleBar.minimise")} onClick={() => void control("minimize")}>
             <Icon name="winMinimize" size={14} strokeWidth={1.5} />
           </WindowButton>
           <WindowButton
-            label={maximized ? "Restore" : "Maximise"}
+            label={maximized ? t("titleBar.restore") : t("titleBar.maximise")}
             onClick={() => void control("toggle")}
           >
             <Icon name={maximized ? "winRestore" : "winMaximize"} size={13} strokeWidth={1.5} />
           </WindowButton>
-          <WindowButton label="Close" onClick={() => void control("close")} danger>
+          <WindowButton label={t("common.close")} onClick={() => void control("close")} danger>
             <Icon name="close" size={15} strokeWidth={1.5} />
           </WindowButton>
         </div>

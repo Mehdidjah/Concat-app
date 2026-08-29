@@ -1,4 +1,5 @@
 import { MAX_SCALE, MIN_SCALE, type Clip } from "../lib/editor";
+import { t, useLocale } from "../lib/i18n";
 import { Group, Slider, Toggle } from "./controls";
 import { Icon } from "./Icon";
 import { Empty } from "./Panel";
@@ -29,7 +30,7 @@ function fromDecibels(decibels: number): number {
 }
 
 function formatDecibels(decibels: number): string {
-  if (decibels <= MIN_DB) return "silent";
+  if (decibels <= MIN_DB) return t("adjust.silent");
   if (Math.abs(decibels) < 0.05) return "0.0 dB";
   return `${decibels > 0 ? "+" : ""}${decibels.toFixed(1)} dB`;
 }
@@ -59,10 +60,12 @@ export function AdjustPanel({
   /** Separate, because changing speed also rescales the clip's duration. */
   onSpeedChange: (speed: number) => void;
 }) {
+  const { t } = useLocale();
+
   if (!clip) {
     return (
       <Empty icon={<Icon name="settings" size={26} strokeWidth={1.5} />}>
-        Select a single clip to adjust it.
+        {t("adjust.empty")}
       </Empty>
     );
   }
@@ -75,12 +78,9 @@ export function AdjustPanel({
   return (
     <div className="px-3 py-3">
       {hasPicture && (
-        <Group
-          title="Transform"
-          help="You can also drag the picture in the preview - corners scale, the handle above rotates. Double-click any label to reset it, or click a value to type one."
-        >
+        <Group title={t("adjust.transform")} help={t("adjust.transformHelp")}>
           <Slider
-            label="Scale"
+            label={t("adjust.scale")}
             value={clip.scale}
             min={MIN_SCALE}
             max={MAX_SCALE}
@@ -91,7 +91,7 @@ export function AdjustPanel({
             onCommit={onCommit}
           />
           <Slider
-            label="Position X"
+            label={t("adjust.positionX")}
             value={clip.offsetX}
             min={-1}
             max={1}
@@ -102,7 +102,7 @@ export function AdjustPanel({
             onCommit={onCommit}
           />
           <Slider
-            label="Position Y"
+            label={t("adjust.positionY")}
             value={clip.offsetY}
             min={-1}
             max={1}
@@ -113,7 +113,7 @@ export function AdjustPanel({
             onCommit={onCommit}
           />
           <Slider
-            label="Rotation"
+            label={t("adjust.rotation")}
             value={clip.rotation}
             min={-180}
             max={180}
@@ -124,7 +124,7 @@ export function AdjustPanel({
             onCommit={onCommit}
           />
           <Slider
-            label="Opacity"
+            label={t("adjust.opacity")}
             value={clip.opacity}
             min={0}
             max={1}
@@ -138,9 +138,9 @@ export function AdjustPanel({
       )}
 
       {hasSound && (
-      <Group title="Volume">
+      <Group title={t("adjust.volume")}>
         <Slider
-          label="Level"
+          label={t("adjust.level")}
           value={toDecibels(clip.volume)}
           min={MIN_DB}
           max={MAX_DB}
@@ -154,15 +154,12 @@ export function AdjustPanel({
       )}
 
       {clip.kind !== "image" && (
-        <Group
-          title="Speed"
-          help="The clip covers the same material either way, so its length on the timeline changes to match."
-        >
+        <Group title={t("adjust.speed")} help={t("adjust.speedHelp")}>
           {/* The engine's full range. The track is linear so the useful
               0.25-4x band sits left of centre; the number field beside it is
               how the extremes are actually dialled in. */}
           <Slider
-            label="Rate"
+            label={t("adjust.rate")}
             value={clip.speed}
             min={0.0625}
             max={16}
@@ -173,8 +170,8 @@ export function AdjustPanel({
             onCommit={onCommit}
           />
           <Toggle
-            label="Change pitch with speed"
-            hint="Off keeps the voice where it is. On is tape behaviour - faster also means higher."
+            label={t("adjust.pitchToggle")}
+            hint={t("adjust.pitchHint")}
             checked={!clip.preservePitch}
             onChange={(checked) => { onChange({ preservePitch: !checked }); onCommit(); }}
           />
@@ -182,25 +179,25 @@ export function AdjustPanel({
       )}
 
       {hasSound && (
-      <Group title="Fades">
+      <Group title={t("adjust.fades")}>
         <Slider
-          label="Fade in"
+          label={t("adjust.fadeIn")}
           value={Math.min(clip.fadeIn, fadeLimit)}
           min={0}
           max={fadeLimit}
           step={0.05}
-          format={(value) => (value === 0 ? "none" : `${value.toFixed(2)}s`)}
+          format={(value) => (value === 0 ? t("adjust.none") : `${value.toFixed(2)}s`)}
           onReset={() => { onChange({ fadeIn: 0 }); onCommit(); }}
           onChange={(fadeIn) => onChange({ fadeIn })}
           onCommit={onCommit}
         />
         <Slider
-          label="Fade out"
+          label={t("adjust.fadeOut")}
           value={Math.min(clip.fadeOut, fadeLimit)}
           min={0}
           max={fadeLimit}
           step={0.05}
-          format={(value) => (value === 0 ? "none" : `${value.toFixed(2)}s`)}
+          format={(value) => (value === 0 ? t("adjust.none") : `${value.toFixed(2)}s`)}
           onReset={() => { onChange({ fadeOut: 0 }); onCommit(); }}
           onChange={(fadeOut) => onChange({ fadeOut })}
           onCommit={onCommit}

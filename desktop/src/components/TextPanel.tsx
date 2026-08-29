@@ -1,4 +1,5 @@
 import type { Clip, CustomFont } from "../lib/editor";
+import { t, useLocale } from "../lib/i18n";
 import { FONTS, WEIGHTS, type TextStyle } from "../lib/text";
 import { Group, Slider, Toggle } from "./controls";
 import { Icon } from "./Icon";
@@ -33,10 +34,12 @@ export function TextPanel({
   onAddFont: () => void;
   onRemoveFont: (family: string) => void;
 }) {
+  const { t } = useLocale();
+
   if (!clip || clip.kind !== "text" || !clip.text) {
     return (
       <Empty icon={<Icon name="type" size={26} strokeWidth={1.5} />}>
-        Select a text clip to style it.
+        {t("textPanel.empty")}
       </Empty>
     );
   }
@@ -65,28 +68,28 @@ export function TextPanel({
 
   return (
     <div className="px-3 py-3">
-      <Group title="Content">
+      <Group title={t("textPanel.content")}>
         <textarea
           value={style.content}
           onChange={(event) => set({ content: event.target.value })}
           onBlur={onCommit}
           rows={3}
           spellCheck={false}
-          placeholder="Your text"
+          placeholder={t("textPanel.placeholder")}
           className="mb-3 w-full resize-y rounded-lg border border-hairline-strong bg-sunken px-2.5
                      py-2 text-[13px] leading-snug text-primary outline-none
                      placeholder:text-tertiary focus:border-accent"
         />
       </Group>
 
-      <Group title="Font">
+      <Group title={t("textPanel.font")}>
         <select
           value={style.fontFamily}
           onChange={(event) => commitSet({ fontFamily: event.target.value })}
           className="mb-2 w-full cursor-pointer rounded-lg border border-hairline-strong bg-sunken
                      px-2.5 py-2 text-[12px] text-primary outline-none focus:border-accent"
         >
-          <optgroup label="Bundled">
+          <optgroup label={t("textPanel.bundled")}>
             {FONTS.filter((font) => font.bundled).map((font) => (
               <option key={font.value} value={font.value}>
                 {font.label}
@@ -94,16 +97,16 @@ export function TextPanel({
             ))}
           </optgroup>
           {custom.length > 0 && (
-            <optgroup label="Yours">
+            <optgroup label={t("textPanel.yours")}>
               {custom.map((font) => (
                 <option key={font.family} value={`"${font.family}"`}>
                   {font.family}
-                  {font.missing ? " (file missing)" : ""}
+                  {font.missing ? ` ${t("textPanel.fileMissing")}` : ""}
                 </option>
               ))}
             </optgroup>
           )}
-          <optgroup label="System">
+          <optgroup label={t("textPanel.system")}>
             {FONTS.filter((font) => !font.bundled).map((font) => (
               <option key={font.value} value={font.value}>
                 {font.label}
@@ -121,7 +124,7 @@ export function TextPanel({
                      hover:text-primary"
         >
           <Icon name="import" size={12} />
-          Add font file
+          {t("textPanel.addFontFile")}
         </button>
 
         {custom.length > 0 && (
@@ -140,7 +143,7 @@ export function TextPanel({
                 </span>
                 <button
                   type="button"
-                  aria-label={`Remove ${font.family}`}
+                  aria-label={t("textPanel.removeFont", { name: font.family })}
                   onClick={() => onRemoveFont(font.family)}
                   className="shrink-0 cursor-pointer text-tertiary hover:text-danger"
                 >
@@ -165,27 +168,35 @@ export function TextPanel({
         </select>
 
         <Slider
-          label="Size"
+          label={t("textPanel.size")}
           value={style.fontSize}
           min={0.02}
           max={0.4}
           step={0.005}
           // Shown as a share of frame height, which is the thing it actually
           // is. Points would be a lie: the frame can be any resolution.
-          format={(value) => `${(value * 100).toFixed(1)}% of height`}
+          format={(value) => t("textPanel.sizeOfHeight", { value: (value * 100).toFixed(1) })}
           onChange={(fontSize) => set({ fontSize })}
           onCommit={onCommit}
           onReset={() => commitSet({ fontSize: 0.09 })}
         />
 
-        <Toggle label="Italic" checked={style.italic} onChange={(italic) => commitSet({ italic })} />
+        <Toggle
+          label={t("textPanel.italic")}
+          checked={style.italic}
+          onChange={(italic) => commitSet({ italic })}
+        />
       </Group>
 
-      <Group title="Colour">
-        <Swatch label="Fill" value={style.color} onChange={(color) => commitSet({ color })} />
+      <Group title={t("textPanel.colour")}>
+        <Swatch
+          label={t("textPanel.fill")}
+          value={style.color}
+          onChange={(color) => commitSet({ color })}
+        />
 
         <Slider
-          label="Opacity"
+          label={t("textPanel.opacity")}
           value={style.opacity}
           min={0}
           max={1}
@@ -196,49 +207,49 @@ export function TextPanel({
         />
 
         <Toggle
-          label="Drop shadow"
-          hint="Keeps text readable over bright footage."
+          label={t("textPanel.dropShadow")}
+          hint={t("textPanel.dropShadowHint")}
           checked={style.shadow}
           onChange={(shadow) => commitSet({ shadow })}
         />
 
         <Toggle
-          label="Plate behind text"
-          hint="A solid block, for when a shadow is not enough."
+          label={t("textPanel.plate")}
+          hint={t("textPanel.plateHint")}
           checked={style.background !== ""}
           onChange={(on) => commitSet({ background: on ? "#000000" : "" })}
         />
         {style.background !== "" && (
           <Swatch
-            label="Plate colour"
+            label={t("textPanel.plateColour")}
             value={style.background}
             onChange={(background) => commitSet({ background })}
           />
         )}
       </Group>
 
-      <Group title="Outline">
+      <Group title={t("textPanel.outline")}>
         <Slider
-          label="Width"
+          label={t("textPanel.width")}
           value={style.strokeWidth}
           min={0}
           max={0.15}
           step={0.005}
-          format={(value) => (value === 0 ? "none" : `${(value * 100).toFixed(1)}%`)}
+          format={(value) => (value === 0 ? t("textPanel.none") : `${(value * 100).toFixed(1)}%`)}
           onChange={(strokeWidth) => set({ strokeWidth })}
           onCommit={onCommit}
           onReset={() => commitSet({ strokeWidth: 0 })}
         />
         {style.strokeWidth > 0 && (
           <Swatch
-            label="Outline colour"
+            label={t("textPanel.outlineColour")}
             value={style.strokeColor}
             onChange={(strokeColor) => commitSet({ strokeColor })}
           />
         )}
       </Group>
 
-      <Group title="Layout">
+      <Group title={t("textPanel.layout")}>
         <div className="mb-3 flex rounded-lg bg-sunken p-0.5">
           {(["left", "center", "right"] as const).map((align) => (
             <button
@@ -253,13 +264,19 @@ export function TextPanel({
                               : "text-secondary hover:text-primary"
                           }`}
             >
-              {align}
+              {t(
+                align === "left"
+                  ? "textPanel.alignLeft"
+                  : align === "center"
+                    ? "textPanel.alignCenter"
+                    : "textPanel.alignRight",
+              )}
             </button>
           ))}
         </div>
 
         <Slider
-          label="Line height"
+          label={t("textPanel.lineHeight")}
           value={style.lineHeight}
           min={0.8}
           max={2.5}
@@ -271,7 +288,7 @@ export function TextPanel({
         />
 
         <Slider
-          label="Tracking"
+          label={t("textPanel.tracking")}
           value={style.tracking}
           min={-0.1}
           max={0.4}
@@ -283,33 +300,33 @@ export function TextPanel({
         />
       </Group>
 
-      <Group title="Position">
+      <Group title={t("textPanel.position")}>
         {/*
           Offsets are fractions of the frame, and centred is zero - so the
           reset on each is "put it back in the middle", and a title composed
           here sits in the same place at any export resolution.
         */}
         <Slider
-          label="Horizontal"
+          label={t("textPanel.horizontal")}
           value={clip.offsetX}
           min={-0.5}
           max={0.5}
           step={0.005}
           format={(value) =>
-            Math.abs(value) < 0.0025 ? "centred" : `${(value * 100).toFixed(1)}%`
+            Math.abs(value) < 0.0025 ? t("textPanel.centred") : `${(value * 100).toFixed(1)}%`
           }
           onChange={(offsetX) => onChange({ offsetX })}
           onCommit={onCommit}
           onReset={() => { onChange({ offsetX: 0 }); onCommit(); }}
         />
         <Slider
-          label="Vertical"
+          label={t("textPanel.vertical")}
           value={clip.offsetY}
           min={-0.5}
           max={0.5}
           step={0.005}
           format={(value) =>
-            Math.abs(value) < 0.0025 ? "centred" : `${(value * 100).toFixed(1)}%`
+            Math.abs(value) < 0.0025 ? t("textPanel.centred") : `${(value * 100).toFixed(1)}%`
           }
           onChange={(offsetY) => onChange({ offsetY })}
           onCommit={onCommit}
@@ -363,5 +380,5 @@ function Swatch({
 
 function firstLineOf(content: string): string {
   const line = content.split("\n").find((candidate) => candidate.trim() !== "");
-  return (line ?? "Text").trim().slice(0, 40) || "Text";
+  return (line ?? t("textPanel.defaultName")).trim().slice(0, 40) || t("textPanel.defaultName");
 }

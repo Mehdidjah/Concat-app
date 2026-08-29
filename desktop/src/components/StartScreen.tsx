@@ -20,6 +20,7 @@ import {
   type TemplateSlot,
 } from "../lib/engine";
 import { ErrorNotice } from "./ErrorNotice";
+import { useLocale, type MsgKey } from "../lib/i18n";
 import { relativeTime } from "../lib/time";
 import { Icon } from "./Icon";
 import { TemplateThumb } from "./TemplateThumb";
@@ -38,12 +39,12 @@ export interface ProjectSession {
   rateDen: number;
 }
 
-const RESOLUTIONS = [
-  { label: "1080p", width: 1920, height: 1080 },
-  { label: "720p", width: 1280, height: 720 },
-  { label: "4K", width: 3840, height: 2160 },
-  { label: "Vertical", width: 1080, height: 1920 },
-] as const;
+const RESOLUTIONS: { labelKey: MsgKey; width: number; height: number }[] = [
+  { labelKey: "startScreen.res1080p", width: 1920, height: 1080 },
+  { labelKey: "startScreen.res720p", width: 1280, height: 720 },
+  { labelKey: "startScreen.res4k", width: 3840, height: 2160 },
+  { labelKey: "startScreen.resVertical", width: 1080, height: 1920 },
+];
 
 // Stored as fractions because 29.97 is 30000/1001 and never anything else.
 const FRAME_RATES = [
@@ -75,7 +76,8 @@ export function StartScreen({
    * inside the editor lands here. */
   initialTemplate?: TemplateInfo | null;
 }) {
-  const [name, setName] = useState(initialTemplate?.name ?? "Untitled project");
+  const { t, tp } = useLocale();
+  const [name, setName] = useState(initialTemplate?.name ?? t("startScreen.untitled"));
   const [location, setLocation] = useState("");
   const [resolution, setResolution] = useState<(typeof RESOLUTIONS)[number]>(RESOLUTIONS[0]);
   const [rate, setRate] = useState<(typeof FRAME_RATES)[number]>(FRAME_RATES[3]);
@@ -124,20 +126,23 @@ export function StartScreen({
     if (busy) return;
     const chosen = await open({
       multiple: false,
-      title: `Choose media for "${slot.name}"`,
+      title: t("startScreen.chooseMediaFor", { name: slot.name }),
       filters: [
         slot.kind === "audio"
-          ? { name: "Audio", extensions: ["mp3", "wav", "flac", "aac", "m4a", "ogg", "opus"] }
+          ? {
+              name: t("startScreen.audioFilter"),
+              extensions: ["mp3", "wav", "flac", "aac", "m4a", "ogg", "opus"],
+            }
           : {
               // A photo in a video slot is fine - it freeze-frames for the
               // slot's length - so visual slots take either.
-              name: "Video or images",
+              name: t("startScreen.videoImagesFilter"),
               extensions: [
                 "mp4", "mov", "mkv", "webm", "avi", "m4v",
                 "png", "jpg", "jpeg", "webp", "bmp", "tif", "tiff", "avif", "gif",
               ],
             },
-        { name: "All files", extensions: ["*"] },
+        { name: t("startScreen.allFilesFilter"), extensions: ["*"] },
       ],
     });
     if (typeof chosen !== "string") return;
@@ -199,14 +204,14 @@ export function StartScreen({
     const chosen = await open({
       directory: true,
       multiple: false,
-      title: "Where should this project live?",
+      title: t("startScreen.locationTitle"),
       defaultPath: location || undefined,
     });
     if (typeof chosen === "string") setLocation(chosen);
   };
 
   const create = async () => {
-    const trimmed = name.trim() || "Untitled project";
+    const trimmed = name.trim() || t("startScreen.untitled");
     if (!location.trim() || busy) return;
 
     setBusy(true);
@@ -257,21 +262,24 @@ export function StartScreen({
                          transition-opacity hover:opacity-70"
             >
               <Icon name="chevronRight" size={11} className="rotate-180" />
-              All templates
+              {t("startScreen.allTemplates")}
             </button>
           )}
           <h1 className="font-display text-[34px] font-semibold leading-tight tracking-[-0.03em] text-primary">
-            {template ? template.name : "New project"}
+            {template ? template.name : t("startScreen.newProject")}
           </h1>
           <p className="mt-1.5 text-sm text-secondary">
             {template
-              ? `Pick a clip for each slot. The template's timing, music and effects stay as designed - ` +
-                `${template.width} x ${template.height} at ${(template.rateNum / template.rateDen).toFixed(2)} fps.`
-              : "These settings apply to the whole edit and cannot be changed later."}
+              ? t("startScreen.templateIntro", {
+                  width: template.width,
+                  height: template.height,
+                  rate: (template.rateNum / template.rateDen).toFixed(2),
+                })
+              : t("startScreen.settingsIntro")}
           </p>
         </header>
 
-        <Field label="Name">
+        <Field label={t("startScreen.name")}>
           <input
             value={name}
             autoFocus
@@ -284,12 +292,12 @@ export function StartScreen({
           />
         </Field>
 
-        <Field label="Location">
+        <Field label={t("startScreen.location")}>
           <div className="flex items-center gap-3">
             <input
               value={location}
               spellCheck={false}
-              placeholder="Choose a folder"
+              placeholder={t("startScreen.chooseFolder")}
               onChange={(event) => setLocation(event.target.value)}
               className="min-w-0 flex-1 bg-transparent py-1 font-technical text-[12px] text-primary
                          outline-none placeholder:text-tertiary"
@@ -300,20 +308,20 @@ export function StartScreen({
               className="shrink-0 cursor-pointer text-[13px] text-accent transition-opacity
                          hover:opacity-70"
             >
-              Choose...
+              {t("startScreen.choose")}
             </button>
           </div>
         </Field>
 
         {!template && (
           <>
-            <Field label="Resolution">
+            <Field label={t("startScreen.resolution")}>
               <Segmented
-                options={RESOLUTIONS.map((option) => option.label)}
-                value={resolution.label}
+                options={RESOLUTIONS.map((option) => t(option.labelKey))}
+                value={t(resolution.labelKey)}
                 onChange={(label) =>
                   setResolution(
-                    RESOLUTIONS.find((option) => option.label === label) ?? RESOLUTIONS[0],
+                    RESOLUTIONS.find((option) => t(option.labelKey) === label) ?? RESOLUTIONS[0],
                   )
                 }
               />
@@ -322,7 +330,7 @@ export function StartScreen({
               </p>
             </Field>
 
-            <Field label="Frame rate" last>
+            <Field label={t("startScreen.frameRate")} last>
               <Segmented
                 options={FRAME_RATES.map((option) => option.label)}
                 value={rate.label}
@@ -338,7 +346,7 @@ export function StartScreen({
         )}
 
         {template && (
-          <Field label={`Slots (${template.slots.length})`} last>
+          <Field label={t("startScreen.slots", { count: template.slots.length })} last>
             <ul className="flex flex-col gap-1.5">
               {template.slots.map((slot, index) => {
                 const fill = fills[slot.mediaId];
@@ -360,7 +368,16 @@ export function StartScreen({
                         {fill ? fill.item.name : `${index + 1}. ${slot.name}`}
                       </span>
                       <span className="block font-technical text-[11px] text-tertiary">
-                        {slot.kind} · {slot.seconds.toFixed(1)}s on the timeline
+                        {t("startScreen.slotSeconds", {
+                          kind: t(
+                            slot.kind === "audio"
+                              ? "startScreen.kindAudio"
+                              : slot.kind === "image"
+                                ? "startScreen.kindImage"
+                                : "startScreen.kindVideo",
+                          ),
+                          seconds: slot.seconds.toFixed(1),
+                        })}
                       </span>
                     </span>
                     <button
@@ -370,15 +387,13 @@ export function StartScreen({
                       className="shrink-0 cursor-pointer text-[13px] text-accent transition-opacity
                                  hover:opacity-70 disabled:cursor-not-allowed disabled:opacity-40"
                     >
-                      {fill ? "Change..." : "Choose..."}
+                      {fill ? t("startScreen.change") : t("startScreen.choose")}
                     </button>
                   </li>
                 );
               })}
               {template.slots.length === 0 && (
-                <li className="text-[12px] text-tertiary">
-                  This template has no slots - it opens ready-made.
-                </li>
+                <li className="text-[12px] text-tertiary">{t("startScreen.noSlots")}</li>
               )}
             </ul>
           </Field>
@@ -399,7 +414,7 @@ export function StartScreen({
                        text-on-accent transition-colors hover:bg-accent-hover
                        disabled:cursor-not-allowed disabled:opacity-40"
           >
-            {busy ? "Creating..." : "Create"}
+            {busy ? t("startScreen.creating") : t("startScreen.create")}
           </button>
           <p className="flex items-center gap-1.5 text-[11px] text-tertiary">
             <Icon name="info" size={12} className="shrink-0" />
@@ -407,16 +422,18 @@ export function StartScreen({
               ? (() => {
                   const missing = template.slots.filter((slot) => !fills[slot.mediaId]).length;
                   return missing > 0
-                    ? `${missing} slot${missing === 1 ? "" : "s"} still need${missing === 1 ? "s" : ""} a clip.`
-                    : "Every slot is filled.";
+                    ? tp("startScreen.slotsMissing", missing)
+                    : t("startScreen.slotsFilled");
                 })()
-              : "The project folder is created now; the edit autosaves into it."}
+              : t("startScreen.folderNote")}
           </p>
         </div>
 
         {!template && templates.length > 0 && (
           <section className="mt-14 border-t border-hairline pt-7">
-            <h2 className="mb-3 text-[13px] font-semibold text-secondary">Start from a template</h2>
+            <h2 className="mb-3 text-[13px] font-semibold text-secondary">
+              {t("startScreen.fromTemplate")}
+            </h2>
             <ul className="grid grid-cols-[repeat(auto-fill,minmax(9.5rem,1fr))] gap-3">
               {templates.map((entry) => (
                 <li key={entry.path} className="group relative">
@@ -432,14 +449,14 @@ export function StartScreen({
                       {entry.name}
                     </span>
                     <span className="block font-technical text-[11px] text-tertiary">
-                      {entry.slots.length} slot{entry.slots.length === 1 ? "" : "s"} · {entry.width}{" "}
-                      x {entry.height}
+                      {tp("startScreen.slotCount", entry.slots.length)} · {entry.width} x{" "}
+                      {entry.height}
                     </span>
                   </button>
                   <button
                     type="button"
-                    aria-label={`Delete the template ${entry.name}`}
-                    title="Delete this template for good"
+                    aria-label={t("startScreen.deleteTemplate", { name: entry.name })}
+                    title={t("startScreen.deleteTemplateHint")}
                     onClick={() => void removeTemplate(entry)}
                     className="invisible absolute right-1.5 top-1.5 cursor-pointer rounded
                                bg-black/55 p-1 text-white transition-colors hover:bg-danger
@@ -459,7 +476,9 @@ export function StartScreen({
             something to show. */}
         {recents.length > 0 && (
           <section className="mt-14 border-t border-hairline pt-7 lg:mt-0 lg:border-t-0 lg:pt-0">
-            <h2 className="mb-3 text-[13px] font-semibold text-secondary">Recent</h2>
+            <h2 className="mb-3 text-[13px] font-semibold text-secondary">
+              {t("startScreen.recent")}
+            </h2>
             <ul className="flex flex-col gap-1.5">
               {recents.map((project) => (
                 <li
@@ -492,8 +511,8 @@ export function StartScreen({
 
                   <button
                     type="button"
-                    aria-label={`Remove ${project.name} from recents`}
-                    title="Remove from this list. The folder is left alone."
+                    aria-label={t("startScreen.removeRecent", { name: project.name })}
+                    title={t("startScreen.removeRecentHint")}
                     onClick={() => void forget(project)}
                     className="invisible shrink-0 cursor-pointer rounded p-1 text-tertiary
                                transition-colors hover:bg-active hover:text-primary

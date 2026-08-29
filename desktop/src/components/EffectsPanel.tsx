@@ -7,6 +7,7 @@ import {
   type ClipTransition,
 } from "../lib/effects";
 import type { Clip } from "../lib/editor";
+import { useLocale } from "../lib/i18n";
 import { HelpTip, Slider } from "./controls";
 import { Icon, IconButton } from "./Icon";
 import { Empty } from "./Panel";
@@ -35,10 +36,12 @@ export function EffectsPanel({
   /** Ends the gesture: the accumulated change becomes one engine command. */
   onCommit: () => void;
 }) {
+  const { t } = useLocale();
+
   if (!clip || (clip.kind !== "video" && clip.kind !== "image")) {
     return (
       <Empty icon={<Icon name="sparkles" size={26} strokeWidth={1.5} />}>
-        Select a video or image clip to add effects.
+        {t("effects.panel.empty")}
       </Empty>
     );
   }
@@ -75,8 +78,8 @@ export function EffectsPanel({
       {transition && transitionDefinition && (
         <section className="mb-5">
           <h3 className="mb-2 flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-tertiary">
-            Transition
-            <HelpTip text="The transition on the cut into this clip. It needs the clip before it to stay touching - moved apart, it renders as a plain cut." />
+            {t("effects.panel.transition")}
+            <HelpTip text={t("effects.panel.transitionHelp")} />
           </h3>
           <div className="rounded-lg bg-sunken p-2.5">
             <div className="mb-2 flex items-center gap-1">
@@ -85,7 +88,7 @@ export function EffectsPanel({
               </span>
               <IconButton
                 icon="close"
-                label={`Remove ${transitionDefinition.label}`}
+                label={t("effects.panel.remove", { name: transitionDefinition.label })}
                 size={7}
                 tone="danger"
                 onClick={() => {
@@ -96,12 +99,11 @@ export function EffectsPanel({
             </div>
             {!hasPreceding && (
               <p className="mb-2 text-[11px] leading-snug text-danger">
-                No clip ends where this one starts, so this transition currently renders as a
-                plain cut.
+                {t("effects.panel.noPreceding")}
               </p>
             )}
             <Slider
-              label="Duration"
+              label={t("effects.panel.duration")}
               value={transition.duration}
               min={0.2}
               max={3}
@@ -121,8 +123,8 @@ export function EffectsPanel({
       {applied.length > 0 && (
         <section className="mb-5">
           <h3 className="mb-2 flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-tertiary">
-            Applied
-            <HelpTip text="Effects run top to bottom. The eye bypasses one without losing its settings - flick it to compare." />
+            {t("effects.panel.applied")}
+            <HelpTip text={t("effects.panel.appliedHelp")} />
           </h3>
 
           <ul className="flex flex-col gap-2">
@@ -144,27 +146,31 @@ export function EffectsPanel({
                     </span>
                     <IconButton
                       icon={active ? "eye" : "eyeOff"}
-                      label={active ? `Bypass ${definition.label}` : `Enable ${definition.label}`}
+                      label={
+                        active
+                          ? t("effects.panel.bypass", { name: definition.label })
+                          : t("effects.panel.enable", { name: definition.label })
+                      }
                       size={7}
                       onClick={() => patch(index, { enabled: !active })}
                     />
                     <IconButton
                       icon="chevronUp"
-                      label="Move earlier in the chain"
+                      label={t("effects.panel.moveEarlier")}
                       size={7}
                       disabled={index === 0}
                       onClick={() => move(index, -1)}
                     />
                     <IconButton
                       icon="chevronDown"
-                      label="Move later in the chain"
+                      label={t("effects.panel.moveLater")}
                       size={7}
                       disabled={index === applied.length - 1}
                       onClick={() => move(index, 1)}
                     />
                     <IconButton
                       icon="close"
-                      label={`Remove ${definition.label}`}
+                      label={t("effects.panel.remove", { name: definition.label })}
                       size={7}
                       tone="danger"
                       onClick={() => remove(index)}
@@ -192,7 +198,7 @@ export function EffectsPanel({
                       />
                     ))}
                     {definition.params.length === 0 && (
-                      <p className="text-[11px] text-tertiary">Nothing to adjust.</p>
+                      <p className="text-[11px] text-tertiary">{t("effects.panel.nothingToAdjust")}</p>
                     )}
                   </div>
                 </li>
@@ -203,7 +209,7 @@ export function EffectsPanel({
       )}
 
       <h3 className="mb-2 text-[11px] font-semibold uppercase tracking-wider text-tertiary">
-        Add an effect
+        {t("effects.panel.addEffect")}
       </h3>
       <ul className="flex flex-col gap-0.5">
         {EFFECTS.map((effect) => (

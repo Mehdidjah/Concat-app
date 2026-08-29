@@ -9,6 +9,7 @@ import {
   type EditorProject,
   type MediaItem,
 } from "../lib/editor";
+import { useLocale, type MsgKey } from "../lib/i18n";
 import { AdjustPanel } from "./AdjustPanel";
 import { EffectsPanel } from "./EffectsPanel";
 import { FiltersPanel } from "./FiltersPanel";
@@ -28,21 +29,23 @@ export type RightTab = "details" | "adjust" | "filters" | "effects" | "text";
  * offering those tabs would be offering panels that can only say "nothing
  * here".
  */
-const DETAILS_TABS: { id: RightTab; label: string }[] = [{ id: "details", label: "Details" }];
+const DETAILS_TABS: { id: RightTab; labelKey: MsgKey }[] = [
+  { id: "details", labelKey: "rightPanel.details" },
+];
 
-const CLIP_TABS: { id: RightTab; label: string }[] = [
-  { id: "adjust", label: "Adjust" },
-  { id: "filters", label: "Filters" },
-  { id: "effects", label: "Effects" },
+const CLIP_TABS: { id: RightTab; labelKey: MsgKey }[] = [
+  { id: "adjust", labelKey: "rightPanel.adjust" },
+  { id: "filters", labelKey: "rightPanel.filters" },
+  { id: "effects", labelKey: "rightPanel.effects" },
 ];
 
 // A still has picture but no sound, so it gets Effects but not Filters.
-const IMAGE_TABS: { id: RightTab; label: string }[] = [
-  { id: "adjust", label: "Adjust" },
-  { id: "effects", label: "Effects" },
+const IMAGE_TABS: { id: RightTab; labelKey: MsgKey }[] = [
+  { id: "adjust", labelKey: "rightPanel.adjust" },
+  { id: "effects", labelKey: "rightPanel.effects" },
 ];
 
-const TEXT_TABS: { id: RightTab; label: string }[] = [{ id: "text", label: "Text" }];
+const TEXT_TABS: { id: RightTab; labelKey: MsgKey }[] = [{ id: "text", labelKey: "rightPanel.text" }];
 
 /**
  * The right-hand panel.
@@ -97,6 +100,7 @@ export const RightPanel = memo(function RightPanel({
   /** Opens the project-details editor (name, output frame). */
   onModifyProject: () => void;
 }) {
+  const { t } = useLocale();
   const isText = clip?.kind === "text";
   const tabs = clip
     ? isText
@@ -114,7 +118,7 @@ export const RightPanel = memo(function RightPanel({
   const single = tabs.length === 1;
 
   return (
-    <Panel title={single ? tabs[0].label : undefined}>
+    <Panel title={single ? t(tabs[0].labelKey) : undefined}>
       {!single && (
         <div className="sticky top-0 z-10 border-b border-hairline bg-panel px-2 pb-2 pt-2">
           <div className="flex rounded-lg bg-sunken p-0.5">
@@ -130,7 +134,7 @@ export const RightPanel = memo(function RightPanel({
                     : "text-secondary hover:text-primary"
                 }`}
               >
-                {entry.label}
+                {t(entry.labelKey)}
               </button>
             ))}
           </div>
