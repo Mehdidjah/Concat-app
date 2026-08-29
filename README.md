@@ -37,7 +37,7 @@ start cutting, no account, no extra downloads, no setup.
 
 Currently in Alpha (pre-release), Download from [Releases](https://github.com/jub0t/WolfCut/releases), Supports:
 - Windows (tested)
-- MacOs (tested)
+- MacOs (tested) - unsigned binaries, use `xattr -dr com.apple.quarantine /Applications/WolfCut.app`
 - Linux
 
 ### Nix (Linux)
