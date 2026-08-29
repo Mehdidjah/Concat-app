@@ -1,6 +1,7 @@
 import { useSyncExternalStore } from "react";
 
 import en from "../locales/en.json";
+import zhCN from "../locales/zh-CN.json";
 
 /**
  * The UI language.
@@ -40,13 +41,16 @@ export type PluralKey = PluralBase<MsgKey>;
  * Native names, never translated: whoever landed in a language they cannot
  * read must still be able to find their own in the picker.
  */
-export const LOCALES = [{ id: "en", name: "English" }] as const;
+export const LOCALES = [
+  { id: "en", name: "English" },
+  { id: "zh-CN", name: "简体中文" },
+] as const;
 
 export type LocaleId = (typeof LOCALES)[number]["id"];
 
 // Record<MsgKey, string> makes a catalog missing keys fail `tsc`, before the
 // friendlier i18n.test.ts even runs.
-const CATALOGS: Record<LocaleId, Record<MsgKey, string>> = { en };
+const CATALOGS: Record<LocaleId, Record<MsgKey, string>> = { en, "zh-CN": zhCN };
 
 const STORAGE_KEY = "wolfcut.locale";
 
