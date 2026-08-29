@@ -35,6 +35,12 @@
           npmRoot = "desktop";
           npmDeps = pkgs.importNpmLock { npmRoot = ./desktop; };
 
+          # The release guard in build.rs insists on staged ffmpeg/whisper
+          # binaries because a Finder/desktop launch has no PATH to fall back
+          # on. The Nix wrapper guarantees them on PATH, so this build opts
+          # out of bundling explicitly.
+          env.WOLFCUT_SYSTEM_TOOLS = "1";
+
           nativeBuildInputs = with pkgs; [
             cargo-tauri.hook
             nodejs
