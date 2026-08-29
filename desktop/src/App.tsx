@@ -58,6 +58,7 @@ import {
 } from "./lib/engine";
 import { findTransition } from "./lib/effects";
 import { familyForPath, registerFont } from "./lib/text";
+import { useLocale } from "./lib/i18n";
 import { useCaptions } from "./hooks/useCaptions";
 import { useEngineSession } from "./hooks/useEngineSession";
 import { useEngineTruth } from "./hooks/useEngineTruth";
@@ -139,6 +140,7 @@ function Editor({
   /** Leaves this project for the launch screen's fill flow on a template. */
   onUseTemplate: (template: TemplateInfo) => void;
 }) {
+  const { t, tp } = useLocale();
   const [toast, setToast] = useState<{ id: number; message: string; failed: boolean } | null>(
     null,
   );
@@ -168,8 +170,11 @@ function Editor({
     onCommandError: useCallback((message: string) => pushToast(message, true), [pushToast]),
     onSaved: useCallback(
       (ok: boolean, message?: string) =>
-        pushToast(ok ? "Project saved" : `Save failed: ${message}`, !ok),
-      [pushToast],
+        pushToast(
+          ok ? t("toast.projectSaved") : t("toast.saveFailed", { message: message ?? "" }),
+          !ok,
+        ),
+      [pushToast, t],
     ),
   });
 
@@ -413,8 +418,10 @@ function Editor({
     try {
       const picked = await openDialog({
         multiple: false,
-        title: "Add a font",
-        filters: [{ name: "Fonts", extensions: ["ttf", "otf", "woff", "woff2", "ttc"] }],
+        title: t("dialog.addFont.title"),
+        filters: [
+          { name: t("dialog.addFont.filter"), extensions: ["ttf", "otf", "woff", "woff2", "ttc"] },
+        ],
       });
       if (typeof picked !== "string") return;
       const current = latest.current.project;
@@ -430,14 +437,14 @@ function Editor({
       // Registered before it is stored, so a file the webview cannot parse is
       // reported now rather than becoming a broken entry in the picker.
       if (!(await registerFont(font, readMediaBytes))) {
-        setError(`Could not read ${picked.split(/[/\\]/).pop() ?? picked} as a font.`);
+        setError(t("error.fontUnreadable", { file: picked.split(/[/\\]/).pop() ?? picked }));
         return;
       }
       void dispatch({ op: "addFont", family: font.family, path: font.path });
     } catch (cause) {
       setError(String(cause));
     }
-  }, [dispatch]);
+  }, [dispatch, t]);
 
   const applyEffect = useCallback(
     (effectId: string) => {
@@ -446,7 +453,7 @@ function Editor({
       if (!selected || (selected.kind !== "video" && selected.kind !== "image")) {
         setToast({
           id: Date.now(),
-          message: "Select a video or image clip on the timeline first",
+          message: t("toast.effectNeedsClip"),
           failed: true,
         });
         return;
@@ -458,7 +465,7 @@ function Editor({
       });
       setRightTab("effects");
     },
-    [selectedClipIds, dispatch],
+    [selectedClipIds, dispatch, t],
   );
 
   const applyTransition = useCallback(
@@ -470,7 +477,7 @@ function Editor({
       if (!selected || (selected.kind !== "video" && selected.kind !== "image")) {
         setToast({
           id: Date.now(),
-          message: "Select the incoming clip - the one after the cut - first",
+          message: t("toast.transitionNeedsClip"),
           failed: true,
         });
         return;
@@ -478,7 +485,7 @@ function Editor({
       if (!precedingClip(current, selected.id)) {
         setToast({
           id: Date.now(),
-          message: "No clip ends where this one starts - transitions need a cut",
+          message: t("toast.transitionNeedsCut"),
           failed: true,
         });
         return;
@@ -489,9 +496,13 @@ function Editor({
         patch: { transitionIn: { id: transitionId, duration: definition.defaultDuration } },
       });
       setRightTab("effects");
-      setToast({ id: Date.now(), message: `${definition.label} added to the cut`, failed: false });
+      setToast({
+        id: Date.now(),
+        message: t("toast.transitionAdded", { transition: definition.label }),
+        failed: false,
+      });
     },
-    [selectedClipIds, dispatch],
+    [selectedClipIds, dispatch, t],
   );
 
   const { autoCaption, transcribing } = useCaptions({
@@ -521,7 +532,7 @@ function Editor({
     return [
       [
         {
-          label: transcribing ? "Transcribing..." : "Auto captions",
+          label: transcribing ? t("menu.clip.transcribing") : t("menu.clip.autoCaptions"),
           icon: "type" as const,
           disabled: !hasSound || transcribing,
           onSelect: () => {
@@ -531,13 +542,13 @@ function Editor({
       ],
       [
         {
-          label: "Detach audio",
+          label: t("menu.clip.detachAudio"),
           icon: "waveform" as const,
           disabled: !canDetach,
           onSelect: () => void dispatch({ op: "detachAudio", clipId: clip.id }),
         },
         {
-          label: "Reattach audio",
+          label: t("menu.clip.reattachAudio"),
           icon: "merge" as const,
           disabled: !canReattach,
           onSelect: () => {
@@ -547,7 +558,7 @@ function Editor({
         },
       ],
     ];
-  }, [project, selectedClipIds, transcribing, autoCaption, dispatch]);
+  }, [project, selectedClipIds, transcribing, autoCaption, dispatch, t]);
 
   // ── timelines ────────────────────────────────────────────────────────────
   const [timelineToDelete, setTimelineToDelete] = useState<TimelineMeta | null>(null);
@@ -995,10 +1006,10 @@ function Editor({
                    text-xs font-medium text-on-accent transition-colors hover:bg-accent-hover"
       >
         <Icon name="export" size={13} />
-        Export
+        {t("common.export")}
       </button>
     ),
-    [openExport],
+    [openExport, t],
   );
 
   // The whole menu structure, rebuilt only when something a menu shows or
@@ -1010,48 +1021,48 @@ function Editor({
   const menus = useMemo<{ label: string; groups: MenuOption[][] }[]>(
     () => [
       {
-        label: "File",
+        label: t("menu.file.title"),
         groups: [
           [
             {
-              label: "Add selected to timeline",
+              label: t("menu.file.addSelected"),
               icon: "plus",
               disabled: selectedMediaIds.length === 0,
               onSelect: () => placeMediaSet(selectedMediaIds, latest.current.playhead, null),
             },
             {
-              label: "Save",
+              label: t("menu.file.save"),
               icon: "folder",
               hint: "Ctrl+S",
               onSelect: () => saveAndNotify(),
             },
             {
-              label: "Export...",
+              label: t("menu.file.export"),
               icon: "export",
               disabled: renderableClipCount === 0,
               onSelect: openExport,
             },
             {
-              label: "Save as template...",
+              label: t("menu.file.saveAsTemplate"),
               icon: "slot",
               onSelect: openTemplateDialog,
             },
           ],
           [
             {
-              label: "Settings...",
+              label: t("menu.file.settings"),
               icon: "settings",
               onSelect: openSettings,
             },
           ],
           [
             {
-              label: "Close project",
+              label: t("menu.file.closeProject"),
               icon: "folder",
               onSelect: onCloseProject,
             },
             {
-              label: "Close window",
+              label: t("menu.file.closeWindow"),
               icon: "close",
               onSelect: () => void getCurrentWindow().close(),
               danger: true,
@@ -1060,18 +1071,18 @@ function Editor({
         ],
       },
       {
-        label: "Edit",
+        label: t("menu.edit.title"),
         groups: [
           [
             {
-              label: "Undo",
+              label: t("menu.edit.undo"),
               icon: "chevronUp",
               hint: "Ctrl+Z",
               disabled: !view?.canUndo,
               onSelect: undoAction,
             },
             {
-              label: "Redo",
+              label: t("menu.edit.redo"),
               icon: "chevronDown",
               hint: "Ctrl+Shift+Z",
               disabled: !view?.canRedo,
@@ -1079,12 +1090,14 @@ function Editor({
             },
           ],
           [
-            { label: "Split at playhead", icon: "razor", hint: "Ctrl+B", onSelect: splitAtPlayhead },
             {
-              label:
-                selectedClipIds.length > 1
-                  ? `Delete ${selectedClipIds.length} clips`
-                  : "Delete clip",
+              label: t("menu.edit.splitAtPlayhead"),
+              icon: "razor",
+              hint: "Ctrl+B",
+              onSelect: splitAtPlayhead,
+            },
+            {
+              label: tp("menu.edit.deleteClips", Math.max(1, selectedClipIds.length)),
               icon: "trash",
               hint: "Del",
               disabled: selectedClipIds.length === 0,
@@ -1094,7 +1107,7 @@ function Editor({
           ],
           [
             {
-              label: snap ? "Disable snapping" : "Enable snapping",
+              label: snap ? t("menu.edit.disableSnapping") : t("menu.edit.enableSnapping"),
               icon: "magnet",
               hint: "N",
               onSelect: () => setSnap((current) => !current),
@@ -1103,21 +1116,21 @@ function Editor({
         ],
       },
       {
-        label: "View",
+        label: t("menu.view.title"),
         groups: [
           [
-            { label: "Zoom in", icon: "plus", onSelect: () => zoom(1 / 1.4) },
-            { label: "Zoom out", icon: "minus", onSelect: () => zoom(1.4) },
+            { label: t("menu.view.zoomIn"), icon: "plus", onSelect: () => zoom(1 / 1.4) },
+            { label: t("menu.view.zoomOut"), icon: "minus", onSelect: () => zoom(1.4) },
           ],
           [
             {
-              label: "Go to start",
+              label: t("menu.view.goToStart"),
               icon: "skipStart",
               hint: "Home",
               onSelect: () => transport.seek(0),
             },
             {
-              label: "Go to end",
+              label: t("menu.view.goToEnd"),
               icon: "skipEnd",
               hint: "End",
               onSelect: () => transport.seek(duration),
@@ -1141,6 +1154,8 @@ function Editor({
       selectedMediaIds,
       snap,
       splitAtPlayhead,
+      t,
+      tp,
       transport,
       undoAction,
       view,
@@ -1154,14 +1169,16 @@ function Editor({
         projectName={projectName}
         status={
           saveState === "saving"
-            ? "saving..."
+            ? t("status.saving")
             : saveState === "failed"
-              ? "save failed"
+              ? t("status.saveFailed")
               : saveState === "saved"
-                ? "saved"
-                : version
-                  ? `engine ${version}`
-                  : undefined
+                ? t("status.saved")
+                : version === "unavailable"
+                  ? t("status.engineUnavailable")
+                  : version
+                    ? t("status.engine", { version })
+                    : undefined
         }
         theme={theme}
         onToggleTheme={onToggleTheme}
@@ -1368,7 +1385,7 @@ function Editor({
                 y,
                 items: [
                   {
-                    label: many ? `Split ${target.length} clips at playhead` : "Split at playhead",
+                    label: tp("contextMenu.splitClips", target.length),
                     icon: "razor",
                     hint: "S",
                     onSelect: splitAtPlayhead,
@@ -1376,7 +1393,7 @@ function Editor({
                   ...(whyNotMerge(project, target) === null
                     ? [
                         {
-                          label: `Merge ${target.length} clips`,
+                          label: tp("contextMenu.mergeClips", target.length),
                           icon: "merge" as const,
                           hint: "M",
                           onSelect: mergeSelected,
@@ -1392,7 +1409,7 @@ function Editor({
                       !transcribing
                       ? [
                           {
-                            label: "Auto captions",
+                            label: t("menu.clip.autoCaptions"),
                             icon: "type" as const,
                             onSelect: () => void autoCaption(clip, media),
                           },
@@ -1406,7 +1423,7 @@ function Editor({
                   detachedAudioOf(project, clip.id).length === 0
                     ? [
                         {
-                          label: "Detach audio",
+                          label: t("menu.clip.detachAudio"),
                           icon: "waveform" as const,
                           onSelect: () => void dispatch({ op: "detachAudio", clipId }),
                         },
@@ -1420,7 +1437,7 @@ function Editor({
                       findClip(project, clip.detachedFrom)))
                     ? [
                         {
-                          label: "Reattach audio",
+                          label: t("menu.clip.reattachAudio"),
                           icon: "merge" as const,
                           onSelect: () => {
                             void dispatch({ op: "reattachAudio", clipId });
@@ -1430,7 +1447,7 @@ function Editor({
                       ]
                     : []),
                   {
-                    label: "Move to playhead",
+                    label: t("contextMenu.moveToPlayhead"),
                     icon: "select",
                     onSelect: () => {
                       const moving = findClip(latest.current.project, clipId);
@@ -1449,7 +1466,7 @@ function Editor({
                     },
                   },
                   {
-                    label: many ? `Delete ${target.length} clips` : "Delete",
+                    label: tp("contextMenu.deleteClips", target.length),
                     icon: "trash",
                     hint: "Del",
                     danger: true,
@@ -1481,7 +1498,7 @@ function Editor({
               .then(() => {
                 setProjectName(name);
                 setModifyingProject(null);
-                pushToast("Project details saved", false);
+                pushToast(t("toast.projectDetailsSaved"), false);
               })
               .catch((cause: unknown) => {
                 setModifyingProject({ busy: false });
@@ -1504,7 +1521,7 @@ function Editor({
                 setTemplateDialog(null);
                 setToast({
                   id: Date.now(),
-                  message: `Saved template "${info.name}"`,
+                  message: t("toast.templateSaved", { name: info.name }),
                   failed: false,
                 });
               })
@@ -1519,14 +1536,14 @@ function Editor({
 
       {timelineToDelete && (
         <ConfirmDialog
-          title={`Delete "${timelineToDelete.name}"?`}
+          title={t("dialog.deleteTimeline.title", { name: timelineToDelete.name })}
           message={(() => {
             const count = timelineClipCount(project, timelineToDelete.id);
             return count > 0
-              ? `The ${count} clip${count === 1 ? "" : "s"} on this timeline will be lost.`
-              : "The timeline is empty; nothing else is affected.";
+              ? tp("dialog.deleteTimeline.clipsLost", count)
+              : t("dialog.deleteTimeline.empty");
           })()}
-          confirmLabel="Delete timeline"
+          confirmLabel={t("dialog.deleteTimeline.confirm")}
           onConfirm={() => {
             deleteTimelineNow(timelineToDelete.id);
             setTimelineToDelete(null);

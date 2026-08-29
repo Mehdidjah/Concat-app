@@ -31,7 +31,10 @@ import en from "../locales/en.json";
 export type MsgKey = keyof typeof en;
 
 /** Bases of plural sets: `x.one`/`x.other` in the catalog collapse to `x`. */
-export type PluralKey = MsgKey extends `${infer Base}.one` ? Base : never;
+// Distributed through a type parameter - a conditional over the union alias
+// itself would not distribute and would collapse to never.
+type PluralBase<Key> = Key extends `${infer Base}.one` ? Base : never;
+export type PluralKey = PluralBase<MsgKey>;
 
 /**
  * Native names, never translated: whoever landed in a language they cannot
