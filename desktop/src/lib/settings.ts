@@ -29,3 +29,32 @@ export function getTranscriberLanguage(): string {
 export function setTranscriberLanguage(code: string): void {
   localStorage.setItem(LANGUAGE_KEY, code);
 }
+
+const TTS_MODEL_KEY = "wolfcut.tts.model";
+const TTS_VOICE_KEY = "wolfcut.tts.voice";
+
+/** The default voice model: the compact build the settings panel recommends. */
+export const DEFAULT_TTS_MODEL = "kokoro-int8-multi-lang-v1_0";
+
+/** The default speaker: af_heart, Kokoro's showcase voice. */
+export const DEFAULT_TTS_VOICE = 3;
+
+export function getTtsModel(): string {
+  return localStorage.getItem(TTS_MODEL_KEY) ?? DEFAULT_TTS_MODEL;
+}
+
+export function setTtsModel(id: string): void {
+  localStorage.setItem(TTS_MODEL_KEY, id);
+}
+
+/** A Kokoro speaker id, from the host's voices table. */
+export function getTtsVoice(): number {
+  const raw = localStorage.getItem(TTS_VOICE_KEY);
+  if (raw === null) return DEFAULT_TTS_VOICE;
+  const stored = Number(raw);
+  return Number.isInteger(stored) && stored >= 0 ? stored : DEFAULT_TTS_VOICE;
+}
+
+export function setTtsVoice(id: number): void {
+  localStorage.setItem(TTS_VOICE_KEY, String(id));
+}

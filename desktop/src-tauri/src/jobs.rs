@@ -57,6 +57,12 @@ impl Job {
     pub fn cancel_flag(&self) -> &AtomicBool {
         &self.cancel
     }
+
+    /// An owned handle on the same flag, for callbacks that outlive borrows
+    /// of the job (an FFI progress callback must be `'static`).
+    pub fn cancel_handle(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.cancel)
+    }
 }
 
 impl Drop for Job {

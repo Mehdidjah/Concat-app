@@ -6,6 +6,11 @@ behaviour.
 
 ## Unreleased
 
+- Text to speech: File → Text to speech turns typed narration into an audio
+  clip at the playhead, spoken by one of 36 Kokoro voices (American and
+  British English, Chinese) at a chosen pace. Generation runs entirely on
+  this machine; the voice model downloads once (about 130 MB) from the sheet
+  itself or Settings → Speech.
 - The entire interface is translatable: the app follows the system language
   when a translation exists, with an override in Settings → General.
   Translations are plain JSON files contributors can add — see TRANSLATING.md.

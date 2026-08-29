@@ -43,7 +43,8 @@ src/
     EffectsPanel.tsx   the clip's video effect chain and incoming transition
     TextPanel.tsx      title styling and custom fonts
     ExportDialog.tsx   render settings, progress, title rasterisation
-    SettingsDialog.tsx transcriber setup
+    TtsDialog.tsx      text to speech: narration in, a clip at the playhead out
+    SettingsDialog.tsx transcriber and speech model setup
     SaveTemplateDialog.tsx  names and saves the open project as a template
     TemplateThumb.tsx  a template's poster, shared by gallery and library
     ConfirmDialog.tsx  the are-you-sure sheet for destructive actions
@@ -70,6 +71,7 @@ src-tauri/
   src/projects.rs      project folders on disk and the recents list
   src/templates.rs     template bundles: save, list, instantiate, delete
   src/transcribe.rs    whisper-cli discovery, models, transcription
+  src/tts.rs           Kokoro text to speech: model downloads, synthesis
 ```
 
 ## Rules that keep this fast

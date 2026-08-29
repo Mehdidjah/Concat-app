@@ -3,30 +3,43 @@ import { open } from "@tauri-apps/plugin-dialog";
 
 import {
   cancelModelDownload,
+  cancelTtsModelDownload,
   deleteTranscriberModel,
+  deleteTtsModel,
   downloadTranscriberModel,
+  downloadTtsModel,
   engineVersion,
   onTranscriberDownload,
+  onTtsDownload,
   setTranscriberBinary,
   transcriberStatus,
+  ttsStatus,
   type TranscriberStatus,
+  type TtsStatus,
 } from "../lib/engine";
 import { LOCALES, systemLocale, useLocale, type MsgKey } from "../lib/i18n";
 import {
   getTranscriberLanguage,
   getTranscriberModel,
+  getTtsModel,
   setTranscriberLanguage,
   setTranscriberModel,
+  setTtsModel,
 } from "../lib/settings";
 import { HelpTip } from "./controls";
 import { Icon } from "./Icon";
 
 /** The pages of the settings dialog, in display order. */
-type SettingsTab = "general" | "transcriber" | "about";
+type SettingsTab = "general" | "transcriber" | "speech" | "about";
 
-const TABS: { id: SettingsTab; labelKey: MsgKey; icon: "settings" | "waveform" | "info" }[] = [
+const TABS: {
+  id: SettingsTab;
+  labelKey: MsgKey;
+  icon: "settings" | "waveform" | "volume" | "info";
+}[] = [
   { id: "general", labelKey: "settings.tabs.general", icon: "settings" },
   { id: "transcriber", labelKey: "settings.tabs.transcriber", icon: "waveform" },
+  { id: "speech", labelKey: "settings.tabs.speech", icon: "volume" },
   { id: "about", labelKey: "settings.tabs.about", icon: "info" },
 ];
 
@@ -87,6 +100,7 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
           <div className="thin-scroll min-w-0 flex-1 overflow-y-auto px-5 py-4">
             {tab === "general" && <GeneralSettings />}
             {tab === "transcriber" && <TranscriberSettings />}
+            {tab === "speech" && <SpeechSettings />}
             {tab === "about" && <AboutSettings />}
           </div>
         </div>
@@ -399,6 +413,203 @@ function TranscriberSettings() {
             );
           })}
         </ul>
+
+        {error && <p className="mt-2 text-[11px] leading-snug text-danger">{error}</p>}
+      </section>
+    </div>
+  );
+}
+
+/**
+ * The speech (text to speech) page: which Kokoro bundle to keep on disk.
+ *
+ * The same shape as the transcriber page, minus the binary bar (synthesis
+ * runs in-process, there is no tool to locate) and minus a language toggle
+ * (the voice picked in the speech dialog carries the language).
+ */
+function SpeechSettings() {
+  const { t } = useLocale();
+  const [status, setStatus] = useState<TtsStatus | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [model, setModel] = useState(getTtsModel());
+  /** The model being fetched: how far along, and whether it is unpacking. */
+  const [download, setDownload] = useState<{
+    id: string;
+    fraction: number;
+    unpacking: boolean;
+  } | null>(null);
+  const unlisten = useRef<(() => void) | null>(null);
+
+  const refresh = () => {
+    ttsStatus()
+      .then((next) => {
+        setStatus(next);
+        setError(null);
+      })
+      .catch((cause: unknown) => setError(String(cause)));
+  };
+
+  useEffect(() => {
+    refresh();
+    void onTtsDownload((progress) => {
+      if (progress.done) {
+        setDownload(null);
+        refresh();
+      } else {
+        setDownload({
+          id: progress.id,
+          fraction: progress.total > 0 ? progress.received / progress.total : 0,
+          unpacking: progress.unpacking,
+        });
+      }
+    }).then((stop) => {
+      unlisten.current = stop;
+    });
+    return () => unlisten.current?.();
+  }, []);
+
+  const startDownload = (id: string) => {
+    setDownload({ id, fraction: 0, unpacking: false });
+    downloadTtsModel(id)
+      .then(() => {
+        setDownload(null);
+        refresh();
+      })
+      .catch((cause: unknown) => {
+        setDownload(null);
+        setError(String(cause));
+        refresh();
+      });
+  };
+
+  const remove = (id: string) => {
+    deleteTtsModel(id)
+      .then(refresh)
+      .catch((cause: unknown) => setError(String(cause)));
+  };
+
+  const chooseModel = (id: string) => {
+    setModel(id);
+    setTtsModel(id);
+  };
+
+  return (
+    <div className="flex flex-col gap-5">
+      <section>
+        <h3 className="mb-2 flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-tertiary">
+          {t("settings.speech.models")}
+          <HelpTip align="start" text={t("settings.speech.modelsHelp")} />
+        </h3>
+
+        <ul className="flex flex-col gap-1.5">
+          {(status?.models ?? []).map((entry) => {
+            const downloading = download?.id === entry.id;
+            const selected = model === entry.id;
+            return (
+              <li
+                key={entry.id}
+                onClick={() => entry.downloaded && chooseModel(entry.id)}
+                className={`flex items-center gap-2.5 rounded-lg px-3 py-2 ring-1 transition-shadow ${
+                  selected ? "ring-accent" : "ring-hairline"
+                } ${entry.downloaded ? "cursor-pointer" : ""} ${
+                  entry.downloaded && !selected ? "hover:ring-hairline-strong" : ""
+                }`}
+              >
+                <button
+                  type="button"
+                  role="radio"
+                  aria-checked={selected}
+                  aria-label={t("settings.speech.useModel", { model: entry.label })}
+                  disabled={!entry.downloaded}
+                  onClick={() => chooseModel(entry.id)}
+                  title={
+                    entry.downloaded
+                      ? t("settings.speech.useModelHint")
+                      : t("settings.speech.downloadFirstHint")
+                  }
+                  className="flex h-4 w-4 shrink-0 cursor-pointer items-center justify-center
+                             rounded-full ring-1 ring-hairline-strong
+                             disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  {selected && <span className="h-2 w-2 rounded-full bg-accent" />}
+                </button>
+
+                <span className="min-w-0 flex-1">
+                  <span className="block truncate text-xs text-primary">{entry.label}</span>
+                  <span className="block truncate text-[11px] text-tertiary">{entry.blurb}</span>
+                </span>
+
+                <span className="shrink-0 font-technical text-[10px] text-tertiary">
+                  {formatSize(entry.sizeBytes)}
+                </span>
+
+                {downloading ? (
+                  <span className="flex shrink-0 items-center gap-1.5">
+                    {download.unpacking ? (
+                      <span className="text-[10px] text-tertiary">
+                        {t("settings.speech.unpacking")}
+                      </span>
+                    ) : (
+                      <span className="h-1 w-16 overflow-hidden rounded-full bg-sunken">
+                        <span
+                          className="block h-full bg-accent transition-[width]"
+                          style={{ width: `${Math.round(download.fraction * 100)}%` }}
+                        />
+                      </span>
+                    )}
+                    <button
+                      type="button"
+                      aria-label={t("settings.speech.cancelDownload")}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        void cancelTtsModelDownload();
+                      }}
+                      className="cursor-pointer rounded p-0.5 text-secondary hover:bg-hover
+                                 hover:text-primary"
+                    >
+                      <Icon name="close" size={10} />
+                    </button>
+                  </span>
+                ) : entry.downloaded ? (
+                  <span className="flex shrink-0 items-center gap-1">
+                    <Icon name="check" size={12} className="text-success" />
+                    <button
+                      type="button"
+                      aria-label={t("settings.speech.deleteModel", { model: entry.label })}
+                      title={t("settings.speech.deleteModelHint")}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        remove(entry.id);
+                      }}
+                      className="cursor-pointer rounded p-0.5 text-secondary transition-colors
+                                 hover:bg-hover hover:text-danger"
+                    >
+                      <Icon name="trash" size={11} />
+                    </button>
+                  </span>
+                ) : (
+                  <button
+                    type="button"
+                    disabled={download !== null}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      startDownload(entry.id);
+                    }}
+                    className="shrink-0 cursor-pointer rounded-md bg-panel px-2.5 py-1 text-[11px]
+                               text-primary ring-1 ring-hairline transition-colors hover:bg-hover
+                               disabled:cursor-not-allowed disabled:opacity-40"
+                  >
+                    {t("settings.speech.download")}
+                  </button>
+                )}
+              </li>
+            );
+          })}
+        </ul>
+
+        <p className="mt-2 text-[11px] leading-snug text-tertiary">
+          {t("settings.speech.privacyNote")}
+        </p>
 
         {error && <p className="mt-2 text-[11px] leading-snug text-danger">{error}</p>}
       </section>

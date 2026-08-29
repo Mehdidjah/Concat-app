@@ -14,6 +14,7 @@ mod playback;
 mod projects;
 mod templates;
 mod transcribe;
+mod tts;
 
 use serde::Serialize;
 
@@ -866,6 +867,10 @@ pub fn run() {
                 jobs::SingleFlight::new(),
             )));
             app.manage(transcribe::TranscribeState::new());
+            app.manage(tts::TtsDownloadState(std::sync::Arc::new(
+                jobs::SingleFlight::new(),
+            )));
+            app.manage(tts::TtsState::new());
             app.manage(editor_api::EditorState(std::sync::Mutex::new(None)));
             app.manage(PoolState(std::sync::Arc::new(std::sync::Mutex::new(
                 wolfcut_media::ReaderPool::with_defaults(),
@@ -913,7 +918,13 @@ pub fn run() {
             transcribe::cancel_model_download,
             transcribe::delete_transcriber_model,
             transcribe::transcribe_clip,
-            transcribe::cancel_transcribe
+            transcribe::cancel_transcribe,
+            tts::tts_status,
+            tts::download_tts_model,
+            tts::cancel_tts_model_download,
+            tts::delete_tts_model,
+            tts::speak_text,
+            tts::cancel_speak
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

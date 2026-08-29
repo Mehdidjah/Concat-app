@@ -522,3 +522,102 @@ export async function transcribeClip(
 export async function cancelTranscribe(): Promise<void> {
   return invoke<void>("cancel_transcribe");
 }
+
+// ── text to speech ─────────────────────────────────────────────────────────
+
+/** One Kokoro bundle, as the settings panel sees it. */
+export interface TtsModel {
+  id: string;
+  label: string;
+  blurb: string;
+  /** Approximate download size in bytes, for display. */
+  sizeBytes: number;
+  downloaded: boolean;
+}
+
+/**
+ * One Kokoro speaker. The name encodes accent and gender in its prefix -
+ * `af` American female, `bm` British male, `zf` Chinese female - which the
+ * speech dialog decodes for display.
+ */
+export interface TtsVoice {
+  /** Kokoro speaker id, what `speakText` wants back. */
+  id: number;
+  name: string;
+}
+
+export interface TtsStatus {
+  /** Where models are stored on disk. */
+  modelsDir: string;
+  models: TtsModel[];
+  voices: TtsVoice[];
+}
+
+/** Progress of a model download, via `tts://download`. */
+export interface TtsDownload {
+  id: string;
+  received: number;
+  total: number;
+  /** True while the archive unpacks - bytes stop moving, the job continues. */
+  unpacking: boolean;
+  done: boolean;
+}
+
+export interface SpeakRequest {
+  modelId: string;
+  /** Kokoro speaker id, from the status' voices table. */
+  voice: number;
+  text: string;
+  /** Speaking rate; 1.0 is the voice's natural pace. */
+  speed: number;
+  /** The project folder the WAV should land in. */
+  project: string;
+}
+
+export interface SpeakResult {
+  /** Absolute path of the written WAV, ready for the media import path. */
+  path: string;
+  /** Seconds of audio. */
+  duration: number;
+}
+
+export async function ttsStatus(): Promise<TtsStatus> {
+  return invoke<TtsStatus>("tts_status");
+}
+
+/** Downloads one voice model. Resolves once unpacked into place. */
+export async function downloadTtsModel(id: string): Promise<void> {
+  return invoke<void>("download_tts_model", { id });
+}
+
+export async function cancelTtsModelDownload(): Promise<void> {
+  return invoke<void>("cancel_tts_model_download");
+}
+
+export async function deleteTtsModel(id: string): Promise<void> {
+  return invoke<void>("delete_tts_model", { id });
+}
+
+/** Subscribes to voice model download progress. Resolves to an unsubscribe function. */
+export async function onTtsDownload(
+  handler: (progress: TtsDownload) => void,
+): Promise<UnlistenFn> {
+  return listen<TtsDownload>("tts://download", (event) => handler(event.payload));
+}
+
+/** Synthesizes narration into `<project>/audio/` and returns the WAV's path. */
+export async function speakText(request: SpeakRequest): Promise<SpeakResult> {
+  return invoke<SpeakResult>("speak_text", { request });
+}
+
+/** Asks the running synthesis to stop at the next sentence boundary. */
+export async function cancelSpeak(): Promise<void> {
+  return invoke<void>("cancel_speak");
+}
+
+/** Subscribes to synthesis progress (0..1). Resolves to an unsubscribe function. */
+export async function onSpeakProgress(
+  handler: (progress: { fraction: number }) => void,
+): Promise<UnlistenFn> {
+  return listen<{ fraction: number }>("tts://progress", (event) => handler(event.payload));
+}

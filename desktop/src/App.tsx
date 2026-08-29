@@ -7,6 +7,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { ConfirmDialog } from "./components/ConfirmDialog";
 import { ContextMenu, type ContextTarget } from "./components/ContextMenu";
 import { ExportDialog } from "./components/ExportDialog";
+import { TtsDialog } from "./components/TtsDialog";
 import { Icon } from "./components/Icon";
 import { ALL_MEDIA, MediaBin, type BinFilter } from "./components/MediaBin";
 import type { MenuOption } from "./components/Menu";
@@ -277,6 +278,7 @@ function Editor({
   );
 
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [speechOpen, setSpeechOpen] = useState(false);
   // The save-as-template sheet: null closed, otherwise whether the host is
   // packing the bundle right now.
   const [templateDialog, setTemplateDialog] = useState<null | { busy: boolean }>(null);
@@ -354,6 +356,33 @@ function Editor({
       setBusy(false);
     },
     [dispatch, session.path],
+  );
+
+  // A finished narration WAV: imported like any dropped file, then placed at
+  // the playhead. Throwing lets the speech sheet show the failure in place.
+  const insertNarration = useCallback(
+    async (path: string) => {
+      const summary = await probeMedia(path);
+      const mediaId = await dispatch({
+        op: "addMedia",
+        item: newMediaFromSummary(summary),
+      });
+      if (!mediaId) throw new Error(t("tts.importFailed"));
+      requestAssets(
+        assets.current,
+        {
+          id: mediaId,
+          path: summary.path,
+          kind: summary.kind,
+          duration: summary.duration,
+          hasAudio: summary.audio !== null,
+        },
+        session.path,
+      );
+      await dispatch({ op: "addClipAtFirstFree", mediaId, start: latest.current.playhead });
+      pushToast(t("toast.narrationAdded"), false);
+    },
+    [dispatch, session.path, pushToast, t],
   );
 
   // Artwork for everything already in the project: a reopened project should
@@ -814,6 +843,7 @@ function Editor({
 
   const openModifyProject = useCallback(() => setModifyingProject({ busy: false }), []);
   const openSettings = useCallback(() => setSettingsOpen(true), []);
+  const openSpeech = useCallback(() => setSpeechOpen(true), []);
   const openExport = useCallback(() => setExporting(true), []);
 
   // ── keyboard ─────────────────────────────────────────────────────────────
@@ -1047,6 +1077,11 @@ function Editor({
               icon: "slot",
               onSelect: openTemplateDialog,
             },
+            {
+              label: t("menu.file.speech"),
+              icon: "volume",
+              onSelect: openSpeech,
+            },
           ],
           [
             {
@@ -1146,6 +1181,7 @@ function Editor({
       onCloseProject,
       openExport,
       openSettings,
+      openSpeech,
       openTemplateDialog,
       placeMediaSet,
       redoAction,
@@ -1484,6 +1520,13 @@ function Editor({
 
       {context && <ContextMenu target={context} onClose={() => setContext(null)} />}
       {settingsOpen && <SettingsDialog onClose={() => setSettingsOpen(false)} />}
+      {speechOpen && (
+        <TtsDialog
+          projectPath={session.path}
+          onGenerated={insertNarration}
+          onClose={() => setSpeechOpen(false)}
+        />
+      )}
 
       {modifyingProject && (
         <ModifyProjectDialog

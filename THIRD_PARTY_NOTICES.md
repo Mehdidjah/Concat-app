@@ -26,6 +26,21 @@ Auto-captions can download ggml Whisper models from
 https://huggingface.co/ggerganov/whisper.cpp (MIT). Models are fetched on
 demand and never bundled.
 
+## sherpa-onnx and Kokoro voices
+
+Text to speech links the sherpa-onnx runtime statically
+(https://github.com/k2-fsa/sherpa-onnx, Apache-2.0), which itself statically
+links onnxruntime (MIT), piper-phonemize (MIT) and espeak-ng
+(**GPL-3.0-or-later**, https://github.com/espeak-ng/espeak-ng) for
+grapheme-to-phoneme conversion. Because espeak-ng is compiled into the app
+binary, distributed builds must comply with the GPL-3.0 for that combined
+work; MPL-2.0 sources remain MPL-2.0.
+
+Kokoro voice model bundles (Apache-2.0,
+https://huggingface.co/hexgrad/Kokoro-82M) are downloaded on demand from the
+sherpa-onnx releases - including espeak-ng's data files - and are never
+bundled with the app.
+
 ## Effect preview photograph
 
 The effect catalogue thumbnails are rendered from a photograph by
