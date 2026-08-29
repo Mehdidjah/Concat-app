@@ -763,30 +763,33 @@ export function TimelinePanel({
   // ── timeline tab reorder ──────────────────────────────────────────────────
   // A pointer drag on a tab, not HTML5 drag-and-drop: the webview's OS file
   // drop handling owns that channel (see the bin drag in App for the same
-  // choice). The tab is pressed, pulled past a small threshold, and dropped
-  // into the slot whose caret is showing; a plain click still selects.
+  // choice). Browser-tab behaviour: past a small threshold the pressed tab
+  // rides the pointer while its neighbours slide aside in real time, and
+  // letting go drops it into the gap it is hovering. A plain click still
+  // selects.
   const tabStrip = useRef<HTMLDivElement>(null);
-  /** The tab being dragged and the caret position, in strip content pixels. */
-  const [tabDrag, setTabDrag] = useState<{ id: string; x: number } | null>(null);
+  /** A drag in flight: which tab and how far the pointer has pulled it. */
+  const [tabDrag, setTabDrag] = useState<{ id: string; dx: number } | null>(null);
   const tabPress = useRef<{ id: string; x: number; dragging: boolean } | null>(null);
+  /**
+   * The strip's geometry frozen at lift-off: each tab's centre in the order
+   * they sat, plus the lifted tab's slot and width. Live rects would feed
+   * back - the neighbours move as they slide aside - so every slot decision
+   * measures against where the tabs *were*.
+   */
+  const tabRest = useRef<{ from: number; width: number; centers: number[] } | null>(null);
   /** Swallows exactly one click: the one the browser fires after a drop. */
   const tabDropped = useRef(false);
+  /** The flex gap between tabs (gap-0.5), part of the hole a tab leaves. */
+  const TAB_GAP = 2;
 
-  /** The insertion slot under the pointer, and where to draw the caret. */
-  const tabSlotAt = (clientX: number): { slot: number; x: number } | null => {
-    const strip = tabStrip.current;
-    if (!strip) return null;
-    const tabs = Array.from(strip.querySelectorAll<HTMLElement>('[role="tab"]'));
-    if (tabs.length === 0) return null;
-    const origin = strip.getBoundingClientRect().left - strip.scrollLeft;
-    for (let slot = 0; slot < tabs.length; slot += 1) {
-      const rect = tabs[slot].getBoundingClientRect();
-      if (clientX < rect.left + rect.width / 2) {
-        return { slot, x: rect.left - origin - 1 };
-      }
-    }
-    const last = tabs[tabs.length - 1].getBoundingClientRect();
-    return { slot: tabs.length, x: last.right - origin + 1 };
+  /** Where the lifted tab would land, counted with it removed from the row:
+   * how many resting neighbours its centre has passed to the left of. */
+  const tabSlotFor = (dx: number): number => {
+    const rest = tabRest.current;
+    if (!rest) return 0;
+    const centre = rest.centers[rest.from] + dx;
+    return rest.centers.filter((c, i) => i !== rest.from && c < centre).length;
   };
 
   const onTabPointerDown = (timelineId: string, event: React.PointerEvent) => {
@@ -797,10 +800,25 @@ export function TimelinePanel({
   const onTabPointerMove = (event: React.PointerEvent) => {
     const press = tabPress.current;
     if (!press) return;
-    if (!press.dragging && Math.abs(event.clientX - press.x) < 4) return;
-    press.dragging = true;
-    const target = tabSlotAt(event.clientX);
-    if (target) setTabDrag({ id: press.id, x: target.x });
+    if (!press.dragging) {
+      if (Math.abs(event.clientX - press.x) < 4) return;
+      press.dragging = true;
+      const strip = tabStrip.current;
+      const tabs = strip
+        ? Array.from(strip.querySelectorAll<HTMLElement>('[role="tab"]'))
+        : [];
+      const from = project.timelines.findIndex((timeline) => timeline.id === press.id);
+      if (from === -1 || tabs.length !== project.timelines.length) return;
+      tabRest.current = {
+        from,
+        width: tabs[from].getBoundingClientRect().width,
+        centers: tabs.map((tab) => {
+          const rect = tab.getBoundingClientRect();
+          return rect.left + rect.width / 2;
+        }),
+      };
+    }
+    setTabDrag({ id: press.id, dx: event.clientX - press.x });
   };
   const onTabPointerUp = (event: React.PointerEvent) => {
     const press = tabPress.current;
@@ -808,13 +826,11 @@ export function TimelinePanel({
     if (!press?.dragging) return;
     setTabDrag(null);
     tabDropped.current = true;
-    const from = project.timelines.findIndex((timeline) => timeline.id === press.id);
-    const target = tabSlotAt(event.clientX);
-    if (from === -1 || !target) return;
-    // The slot counts the dragged tab too; lifted out, everything to its
-    // right shifts one left.
-    const index = target.slot > from ? target.slot - 1 : target.slot;
-    if (index !== from) onMoveTimeline(press.id, index);
+    const rest = tabRest.current;
+    tabRest.current = null;
+    if (!rest) return;
+    const index = tabSlotFor(event.clientX - press.x);
+    if (index !== rest.from) onMoveTimeline(press.id, index);
   };
   const selectUnlessDropped = (timelineId: string) => {
     // Reordering must not also switch documents: the engine command leaves
@@ -839,28 +855,44 @@ export function TimelinePanel({
         className="thin-scroll relative flex h-8 shrink-0 items-end gap-0.5 overflow-x-auto
                    overflow-y-hidden border-b border-hairline bg-sunken px-1.5 pt-1"
       >
-        {project.timelines.map((timeline) => (
-          <TimelineTab
-            key={timeline.id}
-            timeline={timeline}
-            active={timeline.id === project.activeTimelineId}
-            closable={project.timelines.length > 1}
-            dimmed={tabDrag?.id === timeline.id}
-            onSelect={selectUnlessDropped}
-            onRename={onRenameTimeline}
-            onRequestRemove={onRequestRemoveTimeline}
-            onDragPointerDown={onTabPointerDown}
-            onDragPointerMove={onTabPointerMove}
-            onDragPointerUp={onTabPointerUp}
-          />
-        ))}
-        {tabDrag && (
-          <span
-            aria-hidden
-            className="pointer-events-none absolute bottom-0.5 top-1.5 w-0.5 rounded bg-accent"
-            style={{ left: tabDrag.x }}
-          />
-        )}
+        {project.timelines.map((timeline, index) => {
+          // While a drag is in flight the row is drawn as it will land: the
+          // lifted tab rides the pointer, and each neighbour the pointer has
+          // carried it past slides one tab-width towards the hole it left.
+          let slide: "lifted" | "aside" | null = null;
+          let shift = 0;
+          const rest = tabDrag ? tabRest.current : null;
+          if (tabDrag && rest) {
+            const centre = rest.centers[rest.from] + tabDrag.dx;
+            if (timeline.id === tabDrag.id) {
+              slide = "lifted";
+              shift = tabDrag.dx;
+            } else {
+              slide = "aside";
+              if (index > rest.from && centre > rest.centers[index]) {
+                shift = -(rest.width + TAB_GAP);
+              } else if (index < rest.from && centre < rest.centers[index]) {
+                shift = rest.width + TAB_GAP;
+              }
+            }
+          }
+          return (
+            <TimelineTab
+              key={timeline.id}
+              timeline={timeline}
+              active={timeline.id === project.activeTimelineId}
+              closable={project.timelines.length > 1}
+              slide={slide}
+              shift={shift}
+              onSelect={selectUnlessDropped}
+              onRename={onRenameTimeline}
+              onRequestRemove={onRequestRemoveTimeline}
+              onDragPointerDown={onTabPointerDown}
+              onDragPointerMove={onTabPointerMove}
+              onDragPointerUp={onTabPointerUp}
+            />
+          );
+        })}
         <span className="self-center">
           <IconButton icon="plus" label="New timeline" size={7} onClick={onAddTimeline} />
         </span>
@@ -1020,7 +1052,8 @@ function TimelineTab({
   timeline,
   active,
   closable,
-  dimmed,
+  slide,
+  shift,
   onSelect,
   onRename,
   onRequestRemove,
@@ -1031,8 +1064,14 @@ function TimelineTab({
   timeline: TimelineMeta;
   active: boolean;
   closable: boolean;
-  /** True while this tab is the one being dragged to a new slot. */
-  dimmed: boolean;
+  /**
+   * This tab's part in a reorder drag: "lifted" rides the pointer raw -
+   * easing there would make it lag the hand - while "aside" neighbours
+   * ease between their slots. Null when nothing is being dragged.
+   */
+  slide: "lifted" | "aside" | null;
+  /** Horizontal offset in pixels for the drag being drawn. */
+  shift: number;
   onSelect: (timelineId: string) => void;
   onRename: (timelineId: string, name: string) => void;
   onRequestRemove: (timelineId: string) => void;
@@ -1076,16 +1115,23 @@ function TimelineTab({
       onPointerDown={(event) => onDragPointerDown(timeline.id, event)}
       onPointerMove={onDragPointerMove}
       onPointerUp={onDragPointerUp}
+      style={shift !== 0 || slide === "lifted" ? { transform: `translateX(${shift}px)` } : undefined}
       // Browser-tab shape: rounded top only, and the active tab overlaps the
       // strip's bottom border by a pixel with the panel's own background, so
       // it reads as one surface with the tray below rather than a pill
       // floating above it.
       className={`group -mb-px flex max-w-44 shrink-0 cursor-pointer items-center gap-1
-                  rounded-t-md px-2.5 py-1 text-xs transition-colors ${
+                  rounded-t-md px-2.5 py-1 text-xs ${
                     active
                       ? "border border-b-0 border-hairline bg-panel text-primary"
                       : "text-secondary hover:bg-hover hover:text-primary"
-                  } ${dimmed ? "opacity-40" : ""}`}
+                  } ${
+                    slide === "lifted"
+                      ? "relative z-10 bg-panel shadow-[0_2px_10px_rgba(0,0,0,0.3)]"
+                      : slide === "aside"
+                        ? "transition-transform duration-150 ease-out"
+                        : "transition-colors"
+                  }`}
     >
       <span className="truncate">{timeline.name}</span>
       {closable && (
