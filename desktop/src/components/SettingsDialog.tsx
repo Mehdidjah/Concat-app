@@ -11,6 +11,7 @@ import {
   transcriberStatus,
   type TranscriberStatus,
 } from "../lib/engine";
+import { LOCALES, systemLocale, useLocale, type MsgKey } from "../lib/i18n";
 import {
   getTranscriberLanguage,
   getTranscriberModel,
@@ -21,11 +22,12 @@ import { HelpTip } from "./controls";
 import { Icon } from "./Icon";
 
 /** The pages of the settings dialog, in display order. */
-type SettingsTab = "transcriber" | "about";
+type SettingsTab = "general" | "transcriber" | "about";
 
-const TABS: { id: SettingsTab; label: string; icon: "waveform" | "info" }[] = [
-  { id: "transcriber", label: "Transcriber", icon: "waveform" },
-  { id: "about", label: "About", icon: "info" },
+const TABS: { id: SettingsTab; labelKey: MsgKey; icon: "settings" | "waveform" | "info" }[] = [
+  { id: "general", labelKey: "settings.tabs.general", icon: "settings" },
+  { id: "transcriber", labelKey: "settings.tabs.transcriber", icon: "waveform" },
+  { id: "about", labelKey: "settings.tabs.about", icon: "info" },
 ];
 
 /**
@@ -36,7 +38,8 @@ const TABS: { id: SettingsTab; label: string; icon: "waveform" | "info" }[] = [
  * Settings here are app-level (this machine), never project state.
  */
 export function SettingsDialog({ onClose }: { onClose: () => void }) {
-  const [tab, setTab] = useState<SettingsTab>("transcriber");
+  const [tab, setTab] = useState<SettingsTab>("general");
+  const { t } = useLocale();
 
   return (
     <div
@@ -49,10 +52,10 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
       <div className="surface flex h-[460px] w-full max-w-2xl flex-col rounded-2xl">
         <div className="flex items-center gap-2 border-b border-hairline px-5 py-3.5">
           <Icon name="settings" size={16} className="text-accent" />
-          <h2 className="flex-1 text-sm font-semibold text-primary">Settings</h2>
+          <h2 className="flex-1 text-sm font-semibold text-primary">{t("settings.title")}</h2>
           <button
             type="button"
-            aria-label="Close"
+            aria-label={t("common.close")}
             onClick={onClose}
             className="cursor-pointer rounded p-1 text-secondary hover:bg-hover hover:text-primary"
           >
@@ -76,17 +79,71 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
                             }`}
               >
                 <Icon name={entry.icon} size={13} className="shrink-0 opacity-70" />
-                {entry.label}
+                {t(entry.labelKey)}
               </button>
             ))}
           </aside>
 
           <div className="thin-scroll min-w-0 flex-1 overflow-y-auto px-5 py-4">
+            {tab === "general" && <GeneralSettings />}
             {tab === "transcriber" && <TranscriberSettings />}
             {tab === "about" && <AboutSettings />}
           </div>
         </div>
       </div>
+    </div>
+  );
+}
+
+function GeneralSettings() {
+  const { t, preference, setLocale } = useLocale();
+  // Native names, straight from LOCALES: whoever is stranded in a language
+  // they cannot read must still recognise their own in this list.
+  const system = LOCALES.find((entry) => entry.id === systemLocale())!;
+  const choices = [
+    {
+      id: "system" as const,
+      name: t("settings.general.systemDefault", { language: system.name }),
+    },
+    ...LOCALES,
+  ];
+
+  return (
+    <div className="flex flex-col gap-5">
+      <section>
+        <h3 className="mb-2 text-[11px] font-semibold uppercase tracking-wider text-tertiary">
+          {t("settings.general.language")}
+        </h3>
+        <div className="flex w-72 flex-col gap-1.5">
+          {choices.map((entry) => {
+            const selected = preference === entry.id;
+            return (
+              <button
+                key={entry.id}
+                type="button"
+                role="radio"
+                aria-checked={selected}
+                onClick={() => setLocale(entry.id)}
+                className={`flex cursor-pointer items-center gap-2.5 rounded-lg px-3 py-2 text-left
+                            ring-1 transition-shadow ${
+                              selected ? "ring-accent" : "ring-hairline hover:ring-hairline-strong"
+                            }`}
+              >
+                <span
+                  className="flex h-4 w-4 shrink-0 items-center justify-center rounded-full
+                             ring-1 ring-hairline-strong"
+                >
+                  {selected && <span className="h-2 w-2 rounded-full bg-accent" />}
+                </span>
+                <span className="truncate text-xs text-primary">{entry.name}</span>
+              </button>
+            );
+          })}
+        </div>
+        <p className="mt-2 text-[11px] leading-snug text-tertiary">
+          {t("settings.general.engineNote")}
+        </p>
+      </section>
     </div>
   );
 }
@@ -98,12 +155,14 @@ function formatSize(bytes: number): string {
     : `${Math.round(bytes / 1_000_000)} MB`;
 }
 
-const LANGUAGES = [
-  { id: "auto", label: "Auto-detect" },
-  { id: "en", label: "English" },
-] as const;
+/** Whisper input languages - what the audio is in, not what the UI speaks. */
+const LANGUAGES: { id: string; labelKey: MsgKey }[] = [
+  { id: "auto", labelKey: "settings.transcriber.languageAuto" },
+  { id: "en", labelKey: "settings.transcriber.languageEnglish" },
+];
 
 function TranscriberSettings() {
+  const { t } = useLocale();
   const [status, setStatus] = useState<TranscriberStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [model, setModel] = useState(getTranscriberModel());
@@ -141,9 +200,9 @@ function TranscriberSettings() {
 
   const locate = async () => {
     const chosen = await open({
-      title: "Locate whisper-cli",
+      title: t("settings.transcriber.locateTitle"),
       multiple: false,
-      filters: [{ name: "Program", extensions: ["exe", "*"] }],
+      filters: [{ name: t("settings.transcriber.locateFilter"), extensions: ["exe", "*"] }],
     });
     if (typeof chosen !== "string") return;
     try {
@@ -194,7 +253,7 @@ function TranscriberSettings() {
           <div className="flex items-center gap-2 rounded-lg bg-sunken px-3 py-2.5">
             <span className="h-2 w-2 shrink-0 rounded-full bg-danger" />
             <span className="min-w-0 flex-1 truncate text-xs text-secondary">
-              Transcription engine not found in this dev build
+              {t("settings.transcriber.engineMissing")}
             </span>
             <button
               type="button"
@@ -202,7 +261,7 @@ function TranscriberSettings() {
               className="shrink-0 cursor-pointer rounded-md bg-panel px-2.5 py-1 text-[11px]
                          text-primary ring-1 ring-hairline transition-colors hover:bg-hover"
             >
-              Locate...
+              {t("settings.transcriber.locate")}
             </button>
           </div>
         </section>
@@ -210,7 +269,7 @@ function TranscriberSettings() {
 
       <section>
         <h3 className="mb-2 text-[11px] font-semibold uppercase tracking-wider text-tertiary">
-          Language
+          {t("settings.transcriber.language")}
         </h3>
         <div className="flex w-56 rounded-lg bg-sunken p-0.5">
           {LANGUAGES.map((entry) => (
@@ -225,7 +284,7 @@ function TranscriberSettings() {
                   : "text-secondary hover:text-primary"
               }`}
             >
-              {entry.label}
+              {t(entry.labelKey)}
             </button>
           ))}
         </div>
@@ -233,11 +292,8 @@ function TranscriberSettings() {
 
       <section>
         <h3 className="mb-2 flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-tertiary">
-          Models
-          <HelpTip
-            align="start"
-            text="Bigger models transcribe better and slower. English-only variants beat the multilingual ones at the same size when the audio is English. The selected model is what Auto captions uses. Everything runs locally - nothing leaves this machine."
-          />
+          {t("settings.transcriber.models")}
+          <HelpTip align="start" text={t("settings.transcriber.modelsHelp")} />
         </h3>
 
         <ul className="flex flex-col gap-1.5">
@@ -262,10 +318,14 @@ function TranscriberSettings() {
                   type="button"
                   role="radio"
                   aria-checked={selected}
-                  aria-label={`Use ${entry.label}`}
+                  aria-label={t("settings.transcriber.useModel", { model: entry.label })}
                   disabled={!entry.downloaded}
                   onClick={() => chooseModel(entry.id)}
-                  title={entry.downloaded ? "Use this model" : "Download it first"}
+                  title={
+                    entry.downloaded
+                      ? t("settings.transcriber.useModelHint")
+                      : t("settings.transcriber.downloadFirstHint")
+                  }
                   className="flex h-4 w-4 shrink-0 cursor-pointer items-center justify-center
                              rounded-full ring-1 ring-hairline-strong
                              disabled:cursor-not-allowed disabled:opacity-40"
@@ -292,7 +352,7 @@ function TranscriberSettings() {
                     </span>
                     <button
                       type="button"
-                      aria-label="Cancel download"
+                      aria-label={t("settings.transcriber.cancelDownload")}
                       onClick={(event) => {
                         event.stopPropagation();
                         void cancelModelDownload();
@@ -308,8 +368,8 @@ function TranscriberSettings() {
                     <Icon name="check" size={12} className="text-success" />
                     <button
                       type="button"
-                      aria-label={`Delete ${entry.label}`}
-                      title="Delete the downloaded model"
+                      aria-label={t("settings.transcriber.deleteModel", { model: entry.label })}
+                      title={t("settings.transcriber.deleteModelHint")}
                       onClick={(event) => {
                         event.stopPropagation();
                         remove(entry.id);
@@ -332,7 +392,7 @@ function TranscriberSettings() {
                                text-primary ring-1 ring-hairline transition-colors hover:bg-hover
                                disabled:cursor-not-allowed disabled:opacity-40"
                   >
-                    Download
+                    {t("settings.transcriber.download")}
                   </button>
                 )}
               </li>
@@ -347,6 +407,7 @@ function TranscriberSettings() {
 }
 
 function AboutSettings() {
+  const { t } = useLocale();
   const [version, setVersion] = useState<string | null>(null);
 
   useEffect(() => {
@@ -360,10 +421,12 @@ function AboutSettings() {
       <h3 className="mb-1 text-[11px] font-semibold uppercase tracking-wider text-tertiary">
         WolfCut
       </h3>
-      <p className="text-xs text-secondary">Version {version ?? "unknown"}</p>
-      <p className="text-[11px] leading-relaxed text-tertiary">
-        Local-first video editing. Media, models and renders stay on this machine.
+      <p className="text-xs text-secondary">
+        {t("settings.about.version", {
+          version: version ?? t("settings.about.versionUnknown"),
+        })}
       </p>
+      <p className="text-[11px] leading-relaxed text-tertiary">{t("settings.about.blurb")}</p>
     </div>
   );
 }
