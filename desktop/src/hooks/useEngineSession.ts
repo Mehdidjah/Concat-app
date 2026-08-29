@@ -190,14 +190,21 @@ export function useEngineSession({
   // ── the session itself ───────────────────────────────────────────────────
   useEffect(() => {
     let cancelled = false;
-    editorOpen({
+    const opening = editorOpen({
       path: session.path,
       name: session.name,
       width: session.width,
       height: session.height,
       rateNum: session.rateNum,
       rateDen: session.rateDen,
-    })
+    });
+    // The engine installs the session only when the open resolves, but the
+    // editor is already on screen taking gestures. Seeding the command queue
+    // with the open makes anything dispatched early - a file dropped onto a
+    // still-loading editor - wait for the session instead of bouncing off
+    // "no project is open" (#11).
+    queue.current = opening.catch(() => undefined);
+    opening
       .then((opened) => {
         if (cancelled) return;
         viewRef.current = opened;
