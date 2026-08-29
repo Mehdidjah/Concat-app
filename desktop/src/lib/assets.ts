@@ -14,6 +14,7 @@
 
 import {
   extractFilmstrip,
+  extractPeaks,
   readArtwork as readArtworkFile,
   readMediaBytes,
   writeArtwork as writeArtworkFile,
@@ -64,15 +65,6 @@ function announce(assets: MediaAssets): void {
   for (const listener of assets.listeners) listener();
 }
 
-/**
- * Resolution of the cached waveform.
- *
- * 200 buckets per second is roughly two buckets per pixel at the default zoom,
- * which is enough that the drawn shape does not visibly change as you zoom in
- * a step or two, without storing the whole decoded file.
- */
-const BUCKETS_PER_SECOND = 200;
-
 /** Frames per filmstrip. Enough to read the shot, few enough to stay cheap. */
 const STRIP_FRAMES = 24;
 /**
@@ -103,10 +95,9 @@ export function requestAssets(
 ): void {
   if (assets.pending.has(media.id)) return;
 
-  // Video peaks are deliberately NOT loaded here. Decoding a video's audio
-  // means reading the whole file and crunching every sample, which stalls the
-  // main thread hard enough to make playback stutter - so it happens only on
-  // demand, via requestVideoPeaks, when a detached audio clip needs drawing.
+  // Video peaks are deliberately NOT loaded here. Even engine-side, decoding
+  // a video's whole audio track is real work - so it happens only on demand,
+  // via requestVideoPeaks, when a detached audio clip needs drawing.
   const wantsPeaks = media.kind === "audio" && !assets.peaks.has(media.id);
   const wantsStrip = media.kind !== "audio" && !assets.strips.has(media.id);
   if (!wantsPeaks && !wantsStrip) return;
@@ -153,8 +144,8 @@ export function requestAssets(
  *
  * Called when a detached audio clip exists (or is being created) for a video,
  * which is the only time a video needs peaks. Expensive on first run - the
- * whole file is read and decoded - but the result lands in the disk cache, so
- * a reopened project pays only a file read.
+ * engine decodes the whole audio track - but the result lands in the disk
+ * cache, so a reopened project pays only a file read.
  */
 export function requestVideoPeaks(
   assets: MediaAssets,
@@ -242,48 +233,17 @@ export function decodePeaks(bytes: ArrayBuffer): Peaks | null {
   };
 }
 
-/** Decodes a file and reduces it to min/max pairs. */
+/**
+ * Asks the engine for a file's peaks.
+ *
+ * The decode, the bucketing and the disk cache all live host-side now - the
+ * engine streams FFmpeg's output straight into buckets, so neither the file
+ * nor its samples ever cross the IPC boundary. What arrives here is the
+ * encoded buckets, ready for `decodePeaks`.
+ */
 async function loadPeaks(path: string, project: string | null): Promise<Peaks | null> {
-  const key = `${artworkKey(path)}-b${BUCKETS_PER_SECOND}.peaks`;
-  const cached = await readArtwork(project, key);
-  if (cached) {
-    const peaks = decodePeaks(cached);
-    if (peaks) return peaks;
-  }
-
   try {
-    const bytes = await readMediaBytes(path);
-
-    // An OfflineAudioContext decodes without opening an output device, which
-    // matters because this runs at import time with no user gesture behind it.
-    const context = new OfflineAudioContext(1, 1, 44100);
-    const buffer = await context.decodeAudioData(bytes);
-
-    const samples = buffer.getChannelData(0);
-    const bucketSize = Math.max(1, Math.floor(buffer.sampleRate / BUCKETS_PER_SECOND));
-    const bucketCount = Math.ceil(samples.length / bucketSize);
-
-    const min = new Float32Array(bucketCount);
-    const max = new Float32Array(bucketCount);
-
-    for (let bucket = 0; bucket < bucketCount; bucket += 1) {
-      const from = bucket * bucketSize;
-      const to = Math.min(from + bucketSize, samples.length);
-
-      let low = 0;
-      let high = 0;
-      for (let index = from; index < to; index += 1) {
-        const sample = samples[index];
-        if (sample < low) low = sample;
-        if (sample > high) high = sample;
-      }
-      min[bucket] = low;
-      max[bucket] = high;
-    }
-
-    const peaks = { min, max, bucketsPerSecond: buffer.sampleRate / bucketSize };
-    writeArtwork(project, key, encodePeaks(peaks));
-    return peaks;
+    return decodePeaks(await extractPeaks(path, project));
   } catch (cause) {
     console.warn(`WolfCut: no waveform for ${path}`, cause);
     return null;

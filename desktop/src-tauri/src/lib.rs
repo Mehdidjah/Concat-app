@@ -163,23 +163,118 @@ fn engine_version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
 
+/// The most `read_media_bytes` will hand the webview at once.
+///
+/// Its remaining callers decode still images and register fonts - assets
+/// that are megabytes, not gigabytes. The cap is what keeps the command
+/// from quietly growing back into a whole-disk read primitive now that
+/// waveform peaks (the one legitimate whole-file consumer) decode in the
+/// engine instead.
+const MEDIA_READ_CAP: u64 = 64 * 1024 * 1024;
+
 /// Reads a whole file and returns it as raw bytes.
 ///
-/// Two callers: the waveform peak decode in `lib/assets.ts`, and custom font
+/// Two callers: still-image decode in `lib/assets.ts`, and custom font
 /// registration. `tauri::ipc::Response` puts the bytes on the wire as an
 /// ArrayBuffer rather than a JSON array of numbers, which for a few
 /// megabytes is the difference between instant and unusable.
 ///
 /// It loads the entire file into memory, so it is not a general-purpose
-/// reader and must not become one.
+/// reader and must not become one: anything past [`MEDIA_READ_CAP`] is
+/// refused.
 #[tauri::command]
 async fn read_media_bytes(path: String) -> Result<tauri::ipc::Response, String> {
     tauri::async_runtime::spawn_blocking(move || {
+        let size = std::fs::metadata(&path)
+            .map_err(|error| format!("could not read {path}: {error}"))?
+            .len();
+        if size > MEDIA_READ_CAP {
+            return Err(format!(
+                "refusing to read {path}: {size} bytes is over the {MEDIA_READ_CAP} byte limit"
+            ));
+        }
         std::fs::read(&path).map_err(|error| format!("could not read {path}: {error}"))
     })
     .await
     .map_err(|error| format!("read task failed: {error}"))?
     .map(tauri::ipc::Response::new)
+}
+
+/// Resolution of the cached waveform.
+///
+/// 200 buckets per second is roughly two buckets per pixel at the default
+/// timeline zoom, which is enough that the drawn shape does not visibly
+/// change as you zoom in a step or two, without storing the whole decoded
+/// file.
+const PEAKS_BUCKETS_PER_SECOND: u32 = 200;
+
+/// Waveform peaks for one media file: engine-decoded, project-cached.
+///
+/// The engine streams FFmpeg's decode into min/max buckets, so neither the
+/// file nor its samples are ever resident - and nothing crosses the IPC
+/// boundary but the buckets themselves. The result is cached in the
+/// project's `cache/` folder under a key derived from the path, and served
+/// from there on every later call; `project: None` (an unsaved session)
+/// just skips the cache.
+#[tauri::command]
+async fn extract_peaks(path: String, project: Option<String>) -> Result<tauri::ipc::Response, String> {
+    tauri::async_runtime::spawn_blocking(move || peaks_bytes(&path, project.as_deref()))
+        .await
+        .map_err(|error| format!("peaks task failed: {error}"))?
+        .map(tauri::ipc::Response::new)
+}
+
+fn peaks_bytes(path: &str, project: Option<&str>) -> Result<Vec<u8>, String> {
+    let cached = project.and_then(|project| artwork_file(project, &peaks_key(path)).ok());
+    if let Some(file) = &cached {
+        if let Ok(bytes) = std::fs::read(file) {
+            // A corrupt entry falls through to regeneration rather than
+            // being served - the frontend has no second request to make.
+            if plausible_peaks(&bytes) {
+                return Ok(bytes);
+            }
+        }
+    }
+
+    let peaks = wolfcut_media::peaks::extract(std::path::Path::new(path), PEAKS_BUCKETS_PER_SECOND)
+        .map_err(describe)?;
+    let bytes = peaks.encode();
+
+    // Best-effort, like every artwork write: a failed cache write only
+    // means decoding again next launch.
+    if let Some(file) = &cached {
+        if let Some(parent) = file.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::write(file, &bytes);
+    }
+    Ok(bytes)
+}
+
+/// The cache filename for one file's peaks.
+///
+/// FNV-1a 64 over the path, like the audio cache's `decode_key` and for the
+/// same reason: these keys name files that outlive the process, and
+/// `DefaultHasher` is free to change between Rust releases. The bucket rate
+/// rides in the name so a resolution change regenerates instead of serving
+/// yesterday's shape.
+fn peaks_key(path: &str) -> String {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for &byte in path.as_bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{hash:016x}-b{PEAKS_BUCKETS_PER_SECOND}.peaks")
+}
+
+/// Whether bytes have the shape `Peaks::encode` writes:
+/// `[rate f32][count u32][min f32 x count][max f32 x count]`.
+fn plausible_peaks(bytes: &[u8]) -> bool {
+    if bytes.len() < 8 {
+        return false;
+    }
+    let count = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]) as usize;
+    bytes.len() == 8 + count * 8
 }
 
 /// Where one artwork file lives inside a project's cache.
@@ -749,6 +844,7 @@ pub fn run() {
             probe_media,
             engine_version,
             read_media_bytes,
+            extract_peaks,
             audio_set_clips,
             transport_play,
             transport_pause,

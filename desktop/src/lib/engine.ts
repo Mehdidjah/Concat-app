@@ -76,12 +76,23 @@ export async function engineVersion(): Promise<string> {
 /**
  * Reads a whole file into memory as bytes.
  *
- * Two callers: the waveform peak decode in `lib/assets.ts`, and custom font
- * registration. It loads the entire file, so do not reach for it as a
- * general-purpose reader.
+ * Two callers: still-image decode in `lib/assets.ts`, and custom font
+ * registration. It loads the entire file and the host refuses anything past
+ * its size cap, so do not reach for it as a general-purpose reader.
  */
 export async function readMediaBytes(path: string): Promise<ArrayBuffer> {
   return invoke<ArrayBuffer>("read_media_bytes", { path });
+}
+
+/**
+ * Waveform peaks for one media file, decoded and bucketed by the engine.
+ *
+ * Returns the encoded form `decodePeaks` in `lib/assets.ts` reads. The host
+ * caches the result in the project folder, so only the first call per file
+ * pays for a decode; `project: null` skips that cache.
+ */
+export async function extractPeaks(path: string, project: string | null): Promise<ArrayBuffer> {
+  return invoke<ArrayBuffer>("extract_peaks", { path, project });
 }
 
 

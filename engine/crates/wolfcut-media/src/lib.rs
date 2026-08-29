@@ -16,6 +16,7 @@ pub mod encode;
 #[cfg(feature = "ffi")]
 pub mod ffi;
 pub mod error;
+pub mod peaks;
 pub mod pool;
 pub mod probe;
 
@@ -25,5 +26,6 @@ pub use binaries::{ffmpeg, ffprobe, set_binaries};
 pub use decode::{DecodeOptions, FfmpegDecoder, FrameSource, SeekableSource};
 pub use encode::{EncodeOptions, FfmpegEncoder, FrameSink};
 pub use error::{Error, Result};
+pub use peaks::Peaks;
 pub use pool::{FrameCache, ReaderPool};
 pub use probe::{AudioStream, MediaInfo, VideoStream, probe};
