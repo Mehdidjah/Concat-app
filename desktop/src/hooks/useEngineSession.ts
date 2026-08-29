@@ -131,12 +131,25 @@ export function useEngineSession({
 
   // ── the gesture echo ─────────────────────────────────────────────────────
 
-  /** Live: merges a patch into the echo for one clip. */
+  /**
+   * Live: merges a patch into the echo for one clip.
+   *
+   * The merge goes through `echoRef` and lands in it synchronously, not just
+   * through a state updater: a discrete control - adding an effect, picking
+   * a transition - echoes and commits in the same tick, and a commit that
+   * read the ref before the next render would see the world without the
+   * change it is supposed to commit. The engine never hearing about an
+   * applied effect is exactly how the paused monitor ends up showing the
+   * unprocessed frame.
+   */
   const liveClip = useCallback((clipId: string, patch: Partial<Clip>) => {
-    setEcho((current) => ({
+    const current = echoRef.current;
+    const next = {
       ...(current ?? {}),
       [clipId]: { ...(current?.[clipId] ?? {}), ...patch },
-    }));
+    };
+    echoRef.current = next;
+    setEcho(next);
   }, []);
 
   /**

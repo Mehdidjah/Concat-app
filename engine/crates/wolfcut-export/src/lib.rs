@@ -955,6 +955,29 @@ mod tests {
             &bytes[centre..centre + 4],
         );
 
+        // A clip with an effect chain: the paused monitor must show the
+        // processed pixels, not the raw decode. Negating red footage has to
+        // come back cyan-ish.
+        let mut effected = clip("video", 0, 0.0, 1.0, 0.0);
+        effected.path = path.to_string_lossy().into_owned();
+        effected.media_width = Some(64);
+        effected.media_height = Some(64);
+        effected.video_filter_chain = "negate".to_owned();
+        let filtered = PreviewFrameRequest {
+            time: 0.5,
+            width: 64,
+            height: 64,
+            rate_num: 30,
+            rate_den: 1,
+            clips: vec![effected],
+        };
+        let bytes = preview_frame(&mut pool, &filtered).expect("previews with a chain");
+        assert!(
+            bytes[centre] < 90 && bytes[centre + 1] > 120,
+            "the chain must be baked into the paused frame, got {:?}",
+            &bytes[centre..centre + 4],
+        );
+
         let _ = std::fs::remove_file(&path);
     }
 
