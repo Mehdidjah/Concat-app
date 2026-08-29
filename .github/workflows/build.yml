@@ -6,10 +6,14 @@ name: Build App
 # first - the release guard in build.rs refuses to build without it, because a
 # packaged app without its FFmpeg ships broken (no PATH fallback from Finder).
 #
-# - Pushes to main and manual runs: build and upload the bundles as artifacts.
-# - Tags starting with v (v0.1.0-alpha.1, v0.2.0, ...): additionally publish
-#   the installers to a GitHub release. Tags containing a hyphen are marked as
-#   pre-releases.
+# - Pushes to main: build, and when every job is green, automatically publish
+#   a pre-release tagged v<version>-alpha.<n> - the version comes from
+#   tauri.conf.json, and <n> increments past the highest existing alpha tag
+#   for that version. A red build publishes nothing.
+# - Tags starting with v (v0.2.0, ...): publish the installers under that tag
+#   name. Tags containing a hyphen are marked as pre-releases. This is the
+#   path for stable releases; alphas take care of themselves.
+# - Manual runs: build and upload the bundles as artifacts only.
 on:
   workflow_dispatch:
   push:
@@ -258,12 +262,18 @@ jobs:
 
   release:
     name: Publish release
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'push' && github.ref == 'refs/heads/main')
     needs: [engine-tests, app]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
+      # fetch-depth 0 so every existing tag is present locally - the next
+      # alpha number is computed from them.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
       - uses: actions/download-artifact@v4
         with:
           path: bundles
@@ -272,11 +282,34 @@ jobs:
       - name: List what is being published
         run: find bundles -type f | sort
 
+      # A pushed tag releases under its own name. A green main build mints the
+      # next alpha tag itself: v<version>-alpha.<n>, where <n> is one past the
+      # highest alpha already tagged for this version. action-gh-release
+      # creates the tag while publishing, and because it authenticates with
+      # GITHUB_TOKEN, that tag does not re-trigger this workflow.
+      - name: Decide the tag
+        id: tag
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            echo "name=$GITHUB_REF_NAME" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          version="$(jq -r .version desktop/src-tauri/tauri.conf.json)"
+          highest=0
+          for tag in $(git tag --list "v${version}-alpha.*"); do
+            n="${tag##*.}"
+            if [[ "$n" =~ ^[0-9]+$ ]] && (( n > highest )); then highest="$n"; fi
+          done
+          echo "name=v${version}-alpha.$((highest + 1))" >> "$GITHUB_OUTPUT"
+
       - uses: softprops/action-gh-release@v2
         with:
-          name: WolfCut ${{ github.ref_name }}
-          # A hyphen in the tag (v0.1.0-alpha.1) marks a pre-release.
-          prerelease: ${{ contains(github.ref_name, '-') }}
+          tag_name: ${{ steps.tag.outputs.name }}
+          target_commitish: ${{ github.sha }}
+          name: WolfCut ${{ steps.tag.outputs.name }}
+          # A hyphen in the tag (v0.2.0-alpha.3) marks a pre-release.
+          prerelease: ${{ contains(steps.tag.outputs.name, '-') }}
           generate_release_notes: true
           body: |
             WolfCut is MPL-2.0. The installers bundle GPL-built FFmpeg binaries,
