@@ -257,6 +257,7 @@
   "mediaBin.videoEffects": "视频特效",
   "menu.clip.autoCaptions": "自动字幕",
   "menu.clip.detachAudio": "分离音频",
+  "menu.clip.generateVoice": "生成语音...",
   "menu.clip.reattachAudio": "重新附加音频",
   "menu.clip.transcribing": "正在转录...",
   "menu.edit.deleteClips.one": "删除片段",

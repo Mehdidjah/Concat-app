@@ -257,6 +257,7 @@
   "mediaBin.videoEffects": "Video Effects",
   "menu.clip.autoCaptions": "Auto captions",
   "menu.clip.detachAudio": "Detach audio",
+  "menu.clip.generateVoice": "Generate voice...",
   "menu.clip.reattachAudio": "Reattach audio",
   "menu.clip.transcribing": "Transcribing...",
   "menu.edit.deleteClips.one": "Delete clip",

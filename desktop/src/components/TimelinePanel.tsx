@@ -984,8 +984,9 @@ export function TimelinePanel({
           active={snap}
           onClick={() => onSnapChange(!snap)}
         />
-        {/* Only while a sound-capable clip is selected: a title has nothing
-            to detach or transcribe, and a menu of grey rows teaches nothing. */}
+        {/* Only while the selected clip has tools to offer - sound to detach
+            or transcribe, or a title's text to speak. A menu of grey rows
+            teaches nothing. */}
         {clipTools.length > 0 && (
           <>
             <Divider />

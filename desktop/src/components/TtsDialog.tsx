@@ -65,18 +65,21 @@ function voiceLabel(name: string): string {
  */
 export function TtsDialog({
   projectPath,
+  initialText,
   onGenerated,
   onClose,
 }: {
   /** The open project's folder - where the host writes the WAV. */
   projectPath: string;
+  /** Prefills the text box - a title clip's content when spoken from one. */
+  initialText?: string;
   /** Places the finished WAV on the timeline; throwing lands in the sheet's
    * error notice. The sheet closes itself afterwards. */
   onGenerated: (path: string, duration: number) => Promise<void>;
   onClose: () => void;
 }) {
   const { t } = useLocale();
-  const [text, setText] = useState("");
+  const [text, setText] = useState(initialText ?? "");
   const [voice, setVoice] = useState(getTtsVoice());
   const [speed, setSpeed] = useState(1.0);
   const [phase, setPhase] = useState<Phase>({ kind: "idle" });

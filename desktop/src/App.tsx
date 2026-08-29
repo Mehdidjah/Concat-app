@@ -278,7 +278,9 @@ function Editor({
   );
 
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [speechOpen, setSpeechOpen] = useState(false);
+  /** The speech sheet: open with optional prefilled text and a fixed landing
+   * time (a text clip's start), or null when closed. */
+  const [speech, setSpeech] = useState<{ text?: string; at?: number } | null>(null);
   // The save-as-template sheet: null closed, otherwise whether the host is
   // packing the bundle right now.
   const [templateDialog, setTemplateDialog] = useState<null | { busy: boolean }>(null);
@@ -359,9 +361,10 @@ function Editor({
   );
 
   // A finished narration WAV: imported like any dropped file, then placed at
-  // the playhead. Throwing lets the speech sheet show the failure in place.
+  // `at` - a text clip's start when spoken from one, the playhead otherwise.
+  // Throwing lets the speech sheet show the failure in place.
   const insertNarration = useCallback(
-    async (path: string) => {
+    async (path: string, at?: number) => {
       const summary = await probeMedia(path);
       const mediaId = await dispatch({
         op: "addMedia",
@@ -379,7 +382,11 @@ function Editor({
         },
         session.path,
       );
-      await dispatch({ op: "addClipAtFirstFree", mediaId, start: latest.current.playhead });
+      await dispatch({
+        op: "addClipAtFirstFree",
+        mediaId,
+        start: at ?? latest.current.playhead,
+      });
       pushToast(t("toast.narrationAdded"), false);
     },
     [dispatch, session.path, pushToast, t],
@@ -540,11 +547,27 @@ function Editor({
     onToast: pushToast,
   });
 
-  /** The audio/video tools dropdown. Hidden entirely for soundless clips. */
+  /** The clip tools dropdown. Hidden for clips with nothing to offer. */
   const clipTools = useMemo<MenuOption[][]>(() => {
     const clip = selectedClipIds.length === 1 ? findClip(project, selectedClipIds[0]) : null;
-    const media = clip ? findMedia(project, clip.mediaId) : null;
-    if (!clip || (clip.kind !== "video" && clip.kind !== "audio")) return [];
+    if (!clip) return [];
+
+    // A title's one tool: speak its text. The sheet opens prefilled, and the
+    // narration lands where the title starts.
+    if (clip.kind === "text") {
+      return [
+        [
+          {
+            label: t("menu.clip.generateVoice"),
+            icon: "volume" as const,
+            onSelect: () => setSpeech({ text: clip.text?.content ?? "", at: clip.start }),
+          },
+        ],
+      ];
+    }
+
+    const media = findMedia(project, clip.mediaId);
+    if (clip.kind !== "video" && clip.kind !== "audio") return [];
 
     const hasSound = Boolean(media?.hasAudio);
     const canDetach = Boolean(
@@ -843,7 +866,7 @@ function Editor({
 
   const openModifyProject = useCallback(() => setModifyingProject({ busy: false }), []);
   const openSettings = useCallback(() => setSettingsOpen(true), []);
-  const openSpeech = useCallback(() => setSpeechOpen(true), []);
+  const openSpeech = useCallback(() => setSpeech({}), []);
   const openExport = useCallback(() => setExporting(true), []);
 
   // ── keyboard ─────────────────────────────────────────────────────────────
@@ -1419,98 +1442,125 @@ function Editor({
               setContext({
                 x,
                 y,
-                items: [
-                  {
-                    label: tp("contextMenu.splitClips", target.length),
-                    icon: "razor",
-                    hint: "S",
-                    onSelect: splitAtPlayhead,
-                  },
-                  ...(whyNotMerge(project, target) === null
-                    ? [
-                        {
-                          label: tp("contextMenu.mergeClips", target.length),
-                          icon: "merge" as const,
-                          hint: "M",
-                          onSelect: mergeSelected,
-                        },
-                      ]
-                    : []),
-                  ...(() => {
-                    const media = clip ? findMedia(project, clip.mediaId) : null;
-                    return !many &&
-                      clip &&
-                      (clip.kind === "video" || clip.kind === "audio") &&
-                      media?.hasAudio &&
-                      !transcribing
+                // Related actions share a group; the menu draws a divider
+                // between groups and drops any that come up empty.
+                groups: [
+                  // Cutting.
+                  [
+                    {
+                      label: tp("contextMenu.splitClips", target.length),
+                      icon: "razor",
+                      hint: "S",
+                      onSelect: splitAtPlayhead,
+                    },
+                    ...(whyNotMerge(project, target) === null
                       ? [
                           {
-                            label: t("menu.clip.autoCaptions"),
-                            icon: "type" as const,
-                            onSelect: () => void autoCaption(clip, media),
+                            label: tp("contextMenu.mergeClips", target.length),
+                            icon: "merge" as const,
+                            hint: "M",
+                            onSelect: mergeSelected,
                           },
                         ]
-                      : [];
-                  })(),
-                  ...(!many &&
-                  clip?.kind === "video" &&
-                  !clip.muted &&
-                  findMedia(project, clip.mediaId)?.hasAudio &&
-                  detachedAudioOf(project, clip.id).length === 0
-                    ? [
-                        {
-                          label: t("menu.clip.detachAudio"),
-                          icon: "waveform" as const,
-                          onSelect: () => void dispatch({ op: "detachAudio", clipId }),
-                        },
-                      ]
-                    : []),
-                  ...(!many &&
-                  clip &&
-                  ((clip.kind === "video" && detachedAudioOf(project, clip.id).length > 0) ||
-                    (clip.kind === "audio" &&
-                      clip.detachedFrom &&
-                      findClip(project, clip.detachedFrom)))
-                    ? [
-                        {
-                          label: t("menu.clip.reattachAudio"),
-                          icon: "merge" as const,
-                          onSelect: () => {
-                            void dispatch({ op: "reattachAudio", clipId });
-                            setSelectedClipIds([]);
-                          },
-                        },
-                      ]
-                    : []),
-                  {
-                    label: t("contextMenu.moveToPlayhead"),
-                    icon: "select",
-                    onSelect: () => {
-                      const moving = findClip(latest.current.project, clipId);
-                      if (moving) {
-                        void dispatch({
-                          op: "moveClips",
-                          moves: [
+                      : []),
+                  ],
+                  // Generation: captions out of speech, speech out of titles.
+                  [
+                    ...(() => {
+                      const media = clip ? findMedia(project, clip.mediaId) : null;
+                      return !many &&
+                        clip &&
+                        (clip.kind === "video" || clip.kind === "audio") &&
+                        media?.hasAudio &&
+                        !transcribing
+                        ? [
                             {
-                              clipId,
-                              start: latest.current.playhead,
-                              trackId: moving.trackId,
+                              label: t("menu.clip.autoCaptions"),
+                              icon: "type" as const,
+                              onSelect: () => void autoCaption(clip, media),
                             },
-                          ],
-                        });
-                      }
+                          ]
+                        : [];
+                    })(),
+                    ...(!many && clip?.kind === "text"
+                      ? [
+                          {
+                            label: t("menu.clip.generateVoice"),
+                            icon: "volume" as const,
+                            onSelect: () =>
+                              setSpeech({ text: clip.text?.content ?? "", at: clip.start }),
+                          },
+                        ]
+                      : []),
+                  ],
+                  // The audio attached to a video clip.
+                  [
+                    ...(!many &&
+                    clip?.kind === "video" &&
+                    !clip.muted &&
+                    findMedia(project, clip.mediaId)?.hasAudio &&
+                    detachedAudioOf(project, clip.id).length === 0
+                      ? [
+                          {
+                            label: t("menu.clip.detachAudio"),
+                            icon: "waveform" as const,
+                            onSelect: () => void dispatch({ op: "detachAudio", clipId }),
+                          },
+                        ]
+                      : []),
+                    ...(!many &&
+                    clip &&
+                    ((clip.kind === "video" && detachedAudioOf(project, clip.id).length > 0) ||
+                      (clip.kind === "audio" &&
+                        clip.detachedFrom &&
+                        findClip(project, clip.detachedFrom)))
+                      ? [
+                          {
+                            label: t("menu.clip.reattachAudio"),
+                            icon: "merge" as const,
+                            onSelect: () => {
+                              void dispatch({ op: "reattachAudio", clipId });
+                              setSelectedClipIds([]);
+                            },
+                          },
+                        ]
+                      : []),
+                  ],
+                  // Arranging.
+                  [
+                    {
+                      label: t("contextMenu.moveToPlayhead"),
+                      icon: "select",
+                      onSelect: () => {
+                        const moving = findClip(latest.current.project, clipId);
+                        if (moving) {
+                          void dispatch({
+                            op: "moveClips",
+                            moves: [
+                              {
+                                clipId,
+                                start: latest.current.playhead,
+                                trackId: moving.trackId,
+                              },
+                            ],
+                          });
+                        }
+                      },
                     },
-                  },
-                  {
-                    label: tp("contextMenu.deleteClips", target.length),
-                    icon: "trash",
-                    hint: "Del",
-                    danger: true,
-                    onSelect: () => {
-                      void dispatch({ op: "removeClips", clipIds: target });
-                      setSelectedClipIds([]);
+                  ],
+                  // Destruction, kept in its own section at the bottom.
+                  [
+                    {
+                      label: tp("contextMenu.deleteClips", target.length),
+                      icon: "trash",
+                      hint: "Del",
+                      danger: true,
+                      onSelect: () => {
+                        void dispatch({ op: "removeClips", clipIds: target });
+                        setSelectedClipIds([]);
+                      },
                     },
-                  },
+                  ],
                 ],
               });
             }}
@@ -1520,11 +1570,12 @@ function Editor({
 
       {context && <ContextMenu target={context} onClose={() => setContext(null)} />}
       {settingsOpen && <SettingsDialog onClose={() => setSettingsOpen(false)} />}
-      {speechOpen && (
+      {speech && (
         <TtsDialog
           projectPath={session.path}
-          onGenerated={insertNarration}
-          onClose={() => setSpeechOpen(false)}
+          initialText={speech.text}
+          onGenerated={(path) => insertNarration(path, speech.at)}
+          onClose={() => setSpeech(null)}
         />
       )}
 

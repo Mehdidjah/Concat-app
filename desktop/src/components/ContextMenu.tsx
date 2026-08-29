@@ -14,7 +14,8 @@ export interface ContextItem {
 export interface ContextTarget {
   x: number;
   y: number;
-  items: ContextItem[];
+  /** Related actions grouped together; a hairline divides the groups. */
+  groups: ContextItem[][];
 }
 
 /**
@@ -69,30 +70,40 @@ export function ContextMenu({ target, onClose }: { target: ContextTarget; onClos
       onContextMenu={(event) => event.preventDefault()}
       className="surface fixed z-50 min-w-48 rounded-xl px-1.5 py-1.5 text-primary"
     >
-      {target.items.map((item) => (
-        <button
-          key={item.label}
-          role="menuitem"
-          type="button"
-          onClick={() => {
-            item.onSelect();
-            onClose();
-          }}
-          className={`flex w-full cursor-pointer items-center gap-2.5 rounded-lg px-2.5 py-1.5
-                      text-left text-xs transition-colors hover:bg-hover
-                      ${item.danger ? "text-danger" : ""}`}
-        >
-          {item.icon ? (
-            <Icon name={item.icon} size={14} className="shrink-0 opacity-70" />
-          ) : (
-            <span className="w-3.5 shrink-0" />
-          )}
-          <span className="min-w-0 flex-1 truncate">{item.label}</span>
-          {item.hint && (
-            <span className="shrink-0 font-technical text-[10px] text-tertiary">{item.hint}</span>
-          )}
-        </button>
-      ))}
+      {target.groups
+        .filter((group) => group.length > 0)
+        .map((group, index) => (
+          // Index as key is fine here: the menu is rebuilt from scratch on
+          // every open and never reorders while visible.
+          <div key={index} className={index > 0 ? "mt-1 border-t border-hairline pt-1" : ""}>
+            {group.map((item) => (
+              <button
+                key={item.label}
+                role="menuitem"
+                type="button"
+                onClick={() => {
+                  item.onSelect();
+                  onClose();
+                }}
+                className={`flex w-full cursor-pointer items-center gap-2.5 rounded-lg px-2.5 py-1.5
+                            text-left text-xs transition-colors hover:bg-hover
+                            ${item.danger ? "text-danger" : ""}`}
+              >
+                {item.icon ? (
+                  <Icon name={item.icon} size={14} className="shrink-0 opacity-70" />
+                ) : (
+                  <span className="w-3.5 shrink-0" />
+                )}
+                <span className="min-w-0 flex-1 truncate">{item.label}</span>
+                {item.hint && (
+                  <span className="shrink-0 font-technical text-[10px] text-tertiary">
+                    {item.hint}
+                  </span>
+                )}
+              </button>
+            ))}
+          </div>
+        ))}
     </div>,
     document.body,
   );
