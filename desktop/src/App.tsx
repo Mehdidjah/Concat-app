@@ -1343,6 +1343,9 @@ function Editor({
             onRenameTimeline={(timelineId, name) =>
               void dispatch({ op: "renameTimeline", timelineId, name })
             }
+            onMoveTimeline={(timelineId, index) =>
+              void dispatch({ op: "moveTimeline", timelineId, index })
+            }
             onRequestRemoveTimeline={(timelineId) => {
               const meta = project.timelines.find((candidate) => candidate.id === timelineId);
               if (meta) setTimelineToDelete({ id: meta.id, name: meta.name });

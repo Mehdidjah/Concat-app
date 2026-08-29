@@ -207,6 +207,37 @@ mod tests {
     }
 
     #[test]
+    fn a_timeline_moves_to_a_new_slot_without_stealing_the_selection() {
+        let mut editor = Editor::new();
+        let second = editor.apply(Command::AddTimeline).expect("adds").created_id.expect("id");
+        let third = editor.apply(Command::AddTimeline).expect("adds").created_id.expect("id");
+        editor.apply(Command::SelectTimeline { timeline_id: "TL1".to_owned() }).expect("ok");
+
+        editor
+            .apply(Command::MoveTimeline { timeline_id: third.clone(), index: 0 })
+            .expect("moves");
+        let order: Vec<_> =
+            editor.project().timelines.iter().map(|timeline| timeline.id.clone()).collect();
+        assert_eq!(order, vec![third.clone(), "TL1".to_owned(), second.clone()]);
+        assert_eq!(editor.project().active_timeline_id, "TL1", "moving must not select");
+
+        // An index past the end clamps to the last slot; a same-slot move and
+        // an unknown id apply nothing, so neither records history.
+        editor
+            .apply(Command::MoveTimeline { timeline_id: third.clone(), index: 99 })
+            .expect("ok");
+        let order: Vec<_> =
+            editor.project().timelines.iter().map(|timeline| timeline.id.clone()).collect();
+        assert_eq!(order, vec!["TL1".to_owned(), second, third]);
+        let before_can_undo = editor.can_undo();
+        let outcome = editor
+            .apply(Command::MoveTimeline { timeline_id: "nope".to_owned(), index: 0 })
+            .expect("no-op");
+        assert!(!outcome.applied);
+        assert_eq!(editor.can_undo(), before_can_undo);
+    }
+
+    #[test]
     fn undo_and_redo_walk_the_history() {
         let (mut editor, _, clip_id) = fixture();
         editor

@@ -404,6 +404,15 @@ pub enum Command {
         /// The timeline to switch to.
         timeline_id: String,
     },
+    /// Moves a timeline tab to a new position in the strip. Which timeline
+    /// is active does not change - only the order of the tabs.
+    MoveTimeline {
+        /// The timeline to move. An unknown id is a no-op.
+        timeline_id: String,
+        /// Where it lands among its siblings, 0-based, counted with the
+        /// timeline already removed from its old slot. Clamped to the end.
+        index: usize,
+    },
     /// Registers a font file for titles. A path already registered is a
     /// no-op, so re-adding cannot duplicate.
     AddFont {
@@ -1241,6 +1250,21 @@ pub fn apply(
             let applied = project.timelines.iter().any(|timeline| timeline.id == timeline_id)
                 && assign(&mut project.active_timeline_id, timeline_id);
             Ok(Outcome { created_id: None, applied })
+        }
+
+        Command::MoveTimeline { timeline_id, index } => {
+            let Some(from) =
+                project.timelines.iter().position(|timeline| timeline.id == timeline_id)
+            else {
+                return Ok(Outcome::default());
+            };
+            let to = index.min(project.timelines.len() - 1);
+            if to == from {
+                return Ok(Outcome::default());
+            }
+            let timeline = project.timelines.remove(from);
+            project.timelines.insert(to, timeline);
+            Ok(Outcome { created_id: None, applied: true })
         }
 
         Command::AddFont { family, path } => {

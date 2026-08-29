@@ -202,7 +202,16 @@ name: string, } | { "op": "selectTimeline",
 /**
  * The timeline to switch to.
  */
-timelineId: string, } | { "op": "addFont", 
+timelineId: string, } | { "op": "moveTimeline", 
+/**
+ * The timeline to move. An unknown id is a no-op.
+ */
+timelineId: string, 
+/**
+ * Where it lands among its siblings, 0-based, counted with the
+ * timeline already removed from its old slot. Clamped to the end.
+ */
+index: number, } | { "op": "addFont", 
 /**
  * The family name titles will refer to.
  */

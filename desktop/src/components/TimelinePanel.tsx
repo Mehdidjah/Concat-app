@@ -158,6 +158,7 @@ export function TimelinePanel({
   onSelectTimeline,
   onAddTimeline,
   onRenameTimeline,
+  onMoveTimeline,
   onRequestRemoveTimeline,
   onGestureEnd,
 }: {
@@ -208,6 +209,8 @@ export function TimelinePanel({
   onSelectTimeline: (timelineId: string) => void;
   onAddTimeline: () => void;
   onRenameTimeline: (timelineId: string, name: string) => void;
+  /** Drops a dragged tab at a new slot; the index counts the tab as removed. */
+  onMoveTimeline: (timelineId: string, index: number) => void;
   /** Asks the app to confirm and delete; the panel never deletes directly. */
   onRequestRemoveTimeline: (timelineId: string) => void;
   /** A move or trim drag finished; the echoed change becomes one command. */
@@ -757,6 +760,72 @@ export function TimelinePanel({
     onTrackScroll(clampTrackScroll(trackScroll + event.deltaY, rows.length, canvasRef.current));
   };
 
+  // ── timeline tab reorder ──────────────────────────────────────────────────
+  // A pointer drag on a tab, not HTML5 drag-and-drop: the webview's OS file
+  // drop handling owns that channel (see the bin drag in App for the same
+  // choice). The tab is pressed, pulled past a small threshold, and dropped
+  // into the slot whose caret is showing; a plain click still selects.
+  const tabStrip = useRef<HTMLDivElement>(null);
+  /** The tab being dragged and the caret position, in strip content pixels. */
+  const [tabDrag, setTabDrag] = useState<{ id: string; x: number } | null>(null);
+  const tabPress = useRef<{ id: string; x: number; dragging: boolean } | null>(null);
+  /** Swallows exactly one click: the one the browser fires after a drop. */
+  const tabDropped = useRef(false);
+
+  /** The insertion slot under the pointer, and where to draw the caret. */
+  const tabSlotAt = (clientX: number): { slot: number; x: number } | null => {
+    const strip = tabStrip.current;
+    if (!strip) return null;
+    const tabs = Array.from(strip.querySelectorAll<HTMLElement>('[role="tab"]'));
+    if (tabs.length === 0) return null;
+    const origin = strip.getBoundingClientRect().left - strip.scrollLeft;
+    for (let slot = 0; slot < tabs.length; slot += 1) {
+      const rect = tabs[slot].getBoundingClientRect();
+      if (clientX < rect.left + rect.width / 2) {
+        return { slot, x: rect.left - origin - 1 };
+      }
+    }
+    const last = tabs[tabs.length - 1].getBoundingClientRect();
+    return { slot: tabs.length, x: last.right - origin + 1 };
+  };
+
+  const onTabPointerDown = (timelineId: string, event: React.PointerEvent) => {
+    if (event.button !== 0) return;
+    event.currentTarget.setPointerCapture(event.pointerId);
+    tabPress.current = { id: timelineId, x: event.clientX, dragging: false };
+  };
+  const onTabPointerMove = (event: React.PointerEvent) => {
+    const press = tabPress.current;
+    if (!press) return;
+    if (!press.dragging && Math.abs(event.clientX - press.x) < 4) return;
+    press.dragging = true;
+    const target = tabSlotAt(event.clientX);
+    if (target) setTabDrag({ id: press.id, x: target.x });
+  };
+  const onTabPointerUp = (event: React.PointerEvent) => {
+    const press = tabPress.current;
+    tabPress.current = null;
+    if (!press?.dragging) return;
+    setTabDrag(null);
+    tabDropped.current = true;
+    const from = project.timelines.findIndex((timeline) => timeline.id === press.id);
+    const target = tabSlotAt(event.clientX);
+    if (from === -1 || !target) return;
+    // The slot counts the dragged tab too; lifted out, everything to its
+    // right shifts one left.
+    const index = target.slot > from ? target.slot - 1 : target.slot;
+    if (index !== from) onMoveTimeline(press.id, index);
+  };
+  const selectUnlessDropped = (timelineId: string) => {
+    // Reordering must not also switch documents: the engine command leaves
+    // the selection alone, so the click that follows a drop is swallowed.
+    if (tabDropped.current) {
+      tabDropped.current = false;
+      return;
+    }
+    onSelectTimeline(timelineId);
+  };
+
   return (
     <div className={PANEL_SHELL}>
       {/*
@@ -766,7 +835,8 @@ export function TimelinePanel({
         as changing documents, not changing tools.
       */}
       <div
-        className="thin-scroll flex h-8 shrink-0 items-end gap-0.5 overflow-x-auto
+        ref={tabStrip}
+        className="thin-scroll relative flex h-8 shrink-0 items-end gap-0.5 overflow-x-auto
                    overflow-y-hidden border-b border-hairline bg-sunken px-1.5 pt-1"
       >
         {project.timelines.map((timeline) => (
@@ -775,11 +845,22 @@ export function TimelinePanel({
             timeline={timeline}
             active={timeline.id === project.activeTimelineId}
             closable={project.timelines.length > 1}
-            onSelect={onSelectTimeline}
+            dimmed={tabDrag?.id === timeline.id}
+            onSelect={selectUnlessDropped}
             onRename={onRenameTimeline}
             onRequestRemove={onRequestRemoveTimeline}
+            onDragPointerDown={onTabPointerDown}
+            onDragPointerMove={onTabPointerMove}
+            onDragPointerUp={onTabPointerUp}
           />
         ))}
+        {tabDrag && (
+          <span
+            aria-hidden
+            className="pointer-events-none absolute bottom-0.5 top-1.5 w-0.5 rounded bg-accent"
+            style={{ left: tabDrag.x }}
+          />
+        )}
         <span className="self-center">
           <IconButton icon="plus" label="New timeline" size={7} onClick={onAddTimeline} />
         </span>
@@ -939,16 +1020,25 @@ function TimelineTab({
   timeline,
   active,
   closable,
+  dimmed,
   onSelect,
   onRename,
   onRequestRemove,
+  onDragPointerDown,
+  onDragPointerMove,
+  onDragPointerUp,
 }: {
   timeline: TimelineMeta;
   active: boolean;
   closable: boolean;
+  /** True while this tab is the one being dragged to a new slot. */
+  dimmed: boolean;
   onSelect: (timelineId: string) => void;
   onRename: (timelineId: string, name: string) => void;
   onRequestRemove: (timelineId: string) => void;
+  onDragPointerDown: (timelineId: string, event: React.PointerEvent) => void;
+  onDragPointerMove: (event: React.PointerEvent) => void;
+  onDragPointerUp: (event: React.PointerEvent) => void;
 }) {
   const [renaming, setRenaming] = useState(false);
 
@@ -983,6 +1073,9 @@ function TimelineTab({
       title={active ? timeline.name : `Switch to ${timeline.name}`}
       onClick={() => onSelect(timeline.id)}
       onDoubleClick={() => setRenaming(true)}
+      onPointerDown={(event) => onDragPointerDown(timeline.id, event)}
+      onPointerMove={onDragPointerMove}
+      onPointerUp={onDragPointerUp}
       // Browser-tab shape: rounded top only, and the active tab overlaps the
       // strip's bottom border by a pixel with the panel's own background, so
       // it reads as one surface with the tray below rather than a pill
@@ -992,7 +1085,7 @@ function TimelineTab({
                     active
                       ? "border border-b-0 border-hairline bg-panel text-primary"
                       : "text-secondary hover:bg-hover hover:text-primary"
-                  }`}
+                  } ${dimmed ? "opacity-40" : ""}`}
     >
       <span className="truncate">{timeline.name}</span>
       {closable && (
