@@ -2,15 +2,16 @@
  * The engine's true frames for the monitor: the paused dwell and the
  * playback stream, one owner.
  *
- * Paused: when the playhead settles, fetch the exporter's own composite at
- * up to 960px and hold it over the approximation until the playhead moves.
- * Playing: while two or more visual layers sit under the playhead, stream
- * frames at up to 640px against the transport clock - requests are
+ * Paused: when the playhead settles, fetch the exporter's own composite and
+ * hold it over the approximation until the playhead moves. Playing: while
+ * two or more visual layers sit under the playhead, stream frames against
+ * the transport clock - requests are
  * quantised to the project's frame grid and issued one measured round-trip
  * ahead of the interpolated playhead, so a frame lands about when it is
  * due; each presented frame also warms the engine's cache for the instants
  * after it (desktop decision 0009). Single layers keep the smooth element
- * preview.
+ * preview. Both paths fetch at the user's preview quality - a fraction of
+ * the output frame, chosen in the monitor's footer.
  *
  * The request carries an instant and a resolution, nothing else: the engine
  * flattens its own session (engine decision 0009). The UI used to serialise
@@ -28,12 +29,12 @@ export interface EngineStill {
   height: number;
 }
 
-/** Even dimensions at an aspect-preserving cap - decoders round odd sizes. */
-function capped(frame: { width: number; height: number }, cap: number) {
-  const scale = Math.min(1, cap / Math.max(frame.width, frame.height));
+/** Even dimensions at a fraction of the frame - decoders round odd sizes. */
+function scaled(frame: { width: number; height: number }, quality: number) {
+  const fraction = Number.isFinite(quality) && quality > 0 ? Math.min(quality, 1) : 0.5;
   return {
-    width: Math.max(2, Math.round((frame.width * scale) / 2) * 2),
-    height: Math.max(2, Math.round((frame.height * scale) / 2) * 2),
+    width: Math.max(2, Math.round((frame.width * fraction) / 2) * 2),
+    height: Math.max(2, Math.round((frame.height * fraction) / 2) * 2),
   };
 }
 
@@ -45,6 +46,7 @@ export function useEngineTruth({
   renderableClipCount,
   frame,
   fps,
+  quality,
   latest,
 }: {
   playing: boolean;
@@ -57,6 +59,8 @@ export function useEngineTruth({
   frame: { width: number; height: number };
   /** The project's frame rate; the grid streamed requests snap to. */
   fps: number;
+  /** Preview resolution as a fraction of the output frame: 1, 0.5, 0.25. */
+  quality: number;
   /** Live values, read mid-flight without restarting the loops. */
   latest: { current: { playhead: number; frame: { width: number; height: number }; project: EditorProject } };
 }): EngineStill | null {
@@ -73,7 +77,7 @@ export function useEngineTruth({
     if (!loaded || renderableClipCount === 0) return;
 
     const timer = window.setTimeout(() => {
-      const { width, height } = capped(frame, 960);
+      const { width, height } = scaled(frame, quality);
       previewFrame({ time: latest.current.playhead, width, height })
         .then((bytes) => {
           if (stillToken.current === token) setEngineStill({ bytes, width, height });
@@ -85,7 +89,7 @@ export function useEngineTruth({
     return () => window.clearTimeout(timer);
     // `project` is the refresh signal: an edit while paused must re-fetch.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [playing, loaded, playhead, project, renderableClipCount, frame]);
+  }, [playing, loaded, playhead, project, renderableClipCount, frame, quality]);
 
   // The playback stream, paced by the transport clock. Still pull - one
   // request in flight, never a queue of stale frames - but the requests are
@@ -95,7 +99,8 @@ export function useEngineTruth({
   // the same instant is never composited twice. After each presented frame
   // a fire-and-forget prefetch warms the engine's cache for the instants
   // after it, which keeps the pool's readers rolling forward and turns the
-  // next pulls into cache hits. Rate beats resolution while moving.
+  // next pulls into cache hits. Frames come back at the chosen preview
+  // quality; dropping it is the lever when playback cannot keep up.
   useEffect(() => {
     if (!playing || !loaded) return;
     let live = true;
@@ -129,7 +134,7 @@ export function useEngineTruth({
           await wait(250 / rate);
           continue;
         }
-        const { width, height } = capped(latest.current.frame, 640);
+        const { width, height } = scaled(latest.current.frame, quality);
         const started = performance.now();
         try {
           const bytes = await previewFrame({ time: target / rate, width, height });
@@ -155,7 +160,7 @@ export function useEngineTruth({
     return () => {
       live = false;
     };
-  }, [playing, loaded, latest, fps]);
+  }, [playing, loaded, latest, fps, quality]);
 
   return engineStill;
 }

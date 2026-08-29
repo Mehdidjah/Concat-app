@@ -250,6 +250,8 @@ export function Preview({
   duration,
   frameRate,
   frame,
+  quality,
+  onQualityChange,
   transform,
   opacity,
   effects,
@@ -277,6 +279,9 @@ export function Preview({
   frameRate: number;
   /** The project's output size, shown and changed in the footer. */
   frame: { width: number; height: number };
+  /** Engine-preview resolution as a fraction of the output frame. */
+  quality: number;
+  onQualityChange: (quality: number) => void;
   /** The displayed clip's picture transform. Null when nothing is showing. */
   transform: PreviewTransform | null;
   /** The displayed clip's blend strength, 1 being solid. */
@@ -774,12 +779,69 @@ export function Preview({
               </span>
             )}
           />
-          <span className="truncate font-technical text-[10px] text-tertiary">
-            {frameRate.toFixed(2)} fps
-          </span>
+          <QualityMenu quality={quality} onQualityChange={onQualityChange} />
         </span>
       </div>
     </div>
+  );
+}
+
+/**
+ * Engine-preview resolutions, as fractions of the output frame. The labels
+ * follow the convention every editor uses; the pixels follow the project.
+ */
+const PREVIEW_QUALITIES = [
+  { label: "Full", ratio: "1:1", value: 1 },
+  { label: "Half", ratio: "1:2", value: 0.5 },
+  { label: "Quarter", ratio: "1:4", value: 0.25 },
+] as const;
+
+/**
+ * The preview-quality picker, next to the output-size menu it modifies:
+ * what fraction of the frame the engine composites for the monitor. The
+ * frame rate is not shown here - it lives in the Details panel, and the
+ * tray reads better carrying only what can be changed from it.
+ */
+function QualityMenu({
+  quality,
+  onQualityChange,
+}: {
+  quality: number;
+  onQualityChange: (quality: number) => void;
+}) {
+  const active =
+    PREVIEW_QUALITIES.find((option) => option.value === quality) ?? PREVIEW_QUALITIES[1];
+  return (
+    <Menu
+      align="right"
+      direction="up"
+      groups={[
+        PREVIEW_QUALITIES.map((option) => ({
+          label: `${option.label} — ${option.ratio}`,
+          leading: (
+            <span
+              className={`h-1 w-1 rounded-full ${
+                option.value === active.value ? "bg-current" : "bg-transparent"
+              }`}
+            />
+          ),
+          onSelect: () => onQualityChange(option.value),
+        })),
+      ]}
+      trigger={(open) => (
+        <span
+          title={`Preview quality: ${active.label} (${active.ratio})`}
+          className={`flex items-center gap-1 rounded-md px-1.5 py-1 transition-colors ${
+            open
+              ? "bg-active text-primary"
+              : "text-tertiary hover:bg-hover hover:text-secondary"
+          }`}
+        >
+          <span className="font-technical text-[10px] tabular-nums">{active.ratio}</span>
+          <Icon name="chevronDown" size={10} />
+        </span>
+      )}
+    />
   );
 }
 

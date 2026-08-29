@@ -953,7 +953,9 @@ function Editor({
   );
 
   // The engine's true frames: paused dwell + playback stream. See
-  // useEngineTruth and desktop decision 0009.
+  // useEngineTruth and desktop decision 0009. Quality is the footer's
+  // dropdown: what fraction of the output frame the engine composites.
+  const [previewQuality, setPreviewQuality] = useState(0.5);
   const engineStill = useEngineTruth({
     playing,
     loaded,
@@ -962,6 +964,7 @@ function Editor({
     renderableClipCount,
     frame,
     fps: session ? session.rateNum / session.rateDen : 30,
+    quality: previewQuality,
     latest,
   });
 
@@ -1210,6 +1213,8 @@ function Editor({
               duration={duration}
               frameRate={frameRate}
               frame={frame}
+              quality={previewQuality}
+              onQualityChange={setPreviewQuality}
               transform={
                 previewClip
                   ? {
