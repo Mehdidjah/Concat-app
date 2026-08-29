@@ -1,0 +1,25 @@
+# Validates the Nix flake (#7). Scoped to flake changes plus manual runs so
+# it does not tax every push; run it by hand after dependency lock changes.
+name: Nix
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "flake.nix"
+      - "flake.lock"
+      - ".github/workflows/nix.yml"
+  pull_request:
+    paths:
+      - "flake.nix"
+      - "flake.lock"
+      - ".github/workflows/nix.yml"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@v16
+      - name: Build the flake package
+        run: nix build .#wolfcut --print-build-logs

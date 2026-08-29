@@ -38,6 +38,12 @@ Currently in Alpha (pre-release), Download from [Releases](https://github.com/ju
 - MacOs (tested)
 - Linux
 
+### Nix (Linux)
+
+The repository is a flake. `nix run github:jub0t/WolfCut` starts the editor
+with ffmpeg and whisper wired in; `nix develop` opens a shell with everything
+`npm run app` needs.
+
 ## Contribution
 
 > [!IMPORTANT]
