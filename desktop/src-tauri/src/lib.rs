@@ -705,6 +705,40 @@ async fn preview_frame(
     .map(tauri::ipc::Response::new)
 }
 
+/// Decode-ahead for the playback stream.
+///
+/// Warms the pool for the next few frame instants after `request.time`, so
+/// the following `preview_frame` pulls are cache hits instead of decode
+/// waits. Fire-and-forget from the UI: a source that will not decode fails
+/// the pull too, and the pull is the path that reports it.
+#[tauri::command]
+async fn preview_prefetch(
+    state: tauri::State<'_, PoolState>,
+    editor: tauri::State<'_, editor_api::EditorState>,
+    request: PreviewSpec,
+    frames: u32,
+) -> Result<(), String> {
+    let (clips, settings) = editor_api::flattened_clips(&editor)?;
+    let request = export::PreviewFrameRequest {
+        time: request.time,
+        width: request.width,
+        height: request.height,
+        rate_num: settings.rate_num,
+        rate_den: settings.rate_den,
+        clips,
+    };
+    let pool = std::sync::Arc::clone(&state.0);
+    tauri::async_runtime::spawn_blocking(move || {
+        if let Ok(mut pool) = pool.lock() {
+            // Clamped so a confused caller cannot park the pool's mutex on a
+            // long decode march the presenter then queues behind.
+            export::preview_prefetch(&mut pool, &request, frames.min(8));
+        }
+    })
+    .await
+    .map_err(|error| format!("prefetch task failed: {error}"))
+}
+
 /// Renders the timeline to a file.
 ///
 /// Runs on a blocking thread and reports progress through the
@@ -860,6 +894,7 @@ pub fn run() {
             export_project,
             cancel_export,
             preview_frame,
+            preview_prefetch,
             template_list,
             template_save,
             template_instantiate,

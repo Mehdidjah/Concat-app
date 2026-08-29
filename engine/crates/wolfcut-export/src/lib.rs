@@ -727,28 +727,8 @@ pub fn preview_frame(
     request: &PreviewFrameRequest,
 ) -> Result<Vec<u8>, String> {
     let rate = FrameRate::new(Rational::new(request.rate_num, request.rate_den));
-
-    let mut resolved = request.clips.clone();
-    resolve_transitions(&mut resolved, rate, false);
-    let visible: Vec<&ExportClip> = resolved
-        .iter()
-        .filter(|clip| clip.kind.is_visual() && !clip.hidden)
-        .collect();
-
-    // build_timeline reads only the output format off the request; the shim
-    // keeps one conversion path rather than a preview-flavoured copy of it.
-    let shim = ExportRequest {
-        output: String::new(),
-        width: request.width,
-        height: request.height,
-        rate_num: request.rate_num,
-        rate_den: request.rate_den,
-        crf: 18,
-        preset: String::new(),
-        clips: Vec::new(),
-    };
     let BuiltTimeline { timeline, stills, decode_sizes, filter_chains } =
-        build_timeline(&shim, rate, &visible);
+        preview_timeline(request, rate);
     let plan = plan_frame(&timeline, quantise(request.time, rate));
 
     let mut sources: Vec<(std::sync::Arc<Frame>, f32, Transform)> =
@@ -798,6 +778,72 @@ pub fn preview_frame(
     // a GPU context alive for occasional scrubs is not worth its memory.
     let composed = CpuCompositor.composite(request.width, request.height, &layers);
     Ok(composed.into_pixels())
+}
+
+/// The preview's timeline, built the exporter's way.
+fn preview_timeline(request: &PreviewFrameRequest, rate: FrameRate) -> BuiltTimeline {
+    let mut resolved = request.clips.clone();
+    resolve_transitions(&mut resolved, rate, false);
+    let visible: Vec<&ExportClip> = resolved
+        .iter()
+        .filter(|clip| clip.kind.is_visual() && !clip.hidden)
+        .collect();
+
+    // build_timeline reads only the output format off the request; the shim
+    // keeps one conversion path rather than a preview-flavoured copy of it.
+    let shim = ExportRequest {
+        output: String::new(),
+        width: request.width,
+        height: request.height,
+        rate_num: request.rate_num,
+        rate_den: request.rate_den,
+        crf: 18,
+        preset: String::new(),
+        clips: Vec::new(),
+    };
+    build_timeline(&shim, rate, &visible)
+}
+
+/// Warms the reader pool for the frames about to be presented.
+///
+/// The playback stream's decode-ahead half: while the UI presents the frame
+/// at `request.time`, this decodes the next `frames` frame instants into the
+/// pool's cache so the next pulls are hits, not decode waits. Requests stay
+/// monotonic and one frame apart, which is exactly what keeps the pool's
+/// readers rolling forward instead of respawning FFmpeg to seek.
+///
+/// Compositing is skipped - the pull composites - and so are failures: a
+/// source that will not decode fails the pull too, and that is the path
+/// with an error channel.
+pub fn preview_prefetch(
+    pool: &mut wolfcut_media::ReaderPool,
+    request: &PreviewFrameRequest,
+    frames: u32,
+) {
+    let rate = FrameRate::new(Rational::new(request.rate_num, request.rate_den));
+    let BuiltTimeline { timeline, stills, decode_sizes, filter_chains } =
+        preview_timeline(request, rate);
+    let fps = rate.fps().as_f64();
+
+    for ahead in 0..frames {
+        let time = request.time + f64::from(ahead) / fps;
+        let plan = plan_frame(&timeline, quantise(time, rate));
+        for layer in &plan.layers {
+            let (decode_width, decode_height) = decode_sizes
+                .get(&layer.clip)
+                .copied()
+                .unwrap_or((request.width, request.height));
+            let chain = filter_chains.get(&layer.clip).map(String::as_str);
+            let _ = pool.frame_at(
+                std::path::Path::new(&layer.media),
+                layer.source_time,
+                decode_width,
+                decode_height,
+                stills.contains(&layer.clip),
+                chain,
+            );
+        }
+    }
 }
 
 #[cfg(test)]

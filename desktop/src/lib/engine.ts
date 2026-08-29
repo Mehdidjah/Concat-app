@@ -396,6 +396,22 @@ export async function previewFrame(request: {
 }
 
 /**
+ * Warms the engine's frame cache for the instants about to play.
+ *
+ * Fire and forget, from the playback stream only: after presenting a frame,
+ * asking for the next `frames` starting at `request.time` turns the next
+ * `previewFrame` pulls into cache hits instead of decode waits. Failures
+ * are silent here - a source that will not decode fails the pull too, and
+ * the pull is the path that reports it.
+ */
+export async function previewPrefetch(
+  request: { time: number; width: number; height: number },
+  frames: number,
+): Promise<void> {
+  return invoke<void>("preview_prefetch", { request, frames });
+}
+
+/**
  * Writes one file into the project's cache folder and returns its path.
  *
  * The same store the artwork cache uses, so it travels with the project and

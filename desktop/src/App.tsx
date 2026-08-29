@@ -961,6 +961,7 @@ function Editor({
     project,
     renderableClipCount,
     frame,
+    fps: session ? session.rateNum / session.rateDen : 30,
     latest,
   });
 

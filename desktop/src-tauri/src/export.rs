@@ -14,7 +14,7 @@ use tauri::Emitter;
 
 pub use wolfcut_export::{
     ClipKind, ExportClip, ExportRequest, PreviewFrameRequest, Reporter, TransitionSpec,
-    preview_frame, render,
+    preview_frame, preview_prefetch, render,
 };
 
 /// One progress event, as the UI's export dialog consumes it.

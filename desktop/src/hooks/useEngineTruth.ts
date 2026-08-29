@@ -4,10 +4,13 @@
  *
  * Paused: when the playhead settles, fetch the exporter's own composite at
  * up to 960px and hold it over the approximation until the playhead moves.
- * Playing: while two or more visual layers sit under the playhead, pull
- * frames continuously at up to 640px - request at the transport's position,
- * present, request the next when it lands (desktop decision 0009). Single
- * layers keep the smooth element preview.
+ * Playing: while two or more visual layers sit under the playhead, stream
+ * frames at up to 640px against the transport clock - requests are
+ * quantised to the project's frame grid and issued one measured round-trip
+ * ahead of the interpolated playhead, so a frame lands about when it is
+ * due; each presented frame also warms the engine's cache for the instants
+ * after it (desktop decision 0009). Single layers keep the smooth element
+ * preview.
  *
  * The request carries an instant and a resolution, nothing else: the engine
  * flattens its own session (engine decision 0009). The UI used to serialise
@@ -17,7 +20,7 @@
 import { useEffect, useRef, useState } from "react";
 
 import { clipsAt, type EditorProject } from "../lib/editor";
-import { previewFrame } from "../lib/engine";
+import { previewFrame, previewPrefetch } from "../lib/engine";
 
 export interface EngineStill {
   bytes: ArrayBuffer;
@@ -41,6 +44,7 @@ export function useEngineTruth({
   project,
   renderableClipCount,
   frame,
+  fps,
   latest,
 }: {
   playing: boolean;
@@ -51,6 +55,8 @@ export function useEngineTruth({
   /** Non-text clips on the active timeline - zero means nothing to composite. */
   renderableClipCount: number;
   frame: { width: number; height: number };
+  /** The project's frame rate; the grid streamed requests snap to. */
+  fps: number;
   /** Live values, read mid-flight without restarting the loops. */
   latest: { current: { playhead: number; frame: { width: number; height: number }; project: EditorProject } };
 }): EngineStill | null {
@@ -81,14 +87,21 @@ export function useEngineTruth({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [playing, loaded, playhead, project, renderableClipCount, frame]);
 
-  // The playback stream. Pull, not push: one request in flight, never a
-  // queue of stale frames; the pool's warm readers make consecutive
-  // requests rolls, not seeks. Rate beats resolution while moving.
+  // The playback stream, paced by the transport clock. Still pull - one
+  // request in flight, never a queue of stale frames - but the requests are
+  // snapped to the project's frame grid and issued one lead ahead of the
+  // interpolated playhead, where the lead tracks the measured round-trip:
+  // a frame arrives about when it is due instead of a round-trip late, and
+  // the same instant is never composited twice. After each presented frame
+  // a fire-and-forget prefetch warms the engine's cache for the instants
+  // after it, which keeps the pool's readers rolling forward and turns the
+  // next pulls into cache hits. Rate beats resolution while moving.
   useEffect(() => {
     if (!playing || !loaded) return;
     let live = true;
     // Invalidate any paused-dwell fetch still in flight from before play.
     stillToken.current += 1;
+    const rate = Number.isFinite(fps) && fps > 0 ? fps : 30;
     const wait = (ms: number) => new Promise((resolve) => window.setTimeout(resolve, ms));
     const visualLayers = (time: number) =>
       clipsAt(latest.current.project, time).filter(
@@ -96,21 +109,44 @@ export function useEngineTruth({
       ).length;
 
     const run = async () => {
+      // The lead starts at one frame and follows the round-trip, clamped to
+      // [1, 3] frames - a pathological decode must not push requests seconds
+      // ahead of what the user is hearing.
+      let lead = 1 / rate;
+      let presented = -1;
       while (live) {
-        const time = latest.current.playhead;
-        if (visualLayers(time) < 2) {
+        const now = latest.current.playhead;
+        if (visualLayers(now) < 2) {
           setEngineStill(null);
+          presented = -1;
           await wait(120);
           continue;
         }
+        const target = Math.round((now + lead) * rate);
+        if (target === presented) {
+          // The clock has not reached the next frame yet; a quarter-frame
+          // nap keeps the loop from spinning on an already-shown instant.
+          await wait(250 / rate);
+          continue;
+        }
         const { width, height } = capped(latest.current.frame, 640);
+        const started = performance.now();
         try {
-          const bytes = await previewFrame({ time, width, height });
-          if (live) setEngineStill({ bytes, width, height });
+          const bytes = await previewFrame({ time: target / rate, width, height });
+          const trip = (performance.now() - started) / 1000;
+          lead = Math.min(Math.max(0.8 * lead + 0.2 * trip, 1 / rate), 3 / rate);
+          presented = target;
+          if (live) {
+            setEngineStill({ bytes, width, height });
+            void previewPrefetch({ time: (target + 1) / rate, width, height }, 2).catch(
+              () => undefined,
+            );
+          }
         } catch {
           // A failed frame keeps the approximation on screen; back off so a
           // persistently failing source cannot spin the pool.
           if (live) setEngineStill(null);
+          presented = -1;
           await wait(200);
         }
       }
@@ -119,7 +155,7 @@ export function useEngineTruth({
     return () => {
       live = false;
     };
-  }, [playing, loaded, latest]);
+  }, [playing, loaded, latest, fps]);
 
   return engineStill;
 }
