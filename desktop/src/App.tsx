@@ -26,6 +26,7 @@ import { SaveTemplateDialog } from "./components/SaveTemplateDialog";
 import { SettingsDialog } from "./components/SettingsDialog";
 import { StartScreen, type ProjectSession } from "./components/StartScreen";
 import { TitleBar } from "./components/TitleBar";
+import { Toast } from "./components/Toast";
 import { TimelinePanel, resolveDrop, type Tool } from "./components/TimelinePanel";
 import { createAssets, requestAssets, requestVideoPeaks } from "./lib/assets";
 import {
@@ -1535,19 +1536,12 @@ function Editor({
       )}
 
       {toast && (
-        <div
+        <Toast
           key={toast.id}
-          role="status"
-          className={`surface fixed bottom-4 right-4 z-50 flex items-center gap-2 rounded-xl
-                      px-3 py-2 text-xs ${toast.failed ? "text-danger" : "text-primary"}`}
-        >
-          <Icon
-            name={toast.failed ? "close" : "check"}
-            size={13}
-            className={toast.failed ? "" : "text-success"}
-          />
-          {toast.message}
-        </div>
+          toast={toast}
+          // Guarded so an old toast's exit can never dismiss its replacement.
+          onDone={(id) => setToast((current) => (current?.id === id ? null : current))}
+        />
       )}
 
       {exporting && (
