@@ -360,7 +360,7 @@ fn filmstrip(path: &str, count: u32, height: u32) -> Result<Vec<u8>, String> {
         .filter(|seconds| *seconds > 0.0)
         .ok_or_else(|| format!("{path} reports no duration"))?;
 
-    let output = std::process::Command::new(wolfcut_media::ffmpeg())
+    let output = wolfcut_media::command(wolfcut_media::ffmpeg())
         .args(["-hide_banner", "-nostdin", "-loglevel", "error"])
         .args(["-i", path])
         .args([
@@ -467,7 +467,7 @@ fn poster_frame(project: &str) -> Result<Vec<u8>, String> {
         return Err("nothing on the timeline to preview".to_owned());
     };
 
-    let mut command = std::process::Command::new(wolfcut_media::ffmpeg());
+    let mut command = wolfcut_media::command(wolfcut_media::ffmpeg());
     command.args(["-hide_banner", "-nostdin", "-loglevel", "error"]);
     // Seeking a still means seeking a one-frame stream to nowhere.
     if !is_still && source_start > 0.0 {

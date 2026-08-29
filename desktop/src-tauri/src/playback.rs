@@ -609,7 +609,7 @@ fn decode(spec: &ClipSpec, project: &Path, key: &str) -> Result<Pcm, String> {
     let file = std::fs::File::create(&temporary)
         .map_err(|error| format!("could not create {}: {error}", temporary.display()))?;
 
-    let status = std::process::Command::new(wolfcut_media::ffmpeg())
+    let status = wolfcut_media::command(wolfcut_media::ffmpeg())
         .args(["-hide_banner", "-nostdin", "-loglevel", "error"])
         .args(["-ss", &format!("{:.6}", spec.source_start)])
         .args(["-t", &format!("{window:.6}")])

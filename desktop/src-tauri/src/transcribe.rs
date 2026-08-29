@@ -453,7 +453,7 @@ fn extract_wav(
     destination: &Path,
     slot: &Arc<Mutex<Option<Child>>>,
 ) -> Result<(), String> {
-    let mut command = Command::new(wolfcut_media::ffmpeg());
+    let mut command = wolfcut_media::command(wolfcut_media::ffmpeg());
     command
         .args(["-hide_banner", "-nostdin", "-loglevel", "error", "-y"])
         .args(["-ss", &format!("{start:.6}")])
@@ -558,7 +558,7 @@ fn run_transcription(
             .map(|count| count.get().min(8))
             .unwrap_or(4);
 
-        let mut command = Command::new(&binary);
+        let mut command = wolfcut_media::command(&binary);
         command
             .arg("-m")
             .arg(&model)

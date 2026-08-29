@@ -6,6 +6,7 @@
 //! the void and leaves the user with "exited with status 1". Draining on a
 //! thread also means the pipe can never fill up and stall the child.
 
+use std::ffi::OsStr;
 use std::io::Read;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
@@ -18,10 +19,27 @@ use crate::error::{Error, Result};
 /// little; this holds the message that matters plus its context.
 const STDERR_KEEP: usize = 8 * 1024;
 
+/// A `Command` for `binary` that never flashes a console window.
+///
+/// On Windows, a GUI-subsystem parent has no console, so each console-subsystem
+/// child (FFmpeg, ffprobe, ...) gets a fresh one that pops up over the app.
+/// `CREATE_NO_WINDOW` suppresses that. Elsewhere this is just `Command::new`.
+pub fn command(binary: impl AsRef<OsStr>) -> Command {
+    #[allow(unused_mut)]
+    let mut command = Command::new(binary.as_ref());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    command
+}
+
 /// A command with the flags every invocation wants: no banner, no terminal
 /// interaction, errors only.
 pub(crate) fn base_command(binary: &Path) -> Command {
-    let mut command = Command::new(binary);
+    let mut command = command(binary);
     command.args(["-hide_banner", "-nostdin", "-loglevel", "error"]);
     command
 }

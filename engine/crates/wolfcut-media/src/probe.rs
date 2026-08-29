@@ -1,7 +1,6 @@
 //! Asking `ffprobe` what is inside a file.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use wolfcut_core::time::{FrameRate, Rational};
 use serde_json::Value;
@@ -67,7 +66,7 @@ impl MediaInfo {
 /// Runs `ffprobe` and summarises what it found.
 pub fn probe(path: impl AsRef<Path>) -> Result<MediaInfo> {
     let path = path.as_ref();
-    let output = Command::new(crate::binaries::ffprobe())
+    let output = crate::process::command(crate::binaries::ffprobe())
         .args(["-v", "error", "-show_streams", "-show_format", "-of", "json"])
         .arg(path)
         .output()
