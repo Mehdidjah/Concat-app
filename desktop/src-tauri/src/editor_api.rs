@@ -159,8 +159,16 @@ pub async fn editor_open(
                         }
                     }
                 }
-                Editor::from_document(&document)
-                    .ok_or_else(|| format!("{path} holds a document this build cannot read"))?
+                match Editor::from_document(&document) {
+                    Some(editor) => editor,
+                    // The settings-only manifest `create` writes: a project
+                    // closed before its first edit reopens empty, it is not
+                    // corrupt (#12).
+                    None if projects::is_settings_only(&document) => Editor::new(),
+                    None => {
+                        return Err(format!("{path} holds a document this build cannot read"));
+                    }
+                }
             }
             // No document yet - a project created moments ago.
             Err(_) => Editor::new(),

@@ -159,6 +159,17 @@ pub fn save(path: &str, document: &serde_json::Value) -> Result<(), String> {
         .map_err(|error| format!("could not replace {}: {error}", manifest.display()))
 }
 
+/// True when a document carries no edit state at all - the settings-only
+/// manifest `create` writes, in a project closed before its first save.
+/// Such a document is a legitimately empty project. A document that claims
+/// edit state the build then cannot load is a different thing: corrupt.
+pub fn is_settings_only(document: &serde_json::Value) -> bool {
+    document.is_object()
+        && ["timelines", "tracks", "clips", "media"]
+            .iter()
+            .all(|key| document.get(key).is_none())
+}
+
 /// Reads the whole project document back.
 pub fn read_document(path: &str) -> Result<serde_json::Value, String> {
     let manifest = manifest_path(Path::new(path));
@@ -295,6 +306,21 @@ mod tests {
         std::fs::write(scratch.join(MANIFEST), b"{}").expect("writes");
         assert!(manifest_path(&scratch).ends_with(MANIFEST));
         let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    #[test]
+    fn a_fresh_manifest_is_settings_only_and_a_saved_edit_is_not() {
+        // Exactly what `create` writes: settings, no edit state.
+        let fresh = serde_json::json!({
+            "wolfcut": "0.2.0",
+            "name": "Untitled project",
+            "video": { "width": 1080, "height": 1920, "rateNum": 30, "rateDen": 1 },
+        });
+        assert!(is_settings_only(&fresh));
+        // Any edit state present means the document must load or fail loudly.
+        assert!(!is_settings_only(&serde_json::json!({ "tracks": [] })));
+        assert!(!is_settings_only(&serde_json::json!({ "timelines": "garbage" })));
+        assert!(!is_settings_only(&serde_json::json!("nonsense")));
     }
 
     #[test]
