@@ -24,12 +24,14 @@ start cutting, no account, no extra downloads, no setup.
 
 ## Highlights
 
-- 🎬 Multi-track timeline
-- 🎙️ Uses [ffmpeg](https://github.com/ffmpeg/ffmpeg) for Free Voice Filters
-- Uses [whisper.cpp](https://github.com/ggml-org/whisper.cpp) for Local Auto-captions (transcription)
-- Save and re-use Templates
-- 🚫 No watermarks, ever.
-- 🖥️ Cross-platform
+- 🎬 Multi-track editing, with several timelines per project when one isn't enough
+- ✂️ The cutting toolkit you'd expect: split, trim, merge, transitions, speed control
+- 💬 Auto-captions that run entirely on your machine — your audio never leaves it
+- 🎙️ Voice filters for cleaning up or playing with your sound
+- 📝 Titles and styled text
+- 📦 Templates — build an edit once, reuse it for the next video
+- 🚫 No watermarks, no account, nothing behind a paywall
+- 🖥️ Works the same on macOS, Windows and Linux
 
 ## Get started
 
