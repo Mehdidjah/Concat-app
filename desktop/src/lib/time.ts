@@ -5,6 +5,8 @@
  * rational seconds. These helpers only turn a number into something to look at.
  */
 
+import { getLocale, t, tp } from "./i18n";
+
 /** Formats seconds as `HH:MM:SS:FF` at the given frame rate. */
 export function timecode(seconds: number, frameRate: number): string {
   const safe = Math.max(0, seconds);
@@ -36,17 +38,15 @@ export function timecode(seconds: number, frameRate: number): string {
 export function relativeTime(milliseconds: number): string {
   const seconds = Math.max(0, (Date.now() - milliseconds) / 1000);
 
-  if (seconds < 90) return "just now";
-  if (seconds < 3600) return `${Math.round(seconds / 60)} min ago`;
+  if (seconds < 90) return t("time.relative.justNow");
+  if (seconds < 3600) return tp("time.relative.minutesAgo", Math.round(seconds / 60));
   if (seconds < 86_400) {
-    const hours = Math.round(seconds / 3600);
-    return hours === 1 ? "1 hour ago" : `${hours} hours ago`;
+    return tp("time.relative.hoursAgo", Math.round(seconds / 3600));
   }
   if (seconds < 7 * 86_400) {
-    const days = Math.round(seconds / 86_400);
-    return days === 1 ? "yesterday" : `${days} days ago`;
+    return tp("time.relative.daysAgo", Math.round(seconds / 86_400));
   }
-  return new Date(milliseconds).toLocaleDateString(undefined, {
+  return new Date(milliseconds).toLocaleDateString(getLocale(), {
     day: "numeric",
     month: "short",
     year: "numeric",

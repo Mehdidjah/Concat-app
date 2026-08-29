@@ -7,6 +7,7 @@
  */
 import { afterEach, describe, expect, test, vi } from "vitest";
 
+import { getLocale } from "./i18n";
 import { relativeTime, shortDuration, timecode } from "./time";
 
 describe("timecode", () => {
@@ -111,7 +112,7 @@ describe("relativeTime", () => {
     freeze();
     const timestamp = NOW - 30 * 86_400 * 1000;
     expect(relativeTime(timestamp)).toBe(
-      new Date(timestamp).toLocaleDateString(undefined, {
+      new Date(timestamp).toLocaleDateString(getLocale(), {
         day: "numeric",
         month: "short",
         year: "numeric",

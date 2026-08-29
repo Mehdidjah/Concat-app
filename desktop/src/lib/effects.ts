@@ -13,9 +13,12 @@
  *   quality version of what was already on screen.
  *
  * Ids are forever: they are written into project files, so renaming one later
- * would orphan clips. Pick them like you mean them.
+ * would orphan clips. Pick them like you mean them. Labels and blurbs are
+ * display-only and read from the message catalog as getters, so the id is the
+ * only identity anything stores.
  */
 
+import { t } from "./i18n";
 import type { FilterParam } from "./filters";
 
 /**
@@ -156,11 +159,11 @@ export interface EffectDefinition {
 
 /** The categories under the "Video Effects" dropdown, in display order. */
 export const EFFECT_CATEGORIES: { id: EffectCategory; label: string }[] = [
-  { id: "basic", label: "Basic" },
-  { id: "blur", label: "Blur" },
-  { id: "color", label: "Color" },
-  { id: "stylize", label: "Stylize" },
-  { id: "distort", label: "Distort" },
+  { id: "basic", get label() { return t("effects.category.basic"); } },
+  { id: "blur", get label() { return t("effects.category.blur"); } },
+  { id: "color", get label() { return t("effects.category.color"); } },
+  { id: "stylize", get label() { return t("effects.category.stylize"); } },
+  { id: "distort", get label() { return t("effects.category.distort"); } },
 ];
 
 const percent = (value: number) => `${Math.round(value)}%`;
@@ -172,9 +175,9 @@ export const EFFECTS: EffectDefinition[] = [
   // ── basic ────────────────────────────────────────────────────────────────
   {
     id: "black-white",
-    label: "Black & White",
+    get label() { return t("effects.black-white.label"); },
     category: "basic",
-    blurb: "Drops all colour, keeps the tones.",
+    get blurb() { return t("effects.black-white.blurb"); },
     swatch: "linear-gradient(135deg, #e8e8e8 0%, #6b6b6b 55%, #1c1c1c 100%)",
     params: [],
     chain: () => "hue=s=0",
@@ -182,9 +185,9 @@ export const EFFECTS: EffectDefinition[] = [
   },
   {
     id: "sepia",
-    label: "Sepia",
+    get label() { return t("effects.sepia.label"); },
     category: "basic",
-    blurb: "Aged warm brown, like an old photograph.",
+    get blurb() { return t("effects.sepia.blurb"); },
     swatch: "linear-gradient(135deg, #e9d3ae 0%, #a9773f 60%, #513a1c 100%)",
     params: [],
     // The standard sepia matrix, the same one the CSS filter defines.
@@ -194,9 +197,9 @@ export const EFFECTS: EffectDefinition[] = [
   },
   {
     id: "invert",
-    label: "Invert",
+    get label() { return t("effects.invert.label"); },
     category: "basic",
-    blurb: "Flips every colour to its negative.",
+    get blurb() { return t("effects.invert.blurb"); },
     swatch: "linear-gradient(135deg, #00d0ff 0%, #7a00c8 55%, #ffe600 100%)",
     params: [],
     chain: () => "negate",
@@ -204,12 +207,12 @@ export const EFFECTS: EffectDefinition[] = [
   },
   {
     id: "sharpen",
-    label: "Sharpen",
+    get label() { return t("effects.sharpen.label"); },
     category: "basic",
-    blurb: "Crisps up edges and fine detail.",
+    get blurb() { return t("effects.sharpen.blurb"); },
     swatch: "linear-gradient(135deg, #cfd8dc 0%, #607d8b 55%, #263238 100%)",
     params: [
-      { key: "amount", label: "Amount", min: 0.2, max: 3, step: 0.1, default: 1, format: times },
+      { key: "amount", get label() { return t("effects.sharpen.param.amount"); }, min: 0.2, max: 3, step: 0.1, default: 1, format: times },
     ],
     chain: ({ amount = 1 }) => `unsharp=5:5:${amount.toFixed(2)}:5:5:0`,
     preview: {
@@ -225,36 +228,36 @@ export const EFFECTS: EffectDefinition[] = [
   // ── blur ─────────────────────────────────────────────────────────────────
   {
     id: "gaussian-blur",
-    label: "Gaussian Blur",
+    get label() { return t("effects.gaussian-blur.label"); },
     category: "blur",
-    blurb: "Soft, even blur across the whole frame.",
+    get blurb() { return t("effects.gaussian-blur.blurb"); },
     swatch: "linear-gradient(135deg, #b3c7f9 0%, #7f9cf5 55%, #4c6ef5 100%)",
     params: [
-      { key: "radius", label: "Radius", min: 1, max: 50, step: 1, default: 10, format: pixels },
+      { key: "radius", get label() { return t("effects.gaussian-blur.param.radius"); }, min: 1, max: 50, step: 1, default: 10, format: pixels },
     ],
     chain: ({ radius = 10 }) => `gblur=sigma=${radius.toFixed(1)}`,
     preview: { kind: "css", filter: ({ radius = 10 }, scale) => `blur(${(radius * scale).toFixed(2)}px)` },
   },
   {
     id: "box-blur",
-    label: "Box Blur",
+    get label() { return t("effects.box-blur.label"); },
     category: "blur",
-    blurb: "Fast, slightly harsher blur.",
+    get blurb() { return t("effects.box-blur.blurb"); },
     swatch: "linear-gradient(135deg, #a5d8ff 0%, #4dabf7 55%, #1971c2 100%)",
     params: [
-      { key: "radius", label: "Radius", min: 1, max: 30, step: 1, default: 6, format: pixels },
+      { key: "radius", get label() { return t("effects.box-blur.param.radius"); }, min: 1, max: 30, step: 1, default: 6, format: pixels },
     ],
     chain: ({ radius = 6 }) => `boxblur=${Math.round(radius)}:1`,
     preview: { kind: "css", filter: ({ radius = 6 }, scale) => `blur(${(radius * 0.7 * scale).toFixed(2)}px)` },
   },
   {
     id: "motion-blur",
-    label: "Motion Blur",
+    get label() { return t("effects.motion-blur.label"); },
     category: "blur",
-    blurb: "Horizontal streaking, as if the camera swept.",
+    get blurb() { return t("effects.motion-blur.blurb"); },
     swatch: "linear-gradient(90deg, #91a7ff 0%, #5c7cfa 45%, #91a7ff 100%)",
     params: [
-      { key: "length", label: "Length", min: 2, max: 60, step: 1, default: 18, format: pixels },
+      { key: "length", get label() { return t("effects.motion-blur.param.length"); }, min: 2, max: 60, step: 1, default: 18, format: pixels },
     ],
     // Gaussian in one axis only is the streak; the tiny vertical sigma keeps
     // the filter happy without visibly blurring that axis.
@@ -269,14 +272,14 @@ export const EFFECTS: EffectDefinition[] = [
   // ── color ────────────────────────────────────────────────────────────────
   {
     id: "warm",
-    label: "Warm",
+    get label() { return t("effects.warm.label"); },
     category: "color",
-    blurb: "Pushes the frame toward orange and gold.",
+    get blurb() { return t("effects.warm.blurb"); },
     swatch: "linear-gradient(135deg, #ffd8a8 0%, #ff922b 55%, #d9480f 100%)",
     params: [
       {
         key: "temperature",
-        label: "Temperature",
+        get label() { return t("effects.warm.param.temperature"); },
         min: 3000,
         max: 6000,
         step: 100,
@@ -290,14 +293,14 @@ export const EFFECTS: EffectDefinition[] = [
   },
   {
     id: "cool",
-    label: "Cool",
+    get label() { return t("effects.cool.label"); },
     category: "color",
-    blurb: "Pushes the frame toward blue and teal.",
+    get blurb() { return t("effects.cool.blurb"); },
     swatch: "linear-gradient(135deg, #99e9f2 0%, #22b8cf 55%, #0b7285 100%)",
     params: [
       {
         key: "temperature",
-        label: "Temperature",
+        get label() { return t("effects.cool.param.temperature"); },
         min: 7000,
         max: 11000,
         step: 100,
@@ -311,24 +314,24 @@ export const EFFECTS: EffectDefinition[] = [
   },
   {
     id: "vibrance",
-    label: "Vibrance",
+    get label() { return t("effects.vibrance.label"); },
     category: "color",
-    blurb: "Richer colour without blowing out skin tones.",
+    get blurb() { return t("effects.vibrance.blurb"); },
     swatch: "linear-gradient(135deg, #ff6b6b 0%, #fcc419 40%, #51cf66 70%, #339af0 100%)",
     params: [
-      { key: "intensity", label: "Intensity", min: 0.1, max: 2, step: 0.05, default: 0.7, format: times },
+      { key: "intensity", get label() { return t("effects.vibrance.param.intensity"); }, min: 0.1, max: 2, step: 0.05, default: 0.7, format: times },
     ],
     chain: ({ intensity = 0.7 }) => `vibrance=intensity=${intensity.toFixed(2)}`,
     preview: { kind: "css", filter: ({ intensity = 0.7 }) => `saturate(${(1 + intensity * 0.45).toFixed(2)})` },
   },
   {
     id: "contrast-pop",
-    label: "Contrast Pop",
+    get label() { return t("effects.contrast-pop.label"); },
     category: "color",
-    blurb: "Deeper blacks, brighter whites.",
+    get blurb() { return t("effects.contrast-pop.blurb"); },
     swatch: "linear-gradient(135deg, #f8f9fa 0%, #868e96 45%, #212529 100%)",
     params: [
-      { key: "contrast", label: "Contrast", min: 1, max: 2, step: 0.05, default: 1.25, format: times },
+      { key: "contrast", get label() { return t("effects.contrast-pop.param.contrast"); }, min: 1, max: 2, step: 0.05, default: 1.25, format: times },
     ],
     chain: ({ contrast = 1.25 }) => `eq=contrast=${contrast.toFixed(2)}`,
     preview: { kind: "css", filter: ({ contrast = 1.25 }) => `contrast(${contrast.toFixed(2)})` },
@@ -336,12 +339,12 @@ export const EFFECTS: EffectDefinition[] = [
   // ── stylize ──────────────────────────────────────────────────────────────
   {
     id: "vignette",
-    label: "Vignette",
+    get label() { return t("effects.vignette.label"); },
     category: "stylize",
-    blurb: "Darkens the corners to pull the eye inward.",
+    get blurb() { return t("effects.vignette.blurb"); },
     swatch: "radial-gradient(circle at 50% 50%, #ced4da 0%, #495057 60%, #16191c 100%)",
     params: [
-      { key: "strength", label: "Strength", min: 10, max: 100, step: 1, default: 50, format: percent },
+      { key: "strength", get label() { return t("effects.vignette.param.strength"); }, min: 10, max: 100, step: 1, default: 50, format: percent },
     ],
     // The filter's angle runs 0..PI/2, wider being darker corners; the slider
     // maps into the range that reads as a vignette rather than a tunnel.
@@ -358,12 +361,12 @@ export const EFFECTS: EffectDefinition[] = [
   },
   {
     id: "film-grain",
-    label: "Film Grain",
+    get label() { return t("effects.film-grain.label"); },
     category: "stylize",
-    blurb: "Fine analogue noise over the picture.",
+    get blurb() { return t("effects.film-grain.blurb"); },
     swatch: "linear-gradient(135deg, #dee2e6 0%, #adb5bd 50%, #495057 100%)",
     params: [
-      { key: "amount", label: "Amount", min: 2, max: 40, step: 1, default: 12, format: percent },
+      { key: "amount", get label() { return t("effects.film-grain.param.amount"); }, min: 2, max: 40, step: 1, default: 12, format: percent },
     ],
     // Temporal (t) so the grain dances like film instead of sitting still.
     chain: ({ amount = 12 }) => `noise=alls=${Math.round(amount)}:allf=t+u`,
@@ -380,12 +383,12 @@ export const EFFECTS: EffectDefinition[] = [
   },
   {
     id: "glow",
-    label: "Glow",
+    get label() { return t("effects.glow.label"); },
     category: "stylize",
-    blurb: "Blooms the highlights softly.",
+    get blurb() { return t("effects.glow.blurb"); },
     swatch: "radial-gradient(circle at 50% 40%, #fff9db 0%, #ffe066 45%, #e8590c 100%)",
     params: [
-      { key: "amount", label: "Amount", min: 10, max: 100, step: 1, default: 45, format: percent },
+      { key: "amount", get label() { return t("effects.glow.param.amount"); }, min: 10, max: 100, step: 1, default: 45, format: percent },
     ],
     // Screen-blend a blurred copy over itself - the classic bloom. Labels
     // carry the chain index so two glows cannot collide in one graph.
@@ -407,13 +410,13 @@ export const EFFECTS: EffectDefinition[] = [
   },
   {
     id: "posterize",
-    label: "Posterize",
+    get label() { return t("effects.posterize.label"); },
     category: "stylize",
-    blurb: "Flattens colour into bold bands.",
+    get blurb() { return t("effects.posterize.blurb"); },
     swatch:
       "linear-gradient(135deg, #e64980 0%, #e64980 33%, #7950f2 33%, #7950f2 66%, #1098ad 66%, #1098ad 100%)",
     params: [
-      { key: "levels", label: "Levels", min: 2, max: 8, step: 1, default: 4, format: (v) => String(Math.round(v)) },
+      { key: "levels", get label() { return t("effects.posterize.param.levels"); }, min: 2, max: 8, step: 1, default: 4, format: (v) => String(Math.round(v)) },
     ],
     chain: ({ levels = 4 }) => {
       const size = Math.round(256 / Math.max(2, Math.round(levels)));
@@ -442,13 +445,13 @@ export const EFFECTS: EffectDefinition[] = [
   // ── distort ──────────────────────────────────────────────────────────────
   {
     id: "pixelate",
-    label: "Pixelate",
+    get label() { return t("effects.pixelate.label"); },
     category: "distort",
-    blurb: "Chunks the frame into visible blocks.",
+    get blurb() { return t("effects.pixelate.blurb"); },
     swatch:
       "repeating-linear-gradient(0deg, #74c0fc 0 6px, #4dabf7 6px 12px), repeating-linear-gradient(90deg, #74c0fc80 0 6px, #4dabf780 6px 12px)",
     params: [
-      { key: "size", label: "Block size", min: 2, max: 64, step: 1, default: 16, format: pixels },
+      { key: "size", get label() { return t("effects.pixelate.param.size"); }, min: 2, max: 64, step: 1, default: 16, format: pixels },
     ],
     chain: ({ size = 16 }) =>
       `pixelize=width=${Math.round(size)}:height=${Math.round(size)}`,
@@ -456,9 +459,9 @@ export const EFFECTS: EffectDefinition[] = [
   },
   {
     id: "mirror",
-    label: "Mirror",
+    get label() { return t("effects.mirror.label"); },
     category: "distort",
-    blurb: "Reflects the left half of the frame onto the right.",
+    get blurb() { return t("effects.mirror.blurb"); },
     swatch: "linear-gradient(90deg, #63e6be 0%, #0ca678 50%, #63e6be 100%)",
     params: [],
     chain: (_params, index) =>
@@ -468,12 +471,12 @@ export const EFFECTS: EffectDefinition[] = [
   },
   {
     id: "fisheye",
-    label: "Fisheye",
+    get label() { return t("effects.fisheye.label"); },
     category: "distort",
-    blurb: "Bulges the centre like a wide lens.",
+    get blurb() { return t("effects.fisheye.blurb"); },
     swatch: "radial-gradient(circle at 50% 50%, #d0bfff 0%, #9775fa 55%, #5f3dc4 100%)",
     params: [
-      { key: "strength", label: "Strength", min: 5, max: 100, step: 1, default: 50, format: percent },
+      { key: "strength", get label() { return t("effects.fisheye.param.strength"); }, min: 5, max: 100, step: 1, default: 50, format: percent },
     ],
     // Negative correction coefficients produce barrel distortion - the bulge.
     chain: ({ strength = 50 }) => {
@@ -484,13 +487,13 @@ export const EFFECTS: EffectDefinition[] = [
   },
   {
     id: "shake",
-    label: "Shake",
+    get label() { return t("effects.shake.label"); },
     category: "distort",
-    blurb: "Handheld-style camera judder.",
+    get blurb() { return t("effects.shake.blurb"); },
     swatch: "linear-gradient(105deg, #ffc9c9 0%, #ff8787 40%, #fa5252 60%, #ffc9c9 100%)",
     params: [
-      { key: "amount", label: "Amount", min: 2, max: 40, step: 1, default: 12, format: pixels },
-      { key: "speed", label: "Speed", min: 2, max: 30, step: 1, default: 13, format: times },
+      { key: "amount", get label() { return t("effects.shake.param.amount"); }, min: 2, max: 40, step: 1, default: 12, format: pixels },
+      { key: "speed", get label() { return t("effects.shake.param.speed"); }, min: 2, max: 30, step: 1, default: 13, format: times },
     ],
     // A jittering crop window; the decoder's guard scale stretches the
     // slightly smaller window back to full size afterwards.
@@ -626,64 +629,64 @@ export interface TransitionDefinition {
 
 /** The categories under the "Transitions" dropdown, in display order. */
 export const TRANSITION_CATEGORIES: { id: TransitionCategory; label: string }[] = [
-  { id: "basic", label: "Basic" },
-  { id: "motion", label: "Motion" },
+  { id: "basic", get label() { return t("transitions.category.basic"); } },
+  { id: "motion", get label() { return t("transitions.category.motion"); } },
 ];
 
 export const TRANSITIONS: TransitionDefinition[] = [
   {
     id: "cross-fade",
-    label: "Cross Fade",
+    get label() { return t("transitions.cross-fade.label"); },
     category: "basic",
-    blurb: "The outgoing clip dissolves into the incoming one.",
+    get blurb() { return t("transitions.cross-fade.blurb"); },
     implemented: true,
     defaultDuration: 1,
   },
   {
     id: "fade-black",
-    label: "Fade to Black",
+    get label() { return t("transitions.fade-black.label"); },
     category: "basic",
-    blurb: "Out through black, then in from black.",
+    get blurb() { return t("transitions.fade-black.blurb"); },
     implemented: true,
     defaultDuration: 1,
   },
   {
     id: "fade-white",
-    label: "Fade to White",
+    get label() { return t("transitions.fade-white.label"); },
     category: "basic",
-    blurb: "Out through white, then in from white.",
+    get blurb() { return t("transitions.fade-white.blurb"); },
     implemented: true,
     defaultDuration: 1,
   },
   {
     id: "wipe-left",
-    label: "Wipe Left",
+    get label() { return t("transitions.wipe-left.label"); },
     category: "motion",
-    blurb: "The incoming clip sweeps in from the right edge.",
+    get blurb() { return t("transitions.wipe-left.blurb"); },
     implemented: false,
     defaultDuration: 0.8,
   },
   {
     id: "wipe-right",
-    label: "Wipe Right",
+    get label() { return t("transitions.wipe-right.label"); },
     category: "motion",
-    blurb: "The incoming clip sweeps in from the left edge.",
+    get blurb() { return t("transitions.wipe-right.blurb"); },
     implemented: false,
     defaultDuration: 0.8,
   },
   {
     id: "push",
-    label: "Push",
+    get label() { return t("transitions.push.label"); },
     category: "motion",
-    blurb: "The incoming clip shoves the outgoing one off screen.",
+    get blurb() { return t("transitions.push.blurb"); },
     implemented: false,
     defaultDuration: 0.8,
   },
   {
     id: "zoom",
-    label: "Zoom",
+    get label() { return t("transitions.zoom.label"); },
     category: "motion",
-    blurb: "Punches in on the cut, then settles.",
+    get blurb() { return t("transitions.zoom.blurb"); },
     implemented: false,
     defaultDuration: 0.8,
   },

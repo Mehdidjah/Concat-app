@@ -7,6 +7,8 @@
  * 1080p project still lands correctly when exported at 4K.
  */
 
+import { t } from "./i18n";
+
 export interface TextStyle {
   content: string;
   /** CSS family name. See `FONTS`. */
@@ -122,11 +124,11 @@ export function familyForPath(path: string, taken: readonly string[]): string {
 }
 
 export const WEIGHTS: { label: string; value: number }[] = [
-  { label: "Light", value: 300 },
-  { label: "Regular", value: 400 },
-  { label: "Medium", value: 500 },
-  { label: "Bold", value: 700 },
-  { label: "Black", value: 900 },
+  { get label() { return t("text.weight.light"); }, value: 300 },
+  { get label() { return t("text.weight.regular"); }, value: 400 },
+  { get label() { return t("text.weight.medium"); }, value: 500 },
+  { get label() { return t("text.weight.bold"); }, value: 700 },
+  { get label() { return t("text.weight.black"); }, value: 900 },
 ];
 
 export function defaultTextStyle(): TextStyle {

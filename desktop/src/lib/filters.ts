@@ -11,6 +11,8 @@
  * See `lib/audio.ts`; the alternative was a preview that lies.
  */
 
+import { t } from "./i18n";
+
 export type FilterCategory = "voice" | "tone" | "space";
 
 export interface FilterParam {
@@ -47,9 +49,9 @@ export interface ClipFilter {
 }
 
 export const CATEGORIES: { id: FilterCategory; label: string }[] = [
-  { id: "voice", label: "Voice" },
-  { id: "tone", label: "Tone" },
-  { id: "space", label: "Space" },
+  { id: "voice", get label() { return t("filters.category.voice"); } },
+  { id: "tone", get label() { return t("filters.category.tone"); } },
+  { id: "space", get label() { return t("filters.category.space"); } },
 ];
 
 const percent = (value: number) => `${Math.round(value)}%`;
@@ -81,13 +83,13 @@ function pitchShift(semitoneShift: number): string[] {
 export const FILTERS: FilterDefinition[] = [
   {
     id: "sweet",
-    label: "Sweet",
+    get label() { return t("filters.sweet.label"); },
     category: "voice",
-    blurb: "Brighter, softer and a little higher. Ported from the reference chain.",
+    get blurb() { return t("filters.sweet.blurb"); },
     params: [
       {
         key: "amount",
-        label: "Amount",
+        get label() { return t("filters.sweet.param.amount"); },
         min: 0,
         max: 100,
         step: 1,
@@ -96,14 +98,14 @@ export const FILTERS: FilterDefinition[] = [
       },
       {
         key: "pitch",
-        label: "Pitch",
+        get label() { return t("filters.sweet.param.pitch"); },
         min: 0,
         max: 8,
         step: 0.1,
         // 0 means "follow amount", which is what the original did when no
         // explicit pitch was passed.
         default: 0,
-        format: (value) => (value === 0 ? "auto" : semitones(value)),
+        format: (value) => (value === 0 ? t("filters.sweet.pitchAuto") : semitones(value)),
       },
     ],
     chain: ({ amount = 65, pitch = 0 }) => {
@@ -146,12 +148,12 @@ export const FILTERS: FilterDefinition[] = [
   },
   {
     id: "deep",
-    label: "Deep",
+    get label() { return t("filters.deep.label"); },
     category: "voice",
-    blurb: "Lower and heavier, with the low end lifted to match.",
+    get blurb() { return t("filters.deep.blurb"); },
     params: [
-      { key: "pitch", label: "Pitch", min: -8, max: -1, step: 0.1, default: -3, format: semitones },
-      { key: "body", label: "Body", min: 0, max: 8, step: 0.5, default: 3, format: decibels },
+      { key: "pitch", get label() { return t("filters.deep.param.pitch"); }, min: -8, max: -1, step: 0.1, default: -3, format: semitones },
+      { key: "body", get label() { return t("filters.deep.param.body"); }, min: 0, max: 8, step: 0.5, default: 3, format: decibels },
     ],
     chain: ({ pitch = -3, body = 3 }) =>
       [
@@ -164,22 +166,22 @@ export const FILTERS: FilterDefinition[] = [
   },
   {
     id: "chipmunk",
-    label: "Chipmunk",
+    get label() { return t("filters.chipmunk.label"); },
     category: "voice",
-    blurb: "Sharply higher. Formants move too, so it is a different voice.",
+    get blurb() { return t("filters.chipmunk.blurb"); },
     params: [
-      { key: "pitch", label: "Pitch", min: 3, max: 12, step: 0.5, default: 7, format: semitones },
+      { key: "pitch", get label() { return t("filters.chipmunk.param.pitch"); }, min: 3, max: 12, step: 0.5, default: 7, format: semitones },
     ],
     chain: ({ pitch = 7 }) =>
       [...pitchShift(pitch), "highpass=f=120", "alimiter=limit=0.94"].join(","),
   },
   {
     id: "robot",
-    label: "Robot",
+    get label() { return t("filters.robot.label"); },
     category: "voice",
-    blurb: "Flattened and metallic, from a very short modulated delay.",
+    get blurb() { return t("filters.robot.blurb"); },
     params: [
-      { key: "depth", label: "Depth", min: 1, max: 10, step: 0.5, default: 5, format: percent },
+      { key: "depth", get label() { return t("filters.robot.param.depth"); }, min: 1, max: 10, step: 0.5, default: 5, format: percent },
     ],
     chain: ({ depth = 5 }) =>
       [
@@ -194,31 +196,31 @@ export const FILTERS: FilterDefinition[] = [
 
   {
     id: "bass",
-    label: "Bass boost",
+    get label() { return t("filters.bass.label"); },
     category: "tone",
-    blurb: "Lifts the low end without touching anything above it.",
+    get blurb() { return t("filters.bass.blurb"); },
     params: [
-      { key: "gain", label: "Gain", min: 0, max: 12, step: 0.5, default: 5, format: decibels },
+      { key: "gain", get label() { return t("filters.bass.param.gain"); }, min: 0, max: 12, step: 0.5, default: 5, format: decibels },
     ],
     chain: ({ gain = 5 }) => `bass=g=${gain.toFixed(2)}:f=110:w=0.6,alimiter=limit=0.95`,
   },
   {
     id: "treble",
-    label: "Treble boost",
+    get label() { return t("filters.treble.label"); },
     category: "tone",
-    blurb: "Adds air at the top. Useful on dull recordings.",
+    get blurb() { return t("filters.treble.blurb"); },
     params: [
-      { key: "gain", label: "Gain", min: 0, max: 12, step: 0.5, default: 4, format: decibels },
+      { key: "gain", get label() { return t("filters.treble.param.gain"); }, min: 0, max: 12, step: 0.5, default: 4, format: decibels },
     ],
     chain: ({ gain = 4 }) => `treble=g=${gain.toFixed(2)}:f=9000:w=0.7,alimiter=limit=0.95`,
   },
   {
     id: "telephone",
-    label: "Telephone",
+    get label() { return t("filters.telephone.label"); },
     category: "tone",
-    blurb: "Band-limited to a phone line, everything else discarded.",
+    get blurb() { return t("filters.telephone.blurb"); },
     params: [
-      { key: "drive", label: "Drive", min: 0, max: 10, step: 0.5, default: 3, format: percent },
+      { key: "drive", get label() { return t("filters.telephone.param.drive"); }, min: 0, max: 10, step: 0.5, default: 3, format: percent },
     ],
     chain: ({ drive = 3 }) =>
       [
@@ -231,23 +233,23 @@ export const FILTERS: FilterDefinition[] = [
 
   {
     id: "echo",
-    label: "Echo",
+    get label() { return t("filters.echo.label"); },
     category: "space",
-    blurb: "A single distinct repeat.",
+    get blurb() { return t("filters.echo.blurb"); },
     params: [
-      { key: "delay", label: "Delay", min: 0.05, max: 1, step: 0.01, default: 0.25, format: seconds },
-      { key: "decay", label: "Decay", min: 0.1, max: 0.9, step: 0.05, default: 0.4, format: percent },
+      { key: "delay", get label() { return t("filters.echo.param.delay"); }, min: 0.05, max: 1, step: 0.01, default: 0.25, format: seconds },
+      { key: "decay", get label() { return t("filters.echo.param.decay"); }, min: 0.1, max: 0.9, step: 0.05, default: 0.4, format: percent },
     ],
     chain: ({ delay = 0.25, decay = 0.4 }) =>
       `aecho=0.8:0.85:${Math.round(delay * 1000)}:${decay.toFixed(2)}`,
   },
   {
     id: "room",
-    label: "Room",
+    get label() { return t("filters.room.label"); },
     category: "space",
-    blurb: "Several short reflections, so it sits in a space rather than repeating.",
+    get blurb() { return t("filters.room.blurb"); },
     params: [
-      { key: "size", label: "Size", min: 0, max: 100, step: 1, default: 40, format: percent },
+      { key: "size", get label() { return t("filters.room.param.size"); }, min: 0, max: 100, step: 1, default: 40, format: percent },
     ],
     chain: ({ size = 40 }) => {
       const scale = 0.4 + (size / 100) * 1.6;

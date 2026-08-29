@@ -6,9 +6,11 @@ behaviour.
 
 ## Unreleased
 
-- Interface language support: the app follows the system language when a
-  translation exists, with an override in Settings → General. Translations
-  are plain JSON files contributors can add — see TRANSLATING.md.
+- The entire interface is translatable: the app follows the system language
+  when a translation exists, with an override in Settings → General.
+  Translations are plain JSON files contributors can add — see TRANSLATING.md.
+- Simplified Chinese ships as the first translation (machine-drafted,
+  pending native review).
 
 ## v0.2.0-alpha.6 — 2026-08-29
 
