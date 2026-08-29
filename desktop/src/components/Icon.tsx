@@ -27,22 +27,40 @@ import {
   TrashIcon,
   XMarkIcon,
 } from "@heroicons/react/24/outline";
+import {
+  AudioLines,
+  Blend,
+  Hand,
+  Magnet,
+  Maximize,
+  Merge,
+  MousePointer2,
+  Pause,
+  Play,
+  ScissorsLineDashed,
+  SkipBack,
+  SkipForward,
+  SquareSplitHorizontal,
+  StepBack,
+  StepForward,
+  Type,
+} from "lucide-react";
 
 import type { ReactNode } from "react";
 
 /**
- * The icon set: Heroicons for everything generic, hand-authored glyphs for
- * the editor's own vocabulary.
+ * The icon set: Heroicons for everything generic, Lucide for the editor's
+ * vocabulary, hand-authored glyphs for the few marks nobody draws.
  *
- * The generic half (folders, chevrons, trash, eyes) comes from Heroicons -
- * professionally drawn, MIT, tree-shaken to only the imports named below, so
- * nothing ships that is not used. The hand-made half stays because no
- * general-purpose set draws a razor, a snap magnet, a template slot or a
- * frame-step well - and those are the glyphs this app lives in.
+ * The generic half (folders, chevrons, trash, eyes) comes from Heroicons;
+ * transport, tools, cut and merge come from Lucide, whose 24px stroke-2
+ * grid matches the app's exactly. Both are MIT and tree-shaken to only the
+ * imports named below, so nothing ships that is not used. Hand-made glyphs
+ * remain only for the template slot and the Windows title-bar chrome.
  *
  * Custom glyphs are 24x24, stroked with `currentColor` at width 2, round
- * caps. Add to the HERO map when Heroicons has the right glyph; draw on the
- * same grid when it does not.
+ * caps. Add to the LUCIDE or HERO map when a library has the right glyph;
+ * draw on the same grid only when none does.
  */
 
 const GLYPHS = {
@@ -368,6 +386,32 @@ const HERO: Partial<Record<IconName, typeof PlusIcon>> = {
   image: PhotoIcon,
 };
 
+/**
+ * Lucide covers the editor vocabulary Heroicons lacks - transport, tools,
+ * cut/merge - on the same 24px stroke-2 grid the custom glyphs use, so the
+ * two faces sit together without adjustment. What stays hand-drawn is only
+ * what no library carries: the template slot and the Windows chrome.
+ */
+const LUCIDE: Partial<Record<IconName, typeof Play>> = {
+  play: Play,
+  pause: Pause,
+  skipStart: SkipBack,
+  skipEnd: SkipForward,
+  stepBack: StepBack,
+  stepForward: StepForward,
+  select: MousePointer2,
+  razor: ScissorsLineDashed,
+  hand: Hand,
+  split: SquareSplitHorizontal,
+  merge: Merge,
+  magnet: Magnet,
+  type: Type,
+  waveform: AudioLines,
+  // Two discs blending into one another: the cross-fade itself.
+  transition: Blend,
+  fit: Maximize,
+};
+
 export function Icon({
   name,
   size = 16,
@@ -379,6 +423,14 @@ export function Icon({
   className?: string;
   strokeWidth?: number;
 }) {
+  const Lucide = LUCIDE[name];
+  if (Lucide) {
+    // Lucide is authored at the same 24px stroke-2 as the custom glyphs, so
+    // the requested stroke passes straight through.
+    return (
+      <Lucide size={size} strokeWidth={strokeWidth} aria-hidden className={className} />
+    );
+  }
   const Hero = HERO[name];
   if (Hero) {
     return (
