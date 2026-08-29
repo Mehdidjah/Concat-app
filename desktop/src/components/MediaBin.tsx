@@ -774,6 +774,23 @@ function TransitionsPage({
   );
 }
 
+/**
+ * Rendered effect previews, one image per effect id, produced by
+ * `scripts/generate-effect-previews.mjs` running each effect's real FFmpeg
+ * chain over the chosen source still. Globbed so a missing render simply
+ * falls back to the effect's gradient swatch - the catalogue never breaks
+ * because a preview was not generated yet.
+ */
+const EFFECT_PREVIEWS: Record<string, string> = Object.fromEntries(
+  Object.entries(
+    import.meta.glob("../assets/effect-previews/*.{webp,jpg,png}", {
+      eager: true,
+      query: "?url",
+      import: "default",
+    }),
+  ).map(([file, url]) => [file.replace(/^.*\/|\.\w+$/g, ""), url as string]),
+);
+
 function EffectsPage({
   category,
   onApply,
@@ -784,17 +801,41 @@ function EffectsPage({
   const visible = EFFECTS.filter((effect) => effect.category === category);
   return (
     <ul className={`${CARD_GRID} pt-2`}>
-      {visible.map((effect) => (
-        <CatalogueCard
-          key={effect.id}
-          label={effect.label}
-          blurb={effect.blurb}
-          onApply={() => onApply(effect.id)}
-        >
-          <span className="absolute inset-0" style={{ background: effect.swatch }} aria-hidden />
-          <Icon name="sparkles" size={20} strokeWidth={1.5} className="relative text-white/85" />
-        </CatalogueCard>
-      ))}
+      {visible.map((effect) => {
+        const preview = EFFECT_PREVIEWS[effect.id];
+        return (
+          <CatalogueCard
+            key={effect.id}
+            label={effect.label}
+            blurb={effect.blurb}
+            onApply={() => onApply(effect.id)}
+          >
+            {preview ? (
+              <img
+                src={preview}
+                alt=""
+                aria-hidden
+                draggable={false}
+                className="absolute inset-0 h-full w-full object-cover"
+              />
+            ) : (
+              <>
+                <span
+                  className="absolute inset-0"
+                  style={{ background: effect.swatch }}
+                  aria-hidden
+                />
+                <Icon
+                  name="sparkles"
+                  size={20}
+                  strokeWidth={1.5}
+                  className="relative text-white/85"
+                />
+              </>
+            )}
+          </CatalogueCard>
+        );
+      })}
     </ul>
   );
 }
