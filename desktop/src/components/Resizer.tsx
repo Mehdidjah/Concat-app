@@ -52,10 +52,12 @@ export function Resizer({
       } ${className}`}
     >
       {/* Nothing is drawn until you are on it. The panels either side already
-          have their own edges; a third line between them is just noise. */}
+          have their own edges; a third line between them is just noise. Lime,
+          like the active tools and the selection - grabbing a divider is an
+          action, and actions read lime everywhere else in the app. */}
       <span
         aria-hidden
-        className={`absolute rounded-full bg-accent opacity-0 transition-opacity
+        className={`absolute rounded-full bg-tool-active opacity-0 transition-opacity
                     group-hover:opacity-100 group-active:opacity-100 ${
                       vertical
                         ? "inset-y-2 left-1/2 w-0.5 -translate-x-1/2"
