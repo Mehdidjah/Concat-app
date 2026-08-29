@@ -25,3 +25,11 @@ full texts ship beside the font files in `desktop/src/assets/fonts/`.
 Auto-captions can download ggml Whisper models from
 https://huggingface.co/ggerganov/whisper.cpp (MIT). Models are fetched on
 demand and never bundled.
+
+## Effect preview photograph
+
+The effect catalogue thumbnails are rendered from a photograph by
+Vitaly Gariev on Unsplash (https://unsplash.com/@silverkblack), used
+under the Unsplash License. The source still lives at
+`assets/effect-preview-source.jpg`; regenerate the tiles with
+`scripts/generate-effect-previews.mjs`.
