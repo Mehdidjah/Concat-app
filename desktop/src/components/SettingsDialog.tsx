@@ -186,27 +186,16 @@ function TranscriberSettings() {
 
   return (
     <div className="flex flex-col gap-5">
-      <section>
-        <h3 className="mb-2 flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-tertiary">
-          Engine
-          <HelpTip text="Transcription runs whisper.cpp locally - nothing leaves this machine. The engine ships inside WolfCut; pick a model below and captions work." />
-        </h3>
-        <div className="flex items-center gap-2 rounded-lg bg-sunken px-3 py-2.5">
-          <span
-            className={`h-2 w-2 shrink-0 rounded-full ${
-              status?.binary ? "bg-success" : "bg-danger"
-            }`}
-          />
-          <span className="min-w-0 flex-1 truncate text-xs text-secondary">
-            {status === null
-              ? "Checking..."
-              : status.bundled
-                ? "Included with WolfCut"
-                : (status.binary ?? "Transcription engine not found in this dev build")}
-          </span>
-          {/* The picker is a dev-build escape hatch, never a user chore: a
-              packaged app always carries its own copy and hides this. */}
-          {status !== null && !status.bundled && (
+      {/* Which binary transcribes is plumbing, not a setting: a healthy
+          install says nothing about it. The bar exists only for a dev build
+          with no engine at all, where Locate... is the way out. */}
+      {status !== null && !status.binary && (
+        <section>
+          <div className="flex items-center gap-2 rounded-lg bg-sunken px-3 py-2.5">
+            <span className="h-2 w-2 shrink-0 rounded-full bg-danger" />
+            <span className="min-w-0 flex-1 truncate text-xs text-secondary">
+              Transcription engine not found in this dev build
+            </span>
             <button
               type="button"
               onClick={() => void locate()}
@@ -215,9 +204,9 @@ function TranscriberSettings() {
             >
               Locate...
             </button>
-          )}
-        </div>
-      </section>
+          </div>
+        </section>
+      )}
 
       <section>
         <h3 className="mb-2 text-[11px] font-semibold uppercase tracking-wider text-tertiary">
@@ -245,7 +234,10 @@ function TranscriberSettings() {
       <section>
         <h3 className="mb-2 flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-tertiary">
           Models
-          <HelpTip text="Bigger models transcribe better and slower. English-only variants beat the multilingual ones at the same size when the audio is English. The selected model is what Auto captions uses." />
+          <HelpTip
+            align="start"
+            text="Bigger models transcribe better and slower. English-only variants beat the multilingual ones at the same size when the audio is English. The selected model is what Auto captions uses. Everything runs locally - nothing leaves this machine."
+          />
         </h3>
 
         <ul className="flex flex-col gap-1.5">
@@ -255,8 +247,15 @@ function TranscriberSettings() {
             return (
               <li
                 key={entry.id}
+                // The whole card selects, not just the radio dot: the dot is
+                // a 16px target and the card is what the eye reads as the
+                // option. Buttons inside stop propagation so deleting or
+                // downloading is never also a selection.
+                onClick={() => entry.downloaded && chooseModel(entry.id)}
                 className={`flex items-center gap-2.5 rounded-lg px-3 py-2 ring-1 transition-shadow ${
                   selected ? "ring-accent" : "ring-hairline"
+                } ${entry.downloaded ? "cursor-pointer" : ""} ${
+                  entry.downloaded && !selected ? "hover:ring-hairline-strong" : ""
                 }`}
               >
                 <button
@@ -294,7 +293,10 @@ function TranscriberSettings() {
                     <button
                       type="button"
                       aria-label="Cancel download"
-                      onClick={() => void cancelModelDownload()}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        void cancelModelDownload();
+                      }}
                       className="cursor-pointer rounded p-0.5 text-secondary hover:bg-hover
                                  hover:text-primary"
                     >
@@ -308,7 +310,10 @@ function TranscriberSettings() {
                       type="button"
                       aria-label={`Delete ${entry.label}`}
                       title="Delete the downloaded model"
-                      onClick={() => remove(entry.id)}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        remove(entry.id);
+                      }}
                       className="cursor-pointer rounded p-0.5 text-secondary transition-colors
                                  hover:bg-hover hover:text-danger"
                     >
@@ -319,7 +324,10 @@ function TranscriberSettings() {
                   <button
                     type="button"
                     disabled={download !== null}
-                    onClick={() => startDownload(entry.id)}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      startDownload(entry.id);
+                    }}
                     className="shrink-0 cursor-pointer rounded-md bg-panel px-2.5 py-1 text-[11px]
                                text-primary ring-1 ring-hairline transition-colors hover:bg-hover
                                disabled:cursor-not-allowed disabled:opacity-40"

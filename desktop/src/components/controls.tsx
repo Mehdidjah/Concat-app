@@ -20,7 +20,7 @@ import { Icon } from "./Icon";
  * pasted into a tool. This keeps the explanation one hover away instead, so
  * the panel stays controls-first.
  */
-export function HelpTip({ text }: { text: string }) {
+export function HelpTip({ text, align = "end" }: { text: string; align?: "start" | "end" }) {
   return (
     <span className="group/help relative inline-flex shrink-0">
       <Icon
@@ -30,10 +30,17 @@ export function HelpTip({ text }: { text: string }) {
       />
       <span
         role="tooltip"
-        className="pointer-events-none invisible absolute right-0 top-full z-20 mt-1.5 w-52
+        // The bubble must open towards the room. "end" hangs it leftward from
+        // the icon, right for the inspector where the icon hugs the window's
+        // right edge; "start" opens rightward, for an icon near the left of a
+        // scroll container - hanging left there pushes the bubble outside the
+        // container, where it is clipped instead of shown.
+        className={`pointer-events-none invisible absolute top-full z-50 mt-1.5 w-52
                    rounded-md border border-hairline bg-panel p-2 text-[11px] font-normal
                    normal-case leading-snug tracking-normal text-secondary
-                   shadow-[0_4px_14px_rgba(0,0,0,0.25)] group-hover/help:visible"
+                   shadow-[0_4px_14px_rgba(0,0,0,0.25)] group-hover/help:visible ${
+                     align === "end" ? "right-0" : "left-0"
+                   }`}
       >
         {text}
       </span>
