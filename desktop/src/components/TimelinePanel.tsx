@@ -772,24 +772,34 @@ export function TimelinePanel({
   const [tabDrag, setTabDrag] = useState<{ id: string; dx: number } | null>(null);
   const tabPress = useRef<{ id: string; x: number; dragging: boolean } | null>(null);
   /**
-   * The strip's geometry frozen at lift-off: each tab's centre in the order
-   * they sat, plus the lifted tab's slot and width. Live rects would feed
-   * back - the neighbours move as they slide aside - so every slot decision
-   * measures against where the tabs *were*.
+   * The strip's geometry frozen at lift-off: every tab's box in the order
+   * they sat, plus the origin for converting into strip content pixels.
+   * Live rects would feed back - the neighbours move as they slide aside -
+   * so every slot decision measures against where the tabs *were*.
    */
-  const tabRest = useRef<{ from: number; width: number; centers: number[] } | null>(null);
+  const tabRest = useRef<{
+    from: number;
+    origin: number;
+    lefts: number[];
+    widths: number[];
+  } | null>(null);
   /** Swallows exactly one click: the one the browser fires after a drop. */
   const tabDropped = useRef(false);
   /** The flex gap between tabs (gap-0.5), part of the hole a tab leaves. */
   const TAB_GAP = 2;
 
+  const tabCentre = (rest: { lefts: number[]; widths: number[] }, i: number) =>
+    rest.lefts[i] + rest.widths[i] / 2;
+
   /** Where the lifted tab would land, counted with it removed from the row:
    * how many resting neighbours its centre has passed to the left of. */
-  const tabSlotFor = (dx: number): number => {
-    const rest = tabRest.current;
-    if (!rest) return 0;
-    const centre = rest.centers[rest.from] + dx;
-    return rest.centers.filter((c, i) => i !== rest.from && c < centre).length;
+  const tabSlotFor = (
+    rest: NonNullable<typeof tabRest.current>,
+    dx: number,
+  ): number => {
+    const centre = tabCentre(rest, rest.from) + dx;
+    return rest.lefts.filter((_, i) => i !== rest.from && tabCentre(rest, i) < centre)
+      .length;
   };
 
   const onTabPointerDown = (timelineId: string, event: React.PointerEvent) => {
@@ -802,21 +812,22 @@ export function TimelinePanel({
     if (!press) return;
     if (!press.dragging) {
       if (Math.abs(event.clientX - press.x) < 4) return;
-      press.dragging = true;
       const strip = tabStrip.current;
       const tabs = strip
         ? Array.from(strip.querySelectorAll<HTMLElement>('[role="tab"]'))
         : [];
       const from = project.timelines.findIndex((timeline) => timeline.id === press.id);
-      if (from === -1 || tabs.length !== project.timelines.length) return;
+      if (!strip || from === -1 || tabs.length !== project.timelines.length) return;
+      const rects = tabs.map((tab) => tab.getBoundingClientRect());
       tabRest.current = {
         from,
-        width: tabs[from].getBoundingClientRect().width,
-        centers: tabs.map((tab) => {
-          const rect = tab.getBoundingClientRect();
-          return rect.left + rect.width / 2;
-        }),
+        origin: strip.getBoundingClientRect().left - strip.scrollLeft,
+        lefts: rects.map((rect) => rect.left),
+        widths: rects.map((rect) => rect.width),
       };
+      press.dragging = true;
+      // Rebase to lift-off so the tab does not jump the threshold distance.
+      press.x = event.clientX;
     }
     setTabDrag({ id: press.id, dx: event.clientX - press.x });
   };
@@ -829,7 +840,10 @@ export function TimelinePanel({
     const rest = tabRest.current;
     tabRest.current = null;
     if (!rest) return;
-    const index = tabSlotFor(event.clientX - press.x);
+    // The slot is read from the saved geometry, never from the ref the
+    // line above just cleared - clearing first is how every drop once
+    // landed at index 0 no matter where the preview showed it.
+    const index = tabSlotFor(rest, event.clientX - press.x);
     if (index !== rest.from) onMoveTimeline(press.id, index);
   };
   const selectUnlessDropped = (timelineId: string) => {
@@ -863,16 +877,17 @@ export function TimelinePanel({
           let shift = 0;
           const rest = tabDrag ? tabRest.current : null;
           if (tabDrag && rest) {
-            const centre = rest.centers[rest.from] + tabDrag.dx;
+            const centre = tabCentre(rest, rest.from) + tabDrag.dx;
+            const width = rest.widths[rest.from];
             if (timeline.id === tabDrag.id) {
               slide = "lifted";
               shift = tabDrag.dx;
             } else {
               slide = "aside";
-              if (index > rest.from && centre > rest.centers[index]) {
-                shift = -(rest.width + TAB_GAP);
-              } else if (index < rest.from && centre < rest.centers[index]) {
-                shift = rest.width + TAB_GAP;
+              if (index > rest.from && centre > tabCentre(rest, index)) {
+                shift = -(width + TAB_GAP);
+              } else if (index < rest.from && centre < tabCentre(rest, index)) {
+                shift = width + TAB_GAP;
               }
             }
           }
@@ -893,6 +908,29 @@ export function TimelinePanel({
             />
           );
         })}
+        {(() => {
+          // The drop marker: the same truth the drop uses, drawn as a line at
+          // the left edge of the hole the tab will land in. The live preview
+          // shows the shape of the row; the line pins down the exact slot.
+          const rest = tabDrag ? tabRest.current : null;
+          if (!tabDrag || !rest) return null;
+          const slot = tabSlotFor(rest, tabDrag.dx);
+          let edge = rest.lefts[0];
+          let counted = 0;
+          for (let i = 0; i < rest.widths.length && counted < slot; i += 1) {
+            if (i === rest.from) continue;
+            edge += rest.widths[i] + TAB_GAP;
+            counted += 1;
+          }
+          return (
+            <span
+              aria-hidden
+              className="pointer-events-none absolute bottom-0.5 top-1.5 z-20 w-0.5
+                         rounded bg-accent"
+              style={{ left: edge - rest.origin - 2 }}
+            />
+          );
+        })()}
         <span className="self-center">
           <IconButton icon="plus" label="New timeline" size={7} onClick={onAddTimeline} />
         </span>
