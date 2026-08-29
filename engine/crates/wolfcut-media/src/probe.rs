@@ -18,9 +18,10 @@ pub struct VideoStream {
     pub index: u32,
     /// Codec short name, for example `h264`.
     pub codec: String,
-    /// Coded width in pixels.
+    /// Displayed width in pixels: the coded width, swapped with the height
+    /// when the stream carries a quarter-turn display rotation.
     pub width: u32,
-    /// Coded height in pixels.
+    /// Displayed height in pixels; see [`VideoStream::width`].
     pub height: u32,
     /// Average frame rate, exact.
     pub frame_rate: FrameRate,
@@ -120,6 +121,17 @@ fn parse_video(stream: &Value, path: &Path) -> Option<Result<VideoStream>> {
         let width = u32_field(stream, "width").ok_or_else(|| missing("width"))?;
         let height = u32_field(stream, "height").ok_or_else(|| missing("height"))?;
 
+        // Portrait phone footage is commonly coded sideways, with a display
+        // rotation every player applies before showing the frame - as does
+        // our own decoder, which leaves ffmpeg's autorotate on. What the rest
+        // of the app must see are the displayed dimensions, so a quarter turn
+        // swaps them here; ignoring it treats a portrait clip as landscape.
+        let (width, height) = if display_rotation(stream).rem_euclid(180) == 90 {
+            (height, width)
+        } else {
+            (width, height)
+        };
+
         // `avg_frame_rate` is 0/0 for streams with no constant rate, in which
         // case `r_frame_rate` carries the best guess FFmpeg has.
         let frame_rate = ["avg_frame_rate", "r_frame_rate"]
@@ -149,6 +161,32 @@ fn parse_audio(stream: &Value) -> Option<AudioStream> {
         sample_rate: u32_field(stream, "sample_rate").unwrap_or(0),
         channels: u32_field(stream, "channels").unwrap_or(0),
     })
+}
+
+/// Display rotation in degrees: a Display Matrix in the stream's side data
+/// (how phones record portrait video), or the legacy `rotate` tag older
+/// files carry. Zero when neither says anything.
+fn display_rotation(stream: &Value) -> i64 {
+    stream
+        .get("side_data_list")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .find_map(|entry| i64_field(entry, "rotation"))
+        .or_else(|| stream.get("tags").and_then(|tags| i64_field(tags, "rotate")))
+        .unwrap_or(0)
+}
+
+/// Like [`u32_field`], but signed, and tolerant of the float form some
+/// ffprobe builds use for the display matrix angle.
+fn i64_field(value: &Value, field: &str) -> Option<i64> {
+    match value.get(field)? {
+        Value::Number(number) => {
+            number.as_i64().or_else(|| number.as_f64().map(|angle| angle.round() as i64))
+        }
+        Value::String(text) => text.parse().ok(),
+        _ => None,
+    }
 }
 
 /// ffprobe is inconsistent about quoting numbers, so accept both forms.
@@ -193,6 +231,37 @@ mod tests {
         );
         let video = parse_video(&stream, Path::new("a.mp4")).expect("is video").expect("parses");
         assert_eq!(video.frame_rate, FrameRate::PAL);
+    }
+
+    #[test]
+    fn a_quarter_turn_display_rotation_swaps_the_dimensions() {
+        // iPhone portrait HEVC: coded sideways, display matrix says -90.
+        let stream = json(
+            r#"{"codec_type":"video","width":1920,"height":1080,"avg_frame_rate":"30/1",
+                "side_data_list":[{"side_data_type":"Display Matrix","rotation":-90}]}"#,
+        );
+        let video = parse_video(&stream, Path::new("a.mp4")).expect("is video").expect("parses");
+        assert_eq!((video.width, video.height), (1080, 1920));
+    }
+
+    #[test]
+    fn a_half_turn_rotation_keeps_the_dimensions() {
+        let stream = json(
+            r#"{"codec_type":"video","width":1920,"height":1080,"avg_frame_rate":"30/1",
+                "side_data_list":[{"side_data_type":"Display Matrix","rotation":180}]}"#,
+        );
+        let video = parse_video(&stream, Path::new("a.mp4")).expect("is video").expect("parses");
+        assert_eq!((video.width, video.height), (1920, 1080));
+    }
+
+    #[test]
+    fn the_legacy_rotate_tag_counts_too() {
+        let stream = json(
+            r#"{"codec_type":"video","width":640,"height":480,"avg_frame_rate":"30/1",
+                "tags":{"rotate":"90"}}"#,
+        );
+        let video = parse_video(&stream, Path::new("a.mp4")).expect("is video").expect("parses");
+        assert_eq!((video.width, video.height), (480, 640));
     }
 
     #[test]
