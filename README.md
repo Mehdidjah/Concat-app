@@ -38,12 +38,20 @@ Currently in Alpha (pre-release), Download from [Releases](https://github.com/ju
 - MacOs (tested)
 - Linux
 
+## Contribution
+
+> [!IMPORTANT]
+> The best way to contribute is to grab a build from the [Release](https://github.com/jub0t/WolfCut/releases) page and test the application to see where it breaks or how it can be improved.
+
+To learn more about contributing to this project please refer to [this Discussion announcement](https://github.com/jub0t/WolfCut/discussions/3).
+
 ## Roadmap (or ideas)
 
 🌟 = important or really desired.
 
 - [ ] 🌟 Total website/ revamp: and a proper deploy website for a Download landing page.
 - [ ] 🌟 Templates: Improve templates, create centralized registry of templates contributed by users (kinda like npm).
+- [ ] 🌟 Script to reverse-engineer TikTok's templates, really helpful.
 - [ ] Hardware analysis: for device-tier detection, checking how good or potato someone's device is.
 - [ ] Effects: A scaleable way to embed or add hundreds of different Transition styles, Effects, etc to the Library.
 - [ ] Noise Cancelation/Removal.
@@ -53,8 +61,3 @@ Currently in Alpha (pre-release), Download from [Releases](https://github.com/ju
 - [ ] Profanity detection from Audio: Whisper + dictionary.
 - [ ] Audio Silence removal feature.
 - [ ] Auto Reframe: YuNet/person detector + tracker.
-
-## Rules
-
-- No Third Party API/Cloud integration such as voice generators, image generators, video generators, etc.
-- No code-changes or pull-request out of the blue.
