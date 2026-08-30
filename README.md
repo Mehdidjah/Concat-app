@@ -6,10 +6,12 @@
 
 **The free, open-source CapCut replacement.**
 
-[![Build](https://github.com/jub0t/WolfCut/actions/workflows/build.yml/badge.svg)](https://github.com/jub0t/WolfCut/actions/workflows/build.yml)
-[![Platforms](https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-8A2BE2)](https://github.com/jub0t/WolfCut/releases)
-[![Version](https://img.shields.io/badge/version-0.2.0-blue)](https://github.com/jub0t/WolfCut)
-[![Discord](https://img.shields.io/badge/Discord-join%20the%20server-5865F2?logo=discord&logoColor=white)](https://discord.gg/DVuPfpXfqP)
+<p align="center">
+  <a href="https://github.com/jub0t/WolfCut/actions/workflows/build.yml"><img src="https://img.shields.io/github/actions/workflow/status/jub0t/WolfCut/build.yml?style=flat&label=Build&labelColor=000000&color=161616" alt="Build Status" /></a>
+  <a href="https://github.com/jub0t/WolfCut/releases/latest"><img src="https://img.shields.io/badge/Download-macOS%20%7C%20Windows%20%7C%20Linux-161616?style=flat&labelColor=000000" alt="Download WolfCut" /></a>
+  <a href="https://github.com/jub0t/WolfCut/releases"><img src="https://img.shields.io/badge/Version-0.2.0-161616?style=flat&labelColor=000000" alt="WolfCut Version 0.2.0" /></a>
+  <a href="https://discord.gg/DVuPfpXfqP"><img src="https://img.shields.io/badge/Discord-Join%20the%20server-161616?style=flat&logo=discord&logoColor=F8F8F8&labelColor=000000" alt="Join WolfCut Discord" /></a>
+</p>
 
 <img src="assets/preview-dark.png" alt="WolfCut editor" width="100%" />
 
