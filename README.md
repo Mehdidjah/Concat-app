@@ -58,9 +58,9 @@ To learn more about contributing to this project please refer to [this Discussio
 
 🌟 = important or really desired.
 
-- [ ] 🌟 Total website/ revamp: and a proper deploy website for a Download landing page.
-- [ ] 🌟 Templates: Improve templates, create centralized registry of templates contributed by users (kinda like npm).
-- [ ] 🌟 Script to reverse-engineer TikTok's templates, really helpful.
+- [ ] Total website/ revamp: and a proper deploy website for a Download landing page.
+- [ ] Templates: Improve templates, create centralized registry of templates contributed by users (kinda like npm).
+- [ ] Script to reverse-engineer TikTok's templates, really helpful.
 - [ ] Hardware analysis: for device-tier detection, checking how good or potato someone's device is.
 - [ ] Effects: A scaleable way to embed or add hundreds of different Transition styles, Effects, etc to the Library.
 - [ ] Noise Cancelation/Removal.
