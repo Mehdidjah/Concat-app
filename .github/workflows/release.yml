@@ -2,11 +2,12 @@ name: Release
 
 # Pushing a tag that starts with v (v0.3.0, v0.3.0-alpha.1, ...) builds the
 # app for all three platforms and publishes a GitHub release under that tag
-# with one archive per platform. A tag containing a hyphen is a pre-release.
+# with a DMG, Windows installer EXE and Linux AppImage. Asset names stay
+# stable so the website can always use GitHub's /releases/latest/download URL.
 #
-# Each archive is the binary plus, on Windows and Linux, the FFmpeg runtime
-# libraries beside it. Signed installers and bundles are the next packaging
-# step.
+# Each package contains the application and the non-system runtime libraries
+# it needs. The workflow uses ad-hoc/unsigned packaging until the project owner
+# configures platform signing credentials.
 on:
   push:
     tags: ["v*"]
@@ -14,6 +15,8 @@ on:
 jobs:
   build:
     uses: ./.github/workflows/build-app.yml
+    with:
+      package: true
 
   publish:
     name: Publish release
@@ -24,17 +27,17 @@ jobs:
     steps:
       - uses: actions/download-artifact@v8
         with:
-          path: bundles
+          pattern: Concat-*-package
+          path: release
+          merge-multiple: true
 
-      - name: Pack one archive per platform
+      - name: Verify release installers
         run: |
           set -euo pipefail
-          mkdir -p out
-          tag="${GITHUB_REF_NAME}"
-          (cd bundles/Concat-macos   && tar -czf "../../out/Concat-${tag}-macos-arm64.tar.gz" .)
-          (cd bundles/Concat-linux   && tar -czf "../../out/Concat-${tag}-linux-x86_64.tar.gz" .)
-          (cd bundles/Concat-windows && zip -qr "../../out/Concat-${tag}-windows-x86_64.zip" .)
-          ls -l out
+          test -f release/Concat-macOS.dmg
+          test -f release/Concat-Windows-Setup.exe
+          test -f release/Concat-Linux-x86_64.AppImage
+          ls -lh release
 
       - uses: softprops/action-gh-release@v3
         with:
@@ -50,5 +53,13 @@ jobs:
             sources and licences in
             [THIRD_PARTY_NOTICES.md](https://github.com/jub0t/Concat/blob/main/THIRD_PARTY_NOTICES.md).
             Slint is used under its GPL-3.0-only option.
+
+            The macOS app is ad-hoc signed but not Apple-notarized, and the
+            Windows installer is currently unsigned. Your operating system may
+            show a trust warning until project-owner signing credentials are
+            configured.
           fail_on_unmatched_files: true
-          files: out/*
+          files: |
+            release/Concat-macOS.dmg
+            release/Concat-Windows-Setup.exe
+            release/Concat-Linux-x86_64.AppImage

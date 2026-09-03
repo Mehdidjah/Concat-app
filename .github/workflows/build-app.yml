@@ -1,7 +1,8 @@
 name: Build app
 
 # Builds Concat - the Slint window, `engine/crates/concat` - for macOS,
-# Windows and Linux, and uploads each as an artifact named Concat-<platform>.
+# Windows and Linux. CI uploads the runnable files as artifacts; tagged
+# releases additionally build a DMG, an NSIS installer and an AppImage.
 #
 # Reusable: ci.yml calls it on every push to main, release.yml on every tag.
 # It is the one place the build environment is described:
@@ -16,6 +17,12 @@ name: Build app
 #   libraries travel with the binary in the artifact.
 on:
   workflow_call:
+    inputs:
+      package:
+        description: Build end-user installers for a tagged release
+        required: false
+        default: false
+        type: boolean
 
 env:
   # BtbN's autobuilds: GPL (x264 in), shared, FFmpeg 8.1.
@@ -56,6 +63,10 @@ jobs:
             libfontconfig1-dev libfreetype6-dev libxkbcommon-dev libgl1-mesa-dev \
             libgtk-3-dev libasound2-dev libclang-dev cmake
 
+      - name: Packaging tools (Linux)
+        if: inputs.package && matrix.platform == 'linux'
+        run: sudo apt-get install -y libfuse2 patchelf
+
       # Ubuntu's packaged FFmpeg is older than the 7 the engine needs.
       - name: FFmpeg development libraries (Linux)
         if: matrix.platform == 'linux'
@@ -69,7 +80,13 @@ jobs:
 
       - name: FFmpeg development libraries (macOS)
         if: matrix.platform == 'macos'
-        run: brew install ffmpeg cmake
+        run: |
+          brew install ffmpeg cmake
+          echo "MACOSX_DEPLOYMENT_TARGET=13.0" >> "$GITHUB_ENV"
+
+      - name: Packaging tools (macOS)
+        if: inputs.package && matrix.platform == 'macos'
+        run: brew install dylibbundler
 
       # LLVM from chocolatey provides libclang. The BtbN zip unpacks to one
       # top-level folder.
@@ -111,8 +128,111 @@ jobs:
           Copy-Item engine/target/app/concat.exe stage/
           Copy-Item "$env:FFMPEG_DIR\bin\*.dll" stage/
 
+      - name: Package macOS DMG
+        if: inputs.package && matrix.platform == 'macos'
+        run: |
+          set -euo pipefail
+          app="package/Concat.app"
+          mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources" release
+          cp stage/concat "$app/Contents/MacOS/concat"
+          chmod +x "$app/Contents/MacOS/concat"
+          cp scripts/release/macos/Info.plist "$app/Contents/Info.plist"
+
+          version="$(sed -n 's/^version = "\([^"]*\)".*/\1/p' engine/Cargo.toml | head -1)"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $version" "$app/Contents/Info.plist"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $GITHUB_RUN_NUMBER" "$app/Contents/Info.plist"
+
+          iconset="package/Concat.iconset"
+          mkdir -p "$iconset"
+          sips -z 16 16 assets/concat_logo_512.png --out "$iconset/icon_16x16.png" >/dev/null
+          sips -z 32 32 assets/concat_logo_512.png --out "$iconset/icon_16x16@2x.png" >/dev/null
+          sips -z 32 32 assets/concat_logo_512.png --out "$iconset/icon_32x32.png" >/dev/null
+          sips -z 64 64 assets/concat_logo_512.png --out "$iconset/icon_32x32@2x.png" >/dev/null
+          sips -z 128 128 assets/concat_logo_512.png --out "$iconset/icon_128x128.png" >/dev/null
+          sips -z 256 256 assets/concat_logo_512.png --out "$iconset/icon_128x128@2x.png" >/dev/null
+          sips -z 256 256 assets/concat_logo_512.png --out "$iconset/icon_256x256.png" >/dev/null
+          sips -z 512 512 assets/concat_logo_512.png --out "$iconset/icon_256x256@2x.png" >/dev/null
+          cp assets/concat_logo_512.png "$iconset/icon_512x512.png"
+          sips -z 1024 1024 assets/concat_logo_512.png --out "$iconset/icon_512x512@2x.png" >/dev/null
+          iconutil -c icns "$iconset" -o "$app/Contents/Resources/Concat.icns"
+
+          mkdir -p "$app/Contents/Frameworks"
+          dylibbundler -od -b \
+            -x "$app/Contents/MacOS/concat" \
+            -d "$app/Contents/Frameworks" \
+            -p @executable_path/../Frameworks
+
+          codesign --force --deep --sign - "$app"
+          codesign --verify --deep --strict --verbose=2 "$app"
+
+          dmg_root="package/dmg-root"
+          mkdir -p "$dmg_root"
+          cp -R "$app" "$dmg_root/Concat.app"
+          ln -s /Applications "$dmg_root/Applications"
+          hdiutil create \
+            -volname Concat \
+            -srcfolder "$dmg_root" \
+            -format UDZO \
+            -ov release/Concat-macOS.dmg
+
+      - name: Install NSIS
+        if: inputs.package && matrix.platform == 'windows'
+        shell: pwsh
+        run: choco install nsis -y --no-progress
+
+      - name: Package Windows installer
+        if: inputs.package && matrix.platform == 'windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          New-Item -ItemType Directory -Force release | Out-Null
+          $stage = (Resolve-Path stage).Path
+          $output = Join-Path $PWD "release\Concat-Windows-Setup.exe"
+          $version = (Select-String -Path engine/Cargo.toml -Pattern '^version = "([^"]+)"').Matches[0].Groups[1].Value
+          & makensis.exe "/DSTAGE_DIR=$stage" "/DOUT_FILE=$output" "/DAPP_VERSION=$version" scripts/release/windows/installer.nsi
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Package Linux AppImage
+        if: inputs.package && matrix.platform == 'linux'
+        run: |
+          set -euo pipefail
+          appdir="$PWD/package/Concat.AppDir"
+          mkdir -p \
+            "$appdir/usr/bin" \
+            "$appdir/usr/lib" \
+            "$appdir/usr/share/applications" \
+            "$appdir/usr/share/icons/hicolor/512x512/apps" \
+            release
+          cp stage/concat "$appdir/usr/bin/concat"
+          cp -a stage/lib/. "$appdir/usr/lib/"
+          cp scripts/release/linux/io.concat.Concat.desktop "$appdir/usr/share/applications/"
+          cp assets/concat_logo_512.png "$appdir/usr/share/icons/hicolor/512x512/apps/io.concat.Concat.png"
+
+          curl -fsSL --retry 5 --retry-all-errors \
+            -o linuxdeploy-x86_64.AppImage \
+            https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
+          chmod +x linuxdeploy-x86_64.AppImage
+          export LD_LIBRARY_PATH="$PWD/ffmpeg-dev/lib:$appdir/usr/lib:${LD_LIBRARY_PATH:-}"
+          export OUTPUT="$PWD/release/Concat-Linux-x86_64.AppImage"
+          ./linuxdeploy-x86_64.AppImage \
+            --appdir "$appdir" \
+            --executable "$appdir/usr/bin/concat" \
+            --desktop-file "$appdir/usr/share/applications/io.concat.Concat.desktop" \
+            --icon-file "$appdir/usr/share/icons/hicolor/512x512/apps/io.concat.Concat.png" \
+            --output appimage
+          chmod +x "$OUTPUT"
+          file "$OUTPUT"
+
       - uses: actions/upload-artifact@v7
+        if: ${{ !inputs.package }}
         with:
           name: Concat-${{ matrix.platform }}
           path: stage
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@v7
+        if: inputs.package
+        with:
+          name: Concat-${{ matrix.platform }}-package
+          path: release/*
           if-no-files-found: error
