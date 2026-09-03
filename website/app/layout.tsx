@@ -17,7 +17,7 @@ const inter = Inter({
 export const metadata: Metadata = {
   metadataBase: new URL('https://concat-app.vercel.app'),
   applicationName: 'Concat',
-  title: 'Concat | Free, local video editor',
+  title: 'Concat | Your videos. Your rules.',
   description:
     'A fast, private video editor without watermarks, subscriptions, or cloud uploads. Download Concat for macOS, Windows, and Linux.',
   openGraph: {
@@ -44,7 +44,7 @@ export const metadata: Metadata = {
     images: ['/og.png'],
   },
   icons: {
-    icon: '/concat-logo.png',
+    icon: '/concat-logo-green.png',
   },
 };
 

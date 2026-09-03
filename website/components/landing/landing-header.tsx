@@ -108,7 +108,7 @@ export function LandingHeader() {
       <nav className="nav-frame" aria-label="Primary navigation">
         <Link className="brand-link" href="/" aria-label="Concat home">
           <Image
-            src="/concat-logo.png"
+            src="/concat-logo-green.png"
             alt=""
             width={40}
             height={40}
@@ -119,7 +119,6 @@ export function LandingHeader() {
         </Link>
 
         <div className="nav-actions">
-          <span className="version-badge version-badge-nav">Alpha 0.2.0</span>
           <div
             className="menu-wrap"
             ref={menuRef}
@@ -173,9 +172,6 @@ export function LandingHeader() {
               className="menu-panel"
               aria-hidden={!menuOpen}
             >
-              <span className="version-badge version-badge-menu">
-                Alpha 0.2.0
-              </span>
               {navigation.map((item) => (
                 <a
                   key={item.label}
