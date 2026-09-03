@@ -4,7 +4,6 @@
 import { Theme } from "../theme/theme.slint";
 import { Glyph, Icon } from "../icons.slint";
 import { IconButton, Row, Section, SectionHeader } from "../primitives/panel.slint";
-import { BezierEditor } from "../primitives/bezier-editor.slint";
 import { SegmentedControl } from "../primitives/segmented-control.slint";
 import { Select } from "../primitives/select.slint";
 import {
@@ -20,8 +19,36 @@ import { ClipField, ClipKind, SelectedClipData } from "../timeline/model.slint";
 /// One parameter a preset exposes. `value` doubles as the default in the
 /// catalogue: applying a preset copies the row, and double-click restores
 /// `default-value`.
-export struct ParamData {
+/// One package on a library shelf. Published by Rust from the effect
+/// catalogue; the id is what Rust is handed back when the row is clicked, and
+/// ids are stable forever because project files store them.
+export struct CatalogueEntryData {
     id: string,
+    name: string,
+    /// The shelf's label, and its index into the kind's group list.
+    category: string,
+    group: int,
+    description: string,
+}
+
+/// One link of the selected clip's chain, in chain order.
+export struct AppliedEntryData {
+    id: string,
+    name: string,
+    /// False bypasses the link without losing what was dialled into it.
+    on: bool,
+    /// False when no package answers to the id: the row still shows, so the
+    /// link can be removed, but it has no knobs and renders nothing.
+    known: bool,
+}
+
+/// One knob of one link. Flat rather than nested in the entry so a value
+/// changing under a drag rewrites one small row and not the whole link.
+export struct AppliedParamData {
+    /// Which link, as an index into the applied list.
+    entry: int,
+    /// The manifest's key; what Rust is handed back with the new value.
+    key: string,
     label: string,
     min: float,
     max: float,
@@ -31,54 +58,42 @@ export struct ParamData {
     fmt: ParamFormat,
 }
 
-/// One preset in an applied chain: which one, whether it is live, its values.
-/// Every preset in the catalogue exposes exactly two parameters, so the pair
-/// is flattened here instead of nested in a model a struct cannot hold.
-export struct AppliedPresetData {
-    id: string,
-    name: string,
-    on: bool,
-    p1: ParamData,
-    p2: ParamData,
-}
-
-/// A catalogue entry: the preset as it would be applied, plus its shelf.
-export struct PresetDef {
-    group: int,
-    preset: AppliedPresetData,
-}
-
-// The applied chain plus the library that feeds it.
+/// A chain and its library: the links applied to the selected clip, each
+/// with a control per parameter its package declares, and under it the
+/// shelves of packages that can be added. One component serves effects,
+/// filters and audio alike — the data says which.
 export component PresetStack inherits VerticalLayout {
     /// lower-case singular, for labels and placeholders
-    in property <string> noun: "filter";
-    in property <string> library-title: "Filter library";
+    in property <string> noun: "effect";
+    in property <string> library-title: "Effect library";
     in property <[string]> group-labels;
-    in property <[PresetDef]> catalogue;
+    in property <[CatalogueEntryData]> catalogue;
     /// Owned by Rust: a chain is edited by index, and Slint models cannot be
     /// spliced from the language.
-    in property <[AppliedPresetData]> applied;
+    in property <[AppliedEntryData]> applied;
+    in property <[AppliedParamData]> params;
 
-    callback add(preset: AppliedPresetData);
+    callback add(id: string);
     callback toggle(index: int);
     callback move-by(index: int, delta: int);
     callback remove(index: int);
-    callback set-param(index: int, second: bool, value: float);
+    /// One knob moved. The value lands on the echo; `commit` makes it real.
+    callback set-param(index: int, key: string, value: float);
+    callback commit();
 
     property <int> group;
     property <string> query;
     property <bool> help;
 
-    function shown(def: PresetDef) -> bool {
-        return def.group == root.group
-            && (root.query == "" || InspectorSearch.matches(def.preset.name, root.query));
+    function shown(entry: CatalogueEntryData) -> bool {
+        return entry.group == root.group
+            && (root.query == "" || InspectorSearch.matches(entry.name, root.query));
     }
 
     function in-chain(id: string) -> bool {
-        // Two is the deepest the demo chains go before this reads awkwardly;
-        // a real member test wants a model lookup Slint cannot express, so
-        // Rust flags it the day chains grow params. Linear scan over a model
-        // is fine at this size.
+        // A real member test wants a model lookup Slint cannot express, so
+        // this scans the first eight links, which is deeper than a chain
+        // gets before it stops being a chain and starts being a problem.
         return root.applied.length > 0 && (root.applied[0].id == id
             || (root.applied.length > 1 && root.applied[1].id == id)
             || (root.applied.length > 2 && root.applied[2].id == id)
@@ -89,7 +104,7 @@ export component PresetStack inherits VerticalLayout {
             || (root.applied.length > 7 && root.applied[7].id == id));
     }
 
-    // No empty shell: the section arrives with the first preset, so an
+    // No empty shell: the section arrives with the first link, so an
     // untouched clip shows only its library.
     if root.applied.length > 0: Section {
         first: true;
@@ -134,11 +149,18 @@ export component PresetStack inherits VerticalLayout {
                         Text {
                             horizontal-stretch: 1;
                             text: item.name;
-                            color: Theme.fg;
+                            color: item.known ? Theme.fg : Theme.fg-dim;
                             font-size: Theme.fs;
                             font-weight: Theme.weight-title;
                             vertical-alignment: center;
                             overflow: elide;
+                        }
+
+                        if !item.known: Text {
+                            text: "not installed";
+                            color: Theme.fg-dim;
+                            font-size: Theme.fs-xs;
+                            vertical-alignment: center;
                         }
 
                         IconButton {
@@ -166,28 +188,31 @@ export component PresetStack inherits VerticalLayout {
                         }
                     }
 
-                    Param {
-                        label: item.p1.label;
-                        value: item.p1.value;
-                        minimum: item.p1.min;
-                        maximum: item.p1.max;
-                        step: item.p1.step;
-                        default-value: item.p1.default-value;
-                        fmt: item.p1.fmt;
-                        enabled: item.on;
-                        changed(v) => { root.set-param(index, false, v); }
-                    }
+                    // One control per parameter the package declares. The
+                    // knob writes to its own `value`, which drops a binding,
+                    // so the row re-seeds it whenever Rust republishes the
+                    // parameter — a new clip, an undo — and the control
+                    // never shows a number that is not the document's.
+                    for p in root.params: Rectangle {
+                        property <AppliedParamData> data: p;
+                        visible: p.entry == index;
+                        height: p.entry == index ? knob.preferred-height : 0;
+                        changed data => { knob.value = self.data.value; }
 
-                    Param {
-                        label: item.p2.label;
-                        value: item.p2.value;
-                        minimum: item.p2.min;
-                        maximum: item.p2.max;
-                        step: item.p2.step;
-                        default-value: item.p2.default-value;
-                        fmt: item.p2.fmt;
-                        enabled: item.on;
-                        changed(v) => { root.set-param(index, true, v); }
+                        knob := Param {
+                            label: p.label;
+                            value: p.value;
+                            minimum: p.min;
+                            maximum: p.max;
+                            step: p.step;
+                            default-value: p.default-value;
+                            fmt: p.fmt;
+                            enabled: item.on;
+                            changed(v) => {
+                                root.set-param(index, p.key, v);
+                                root.commit();
+                            }
+                        }
                     }
                 }
             }
@@ -228,13 +253,13 @@ export component PresetStack inherits VerticalLayout {
             // keystroke and a hidden row costing zero height is the cheap,
             // geometry-proof way to narrow the list (see media-pane's
             // sidebar for the scar tissue behind this choice).
-            for def[index] in root.catalogue: row := Rectangle {
+            for entry[index] in root.catalogue: row := Rectangle {
                 // Named rather than reached through `parent`: a layout is not
                 // transparent to a parent chain, so a descendant inside the
                 // HorizontalLayout below cannot see the row's own properties
                 // any other way.
-                property <bool> shown: root.shown(def);
-                property <bool> in-chain: root.in-chain(def.preset.id);
+                property <bool> shown: root.shown(entry);
+                property <bool> in-chain: root.in-chain(entry.id);
 
                 visible: row.shown;
                 height: row.shown ? 26px : 0;
@@ -258,7 +283,7 @@ export component PresetStack inherits VerticalLayout {
 
                     Text {
                         horizontal-stretch: 1;
-                        text: def.preset.name;
+                        text: entry.name;
                         color: row.in-chain ? Theme.fg-dim : Theme.fg;
                         font-size: Theme.fs;
                         vertical-alignment: center;
@@ -276,80 +301,41 @@ export component PresetStack inherits VerticalLayout {
                 row-touch := TouchArea {
                     enabled: !row.in-chain;
                     mouse-cursor: pointer;
-                    clicked => { root.add(def.preset); }
+                    clicked => { root.add(entry.id); }
                 }
             }
         }
     }
 }
 
-// The Adjust tab: what can be changed about the selected clip.
+// The clip's own tabs, one panel each. The tab strip follows the kind (see
+// config-pane): a still has picture but no sound, so it gets Video and not
+// Audio or Speed; a sound clip is the reverse. Every panel here is a set of
+// fields on the selected clip; the chains have their own stacks.
 //
-// The panel adapts to the kind rather than the tab strip doing it all: a
-// still has picture but no sound, so it gets Transform and nothing else; an
-// audio clip has sound but no picture, so it gets everything but Transform.
-//
-// The fader for level works in decibels, not linear gain. Linear puts every
-// useful setting in the bottom sixth of the travel; decibels is both how the
-// ear works and how anyone mixing thinks.
-export component AdjustPanel inherits VerticalLayout {
+// Local editing state is assigned rather than bound. A control writes to its
+// own `value` as it is dragged, and an assignment in Slint replaces whatever
+// binding the parent declared on that property — so binding these straight
+// to `selected` would work exactly once and then go deaf to the model. They
+// are seeded instead, on init and whenever the selection changes under us.
+
+/// Video: how the picture sits in the frame, and how solid it is.
+export component VideoPanel inherits VerticalLayout {
     in property <SelectedClipData> selected;
 
     callback set(field: ClipField, value: float);
     /// A control gesture finished: the accumulated change becomes one command.
     callback commit();
-    callback keyframe-toggle();
-    callback keyframe-seek(direction: int);
-    callback keyframe-easing(x1: float, y1: float, x2: float, y2: float);
 
-    property <bool> has-picture: root.selected.kind == ClipKind.video
-        || root.selected.kind == ClipKind.image;
-    /// A still is picture only: no gain to set, nothing a fade could quieten.
-    property <bool> has-sound: root.selected.kind != ClipKind.image;
-    /// A fade longer than half the clip would overlap the other one.
-    property <float> fade-limit: Math.max(0.1, Math.min(10, root.selected.duration / 2));
-
-    // Local editing state, assigned rather than bound.
-    //
-    // A control writes to its own `value` as it is dragged, and an assignment
-    // in Slint replaces whatever binding the parent declared on that property
-    // — so binding these straight to `clip` would work exactly once and then
-    // go deaf to the model. They are seeded instead, on init and whenever the
-    // selection changes under us.
     property <float> scale;
     property <float> offset-x;
     property <float> offset-y;
     property <float> rotation;
     property <float> alpha;
-    property <float> level;
-    property <float> speed;
-    property <float> fade-in;
-    property <float> fade-out;
-    property <bool> curve-open;
-    property <float> curve-x1;
-    property <float> curve-y1;
-    property <float> curve-x2;
-    property <float> curve-y2;
-
-    pure function curve-is(x1: float, y1: float, x2: float, y2: float) -> bool {
-        return Math.abs(root.curve-x1 - x1) < 0.005
-            && Math.abs(root.curve-y1 - y1) < 0.005
-            && Math.abs(root.curve-x2 - x2) < 0.005
-            && Math.abs(root.curve-y2 - y2) < 0.005;
-    }
-
-    property <int> curve-preset: root.curve-is(0, 0, 1, 1) ? 0
-        : root.curve-is(0.42, 0, 1, 1) ? 1
-        : root.curve-is(0, 0, 0.58, 1) ? 2
-        : root.curve-is(0.42, 0, 0.58, 1) ? 3 : 4;
-
-    function set-curve(x1: float, y1: float, x2: float, y2: float) {
-        root.curve-x1 = x1;
-        root.curve-y1 = y1;
-        root.curve-x2 = x2;
-        root.curve-y2 = y2;
-        root.keyframe-easing(x1, y1, x2, y2);
-    }
+    property <float> crop-left;
+    property <float> crop-top;
+    property <float> crop-right;
+    property <float> crop-bottom;
 
     function seed() {
         root.scale = root.selected.scale;
@@ -357,23 +343,20 @@ export component AdjustPanel inherits VerticalLayout {
         root.offset-y = root.selected.offset-y;
         root.rotation = root.selected.rotation;
         root.alpha = root.selected.opacity;
-        root.level = InspectorFmt.to-decibels(root.selected.volume);
-        root.speed = root.selected.speed;
-        root.fade-in = root.selected.fade-in;
-        root.fade-out = root.selected.fade-out;
-        root.curve-x1 = root.selected.transform-curve-x1;
-        root.curve-y1 = root.selected.transform-curve-y1;
-        root.curve-x2 = root.selected.transform-curve-x2;
-        root.curve-y2 = root.selected.transform-curve-y2;
+        root.crop-left = root.selected.crop-left;
+        root.crop-top = root.selected.crop-top;
+        root.crop-right = root.selected.crop-right;
+        root.crop-bottom = root.selected.crop-bottom;
     }
+
+    property <[string]> blends: ["Normal", "Multiply", "Screen", "Add", "Lighten", "Darken"];
 
     init => { root.seed(); }
     changed selected => { root.seed(); }
 
     property <bool> transform-help;
-    property <bool> speed-help;
 
-    if root.has-picture: Section {
+    Section {
         first: true;
         transform := SectionHeader {
             title: "Transform";
@@ -383,39 +366,14 @@ export component AdjustPanel inherits VerticalLayout {
                 open: root.transform-help;
                 toggled => { root.transform-help = self.open; }
             }
-            IconButton {
-                glyph: Glyph.step-back;
-                label: "Previous transform keyframe";
-                enabled: root.selected.previous-transform-keyframe >= 0;
-                clicked => { root.keyframe-seek(-1); }
-            }
-            IconButton {
-                glyph: Glyph.keyframe;
-                label: root.selected.transform-keyframe-here
-                    ? "Remove transform keyframe" : "Add transform keyframe";
-                checked: root.selected.transform-keyframe-here;
-                clicked => { root.keyframe-toggle(); }
-            }
-            IconButton {
-                glyph: Glyph.step-forward;
-                label: "Next transform keyframe";
-                enabled: root.selected.next-transform-keyframe >= 0;
-                clicked => { root.keyframe-seek(1); }
-            }
-            IconButton {
-                glyph: Glyph.waveform;
-                label: root.curve-open ? "Hide animation graph" : "Show animation graph";
-                enabled: root.selected.transform-keyframe-count > 0;
-                checked: root.curve-open;
-                clicked => { root.curve-open = !root.curve-open; }
-            }
         }
 
         if transform.open: VerticalLayout {
 
         if root.transform-help: Note {
             text: "Scale and position are fractions of the output frame, so a"
-                + " clip keeps its framing if the project is re-sized.";
+                + " clip keeps its framing if the project is re-sized. The"
+                + " same numbers move with the box on the monitor.";
         }
 
         Param {
@@ -458,6 +416,18 @@ export component AdjustPanel inherits VerticalLayout {
             fmt: ParamFormat.degrees;
             changed(v) => { root.set(ClipField.rotation, v); root.commit(); }
         }
+
+        }
+    }
+
+    Section {
+        blend := SectionHeader {
+            title: "Blend";
+            collapsible: true;
+            summary: "\{Math.round(root.alpha * 100)}% · "
+                + root.blends[Math.max(0, Math.min(root.selected.blend, root.blends.length - 1))];
+        }
+        if blend.open: VerticalLayout {
         Param {
             label: "Opacity";
             value <=> root.alpha;
@@ -468,70 +438,113 @@ export component AdjustPanel inherits VerticalLayout {
             fmt: ParamFormat.fraction;
             changed(v) => { root.set(ClipField.opacity, v); root.commit(); }
         }
-
-        if root.curve-open: VerticalLayout {
-            padding-left: Theme.pad;
-            padding-right: Theme.pad;
-            padding-top: 6px;
-            spacing: 8px;
-
-            Rectangle { height: 1px; background: Theme.line; }
-
-            HorizontalLayout {
-                spacing: 8px;
-
-                Text {
-                    text: "Interpolation";
-                    color: Theme.fg-muted;
-                    font-size: Theme.fs;
-                    vertical-alignment: center;
-                }
-
-                Select {
-                    options: ["Linear", "Ease In", "Ease Out", "Ease In & Out", "Custom"];
-                    current: root.curve-preset;
-                    enabled: root.selected.transform-curve-editable;
-                    changed(index) => {
-                        if (index == 0) { root.set-curve(0, 0, 1, 1); }
-                        if (index == 1) { root.set-curve(0.42, 0, 1, 1); }
-                        if (index == 2) { root.set-curve(0, 0, 0.58, 1); }
-                        if (index == 3) { root.set-curve(0.42, 0, 0.58, 1); }
-                        if (index < 4) { root.commit(); }
-                    }
-                }
-            }
-
-            if !root.selected.transform-curve-editable: Text {
-                text: "Add a second keyframe to edit the motion between poses.";
-                color: Theme.fg-dim;
-                font-size: Theme.fs-sm;
-                wrap: word-wrap;
-            }
-
-            if root.selected.transform-curve-editable: BezierEditor {
-                x1 <=> root.curve-x1;
-                y1 <=> root.curve-y1;
-                x2 <=> root.curve-x2;
-                y2 <=> root.curve-y2;
-                changed => {
-                    root.keyframe-easing(self.x1, self.y1, self.x2, self.y2);
-                }
-                committed => { root.commit(); }
-            }
-
-            if root.selected.transform-curve-editable: Text {
-                text: "The curve shapes the motion from this pose to the next keyframe.";
-                color: Theme.fg-dim;
-                font-size: Theme.fs-sm;
-                wrap: word-wrap;
+        Row {
+            label: "Mode";
+            Select {
+                options: root.blends;
+                current: root.selected.blend;
+                changed(index) => { root.set(ClipField.blend, index); root.commit(); }
             }
         }
-
+        SwitchRow {
+            label: "Flip horizontal";
+            checked: root.selected.flip-h;
+            toggled(on) => { root.set(ClipField.flip-h, on ? 1 : 0); root.commit(); }
+        }
+        SwitchRow {
+            label: "Flip vertical";
+            checked: root.selected.flip-v;
+            toggled(on) => { root.set(ClipField.flip-v, on ? 1 : 0); root.commit(); }
+        }
         }
     }
 
-    if root.has-sound: Section {
-        first: !root.has-picture;
+    // What is cut off the source before it is fitted. Fractions of the
+    // source's own edges, so a crop survives a change of output size.
+    Section {
+        crop := SectionHeader {
+            title: "Crop";
+            collapsible: true;
+            summary: (root.crop-left == 0 && root.crop-top == 0
+                && root.crop-right == 0 && root.crop-bottom == 0) ? "none"
+                : "\{Math.round(root.crop-left * 100)} · \{Math.round(root.crop-top * 100)}"
+                    + " · \{Math.round(root.crop-right * 100)} · \{Math.round(root.crop-bottom * 100)}";
+        }
+        if crop.open: VerticalLayout {
+        Param {
+            label: "Left";
+            value <=> root.crop-left;
+            minimum: 0;
+            maximum: 0.9;
+            step: 0.005;
+            default-value: 0;
+            fmt: ParamFormat.fraction;
+            changed(v) => { root.set(ClipField.crop-left, v); root.commit(); }
+        }
+        Param {
+            label: "Top";
+            value <=> root.crop-top;
+            minimum: 0;
+            maximum: 0.9;
+            step: 0.005;
+            default-value: 0;
+            fmt: ParamFormat.fraction;
+            changed(v) => { root.set(ClipField.crop-top, v); root.commit(); }
+        }
+        Param {
+            label: "Right";
+            value <=> root.crop-right;
+            minimum: 0;
+            maximum: 0.9;
+            step: 0.005;
+            default-value: 0;
+            fmt: ParamFormat.fraction;
+            changed(v) => { root.set(ClipField.crop-right, v); root.commit(); }
+        }
+        Param {
+            label: "Bottom";
+            value <=> root.crop-bottom;
+            minimum: 0;
+            maximum: 0.9;
+            step: 0.005;
+            default-value: 0;
+            fmt: ParamFormat.fraction;
+            changed(v) => { root.set(ClipField.crop-bottom, v); root.commit(); }
+        }
+        }
+    }
+}
+
+/// Audio: the level and the fades. The voice and room chain sits under it
+/// in the same tab; see config-pane.
+///
+/// The fader for level works in decibels, not linear gain. Linear puts every
+/// useful setting in the bottom sixth of the travel; decibels is both how the
+/// ear works and how anyone mixing thinks.
+export component AudioPanel inherits VerticalLayout {
+    in property <SelectedClipData> selected;
+
+    callback set(field: ClipField, value: float);
+    callback commit();
+
+    /// A fade longer than half the clip would overlap the other one.
+    property <float> fade-limit: Math.max(0.1, Math.min(10, root.selected.duration / 2));
+
+    property <float> level;
+    property <float> fade-in;
+    property <float> fade-out;
+
+    function seed() {
+        root.level = InspectorFmt.to-decibels(root.selected.volume);
+        root.fade-in = root.selected.fade-in;
+        root.fade-out = root.selected.fade-out;
+    }
+
+    init => { root.seed(); }
+    changed selected => { root.seed(); }
+
+    Section {
+        first: true;
         volume := SectionHeader {
             title: "Volume";
             collapsible: true;
@@ -556,51 +569,7 @@ export component AdjustPanel inherits VerticalLayout {
         }
     }
 
-    if root.has-sound: Section {
-        speed := SectionHeader {
-            title: "Speed";
-            collapsible: true;
-            summary: InspectorFmt.format(ParamFormat.rate, root.speed);
-            HelpButton {
-                open: root.speed-help;
-                toggled => { root.speed-help = self.open; }
-            }
-        }
-
-        if speed.open: VerticalLayout {
-
-        if root.speed-help: Note {
-            text: "Rate re-times the clip in place, so the timeline length"
-                + " changes with it. Trim afterwards, not before.";
-        }
-
-        Param {
-            label: "Rate";
-            value <=> root.speed;
-            // The engine's full range. The track is linear, so the useful
-            // 0.25-4x band sits left of centre and the number field beside it
-            // is how the extremes are actually dialled in.
-            minimum: 0.0625;
-            maximum: 16;
-            step: 0.05;
-            default-value: 1;
-            fmt: ParamFormat.rate;
-            changed(v) => { root.set(ClipField.speed, v); root.commit(); }
-        }
-
-        SwitchRow {
-            label: "Change pitch with speed";
-            checked: !root.selected.preserve-pitch;
-            toggled(on) => {
-                root.set(ClipField.preserve-pitch, on ? 0 : 1);
-                root.commit();
-            }
-        }
-
-        }
-    }
-
-    if root.has-sound: Section {
+    Section {
         fades := SectionHeader {
             title: "Fades";
             collapsible: true;
@@ -627,6 +596,251 @@ export component AdjustPanel inherits VerticalLayout {
             fmt: ParamFormat.seconds2;
             changed(v) => { root.set(ClipField.fade-out, v); root.commit(); }
         }
+        }
+    }
+}
+
+/// Speed: the rate or a curve, whether pitch follows it, and backwards.
+export component SpeedPanel inherits VerticalLayout {
+    in property <SelectedClipData> selected;
+
+    callback set(field: ClipField, value: float);
+    callback commit();
+
+    property <float> speed;
+    function seed() { root.speed = root.selected.speed; }
+    init => { root.seed(); }
+    changed selected => { root.seed(); }
+
+    property <bool> speed-help;
+    /// The Select's rows: the constant rate first, then the shapes in the
+    /// order Rust keeps them, then Custom for a shape that is none of them.
+    property <[string]> curves: ["Normal", "Montage", "Hero", "Bullet",
+        "Jump Cut", "Flash In", "Flash Out", "Custom"];
+    property <bool> curved: root.selected.speed-curve >= 0;
+
+    Section {
+        first: true;
+        speed := SectionHeader {
+            title: "Speed";
+            collapsible: true;
+            summary: InspectorFmt.format(ParamFormat.rate, root.speed);
+            HelpButton {
+                open: root.speed-help;
+                toggled => { root.speed-help = self.open; }
+            }
+        }
+
+        if speed.open: VerticalLayout {
+
+        if root.speed-help: Note {
+            text: "Rate re-times the clip in place, so the timeline length"
+                + " changes with it. Trim afterwards, not before. A curve"
+                + " varies the rate over the clip; the same footage plays,"
+                + " faster here and slower there.";
+        }
+
+        Row {
+            label: "Curve";
+            Select {
+                options: root.curves;
+                // Custom is one past the presets; Rust says so with their
+                // count, which lands on the same row.
+                current: root.curved ? Math.min(root.selected.speed-curve + 1,
+                    root.curves.length - 1) : 0;
+                changed(index) => {
+                    // Custom cannot be chosen, only arrived at.
+                    if (index < root.curves.length - 1) {
+                        root.set(ClipField.speed-curve, index - 1);
+                        root.commit();
+                    }
+                }
+            }
+        }
+
+        Param {
+            label: "Rate";
+            value <=> root.speed;
+            // With a curve the rate is the curve's mean, read-only: the
+            // shape decides it.
+            enabled: !root.curved;
+            // The engine's full range. The track is linear, so the useful
+            // 0.25-4x band sits left of centre and the number field beside it
+            // is how the extremes are actually dialled in.
+            minimum: 0.0625;
+            maximum: 16;
+            step: 0.05;
+            default-value: 1;
+            fmt: ParamFormat.rate;
+            changed(v) => { root.set(ClipField.speed, v); root.commit(); }
+        }
+
+        SwitchRow {
+            label: "Change pitch with speed";
+            checked: !root.selected.preserve-pitch;
+            toggled(on) => {
+                root.set(ClipField.preserve-pitch, on ? 0 : 1);
+                root.commit();
+            }
+        }
+
+        SwitchRow {
+            label: "Reverse";
+            checked: root.selected.reverse;
+            toggled(on) => {
+                root.set(ClipField.reverse, on ? 1 : 0);
+                root.commit();
+            }
+        }
+
+        }
+    }
+}
+
+/// Animation: how the clip comes in, goes out, and moves in between. Each
+/// slot is a named shape from Rust's list and, for the head and tail, the
+/// seconds it takes. The shapes are keys on the clip's own placement, so
+/// the stage box follows them at the playhead.
+export component AnimationPanel inherits VerticalLayout {
+    in property <SelectedClipData> selected;
+
+    callback set(field: ClipField, value: float);
+    callback commit();
+
+    property <[string]> in-shapes: ["None", "Fade", "Zoom In", "Zoom Out",
+        "Slide Up", "Slide Down", "Slide Left", "Slide Right", "Spin"];
+    property <[string]> out-shapes: ["None", "Fade", "Zoom In", "Zoom Out",
+        "Slide Up", "Slide Down", "Slide Left", "Slide Right", "Spin"];
+    property <[string]> combo-shapes: ["None", "Pulse", "Shake", "Spin", "Bounce", "Drift"];
+
+    property <float> in-seconds;
+    property <float> out-seconds;
+    function seed() {
+        root.in-seconds = root.selected.anim-in-duration;
+        root.out-seconds = root.selected.anim-out-duration;
+    }
+    init => { root.seed(); }
+    changed selected => { root.seed(); }
+
+    /// The longest a head or tail shape may take: half the clip, so the
+    /// two cannot cross.
+    property <float> limit: Math.max(0.1, Math.min(10, root.selected.duration / 2));
+    property <bool> help;
+
+    Section {
+        first: true;
+        SectionHeader {
+            title: "In";
+            HelpButton {
+                open: root.help;
+                toggled => { root.help = self.open; }
+            }
+        }
+        if root.help: Note {
+            text: "In and Out play over the clip's first and last seconds;"
+                + " Combo runs its whole length. Each moves the clip from"
+                + " where you placed it, so position it first.";
+        }
+        Row {
+            label: "Shape";
+            Select {
+                options: root.in-shapes;
+                current: root.selected.anim-in + 1;
+                changed(index) => { root.set(ClipField.anim-in, index - 1); root.commit(); }
+            }
+        }
+        if root.selected.anim-in >= 0: Param {
+            label: "Length";
+            value <=> root.in-seconds;
+            minimum: 0.1;
+            maximum: root.limit;
+            step: 0.05;
+            default-value: 0.5;
+            fmt: ParamFormat.seconds2;
+            changed(v) => { root.set(ClipField.anim-in-duration, v); root.commit(); }
+        }
+    }
+
+    Section {
+        SectionHeader { title: "Out"; }
+        Row {
+            label: "Shape";
+            Select {
+                options: root.out-shapes;
+                current: root.selected.anim-out + 1;
+                changed(index) => { root.set(ClipField.anim-out, index - 1); root.commit(); }
+            }
+        }
+        if root.selected.anim-out >= 0: Param {
+            label: "Length";
+            value <=> root.out-seconds;
+            minimum: 0.1;
+            maximum: root.limit;
+            step: 0.05;
+            default-value: 0.5;
+            fmt: ParamFormat.seconds2;
+            changed(v) => { root.set(ClipField.anim-out-duration, v); root.commit(); }
+        }
+    }
+
+    Section {
+        SectionHeader { title: "Combo"; }
+        Row {
+            label: "Shape";
+            Select {
+                options: root.combo-shapes;
+                current: root.selected.anim-combo + 1;
+                changed(index) => { root.set(ClipField.anim-combo, index - 1); root.commit(); }
+            }
+        }
+    }
+}
+
+/// Adjust: the manual colour panel. Every knob is a parameter of the one
+/// built-in `concat.adjust` package, which Rust puts at the head of the
+/// picture's chain the first time a knob moves; until then the rows show the
+/// package's defaults, which are the picture as shot. The rows come from the
+/// manifest, so a knob added there appears here without a line of UI.
+export component AdjustPanel inherits VerticalLayout {
+    in property <[AppliedParamData]> params;
+
+    callback set(key: string, value: float);
+    callback commit();
+
+    property <bool> help;
+
+    Section {
+        first: true;
+        SectionHeader {
+            title: "Colour";
+            HelpButton {
+                open: root.help;
+                toggled => { root.help = self.open; }
+            }
+        }
+
+        if root.help: Note {
+            text: "Exposure is in stops; the rest is a signed percent of the"
+                + " picture as shot, and zero everywhere is the picture as"
+                + " shot. Double-click a knob to put it back.";
+        }
+
+        // See PresetStack for why each row re-seeds its knob.
+        for p in root.params: Rectangle {
+            property <AppliedParamData> data: p;
+            height: knob.preferred-height;
+            changed data => { knob.value = self.data.value; }
+
+            knob := Param {
+                label: p.label;
+                value: p.value;
+                minimum: p.min;
+                maximum: p.max;
+                step: p.step;
+                default-value: p.default-value;
+                fmt: p.fmt;
+                changed(v) => { root.set(p.key, v); root.commit(); }
+            }
         }
     }
 }
@@ -735,89 +949,3 @@ export component FilterPanel inherits VerticalLayout {
 // The catalogues. Data only: the stack renders whatever params a preset
 // declares, so adding a processor is one entry here and no change to the
 // panel. The ids are written into project files, so they are stable forever.
-export global PresetCatalog {
-    out property <[string]> filter-groups: ["Voice", "Tone", "Space"];
-    out property <[string]> effect-groups: ["Dynamics", "Time", "Colour"];
-
-    out property <[PresetDef]> filters: [
-        { group: 0, preset: { id: "sweet", name: "Sweet", on: true,
-            p1: { id: "amount", label: "Amount", min: 0, max: 100, step: 1, default-value: 65, value: 65, fmt: ParamFormat.percent },
-            p2: { id: "pitch", label: "Pitch", min: 0, max: 12, step: 1, default-value: 0, value: 0, fmt: ParamFormat.pitch } } },
-        { group: 0, preset: { id: "deep", name: "Deep", on: true,
-            p1: { id: "amount", label: "Amount", min: 0, max: 100, step: 1, default-value: 70, value: 70, fmt: ParamFormat.percent },
-            p2: { id: "pitch", label: "Pitch", min: 0, max: 12, step: 1, default-value: 0, value: 0, fmt: ParamFormat.pitch } } },
-        { group: 0, preset: { id: "chipmunk", name: "Chipmunk", on: true,
-            p1: { id: "amount", label: "Amount", min: 0, max: 100, step: 1, default-value: 80, value: 80, fmt: ParamFormat.percent },
-            p2: { id: "pitch", label: "Pitch", min: 0, max: 12, step: 1, default-value: 0, value: 0, fmt: ParamFormat.pitch } } },
-        { group: 0, preset: { id: "robot", name: "Robot", on: true,
-            p1: { id: "amount", label: "Amount", min: 0, max: 100, step: 1, default-value: 60, value: 60, fmt: ParamFormat.percent },
-            p2: { id: "carrier", label: "Carrier", min: 40, max: 400, step: 10, default-value: 120, value: 120, fmt: ParamFormat.hertz } } },
-
-        { group: 1, preset: { id: "warm", name: "Warm", on: true,
-            p1: { id: "amount", label: "Amount", min: 0, max: 100, step: 1, default-value: 50, value: 50, fmt: ParamFormat.percent },
-            p2: { id: "tilt", label: "Tilt", min: -12, max: 12, step: 0.5, default-value: -2, value: -2, fmt: ParamFormat.decibels } } },
-        { group: 1, preset: { id: "bright", name: "Bright", on: true,
-            p1: { id: "amount", label: "Amount", min: 0, max: 100, step: 1, default-value: 45, value: 45, fmt: ParamFormat.percent },
-            p2: { id: "tilt", label: "Tilt", min: -12, max: 12, step: 0.5, default-value: 3, value: 3, fmt: ParamFormat.decibels } } },
-        { group: 1, preset: { id: "telephone", name: "Telephone", on: true,
-            p1: { id: "amount", label: "Amount", min: 0, max: 100, step: 1, default-value: 100, value: 100, fmt: ParamFormat.percent },
-            p2: { id: "band", label: "Band", min: 300, max: 4000, step: 10, default-value: 1800, value: 1800, fmt: ParamFormat.hertz } } },
-        { group: 1, preset: { id: "radio", name: "Radio", on: true,
-            p1: { id: "amount", label: "Amount", min: 0, max: 100, step: 1, default-value: 75, value: 75, fmt: ParamFormat.percent },
-            p2: { id: "noise", label: "Noise", min: 0, max: 100, step: 1, default-value: 12, value: 12, fmt: ParamFormat.percent } } },
-
-        { group: 2, preset: { id: "room", name: "Room", on: true,
-            p1: { id: "amount", label: "Amount", min: 0, max: 100, step: 1, default-value: 30, value: 30, fmt: ParamFormat.percent },
-            p2: { id: "decay", label: "Decay", min: 0, max: 8, step: 0.1, default-value: 0.6, value: 0.6, fmt: ParamFormat.seconds } } },
-        { group: 2, preset: { id: "hall", name: "Hall", on: true,
-            p1: { id: "amount", label: "Amount", min: 0, max: 100, step: 1, default-value: 40, value: 40, fmt: ParamFormat.percent },
-            p2: { id: "decay", label: "Decay", min: 0, max: 8, step: 0.1, default-value: 2.2, value: 2.2, fmt: ParamFormat.seconds } } },
-        { group: 2, preset: { id: "plate", name: "Plate", on: true,
-            p1: { id: "amount", label: "Amount", min: 0, max: 100, step: 1, default-value: 35, value: 35, fmt: ParamFormat.percent },
-            p2: { id: "decay", label: "Decay", min: 0, max: 8, step: 0.1, default-value: 1.4, value: 1.4, fmt: ParamFormat.seconds } } },
-        { group: 2, preset: { id: "cathedral", name: "Cathedral", on: true,
-            p1: { id: "amount", label: "Amount", min: 0, max: 100, step: 1, default-value: 55, value: 55, fmt: ParamFormat.percent },
-            p2: { id: "decay", label: "Decay", min: 0, max: 8, step: 0.1, default-value: 5, value: 5, fmt: ParamFormat.seconds } } },
-    ];
-
-    out property <[PresetDef]> effects: [
-        { group: 0, preset: { id: "compressor", name: "Compressor", on: true,
-            p1: { id: "threshold", label: "Threshold", min: -60, max: 0, step: 0.5, default-value: -18, value: -18, fmt: ParamFormat.decibels },
-            p2: { id: "ratio", label: "Ratio", min: 1, max: 20, step: 0.5, default-value: 4, value: 4, fmt: ParamFormat.ratio } } },
-        { group: 0, preset: { id: "limiter", name: "Limiter", on: true,
-            p1: { id: "ceiling", label: "Ceiling", min: -12, max: 0, step: 0.5, default-value: -1, value: -1, fmt: ParamFormat.decibels },
-            p2: { id: "release", label: "Release", min: 0, max: 500, step: 5, default-value: 60, value: 60, fmt: ParamFormat.millis } } },
-        { group: 0, preset: { id: "gate", name: "Noise gate", on: true,
-            p1: { id: "threshold", label: "Threshold", min: -80, max: 0, step: 0.5, default-value: -42, value: -42, fmt: ParamFormat.decibels },
-            p2: { id: "hold", label: "Hold", min: 0, max: 1000, step: 5, default-value: 120, value: 120, fmt: ParamFormat.millis } } },
-        { group: 0, preset: { id: "deesser", name: "De-esser", on: true,
-            p1: { id: "amount", label: "Amount", min: 0, max: 100, step: 1, default-value: 45, value: 45, fmt: ParamFormat.percent },
-            p2: { id: "centre", label: "Centre", min: 2000, max: 12000, step: 10, default-value: 6500, value: 6500, fmt: ParamFormat.hertz } } },
-
-        { group: 1, preset: { id: "delay", name: "Delay", on: true,
-            p1: { id: "time", label: "Time", min: 0, max: 1500, step: 5, default-value: 320, value: 320, fmt: ParamFormat.millis },
-            p2: { id: "feedback", label: "Feedback", min: 0, max: 100, step: 1, default-value: 28, value: 28, fmt: ParamFormat.percent } } },
-        { group: 1, preset: { id: "echo", name: "Echo", on: true,
-            p1: { id: "time", label: "Time", min: 0, max: 2000, step: 5, default-value: 500, value: 500, fmt: ParamFormat.millis },
-            p2: { id: "repeats", label: "Repeats", min: 1, max: 12, step: 1, default-value: 3, value: 3, fmt: ParamFormat.steps } } },
-        { group: 1, preset: { id: "stutter", name: "Stutter", on: true,
-            p1: { id: "rate", label: "Rate", min: 0.1, max: 24, step: 0.1, default-value: 8, value: 8, fmt: ParamFormat.rate-hz },
-            p2: { id: "depth", label: "Depth", min: 0, max: 100, step: 1, default-value: 70, value: 70, fmt: ParamFormat.percent } } },
-        { group: 1, preset: { id: "reverse", name: "Reverse", on: true,
-            p1: { id: "amount", label: "Amount", min: 0, max: 100, step: 1, default-value: 100, value: 100, fmt: ParamFormat.percent },
-            p2: { id: "crossfade", label: "Crossfade", min: 0, max: 400, step: 5, default-value: 40, value: 40, fmt: ParamFormat.millis } } },
-
-        { group: 2, preset: { id: "saturator", name: "Saturator", on: true,
-            p1: { id: "drive", label: "Drive", min: 0, max: 100, step: 1, default-value: 35, value: 35, fmt: ParamFormat.percent },
-            p2: { id: "mix", label: "Mix", min: 0, max: 100, step: 1, default-value: 100, value: 100, fmt: ParamFormat.percent } } },
-        { group: 2, preset: { id: "bitcrush", name: "Bitcrush", on: true,
-            p1: { id: "bits", label: "Bits", min: 2, max: 16, step: 1, default-value: 12, value: 12, fmt: ParamFormat.steps },
-            p2: { id: "mix", label: "Mix", min: 0, max: 100, step: 1, default-value: 60, value: 60, fmt: ParamFormat.percent } } },
-        { group: 2, preset: { id: "chorus", name: "Chorus", on: true,
-            p1: { id: "rate", label: "Rate", min: 0.1, max: 8, step: 0.1, default-value: 1.2, value: 1.2, fmt: ParamFormat.rate-hz },
-            p2: { id: "depth", label: "Depth", min: 0, max: 100, step: 1, default-value: 40, value: 40, fmt: ParamFormat.percent } } },
-        { group: 2, preset: { id: "flanger", name: "Flanger", on: true,
-            p1: { id: "rate", label: "Rate", min: 0.1, max: 8, step: 0.1, default-value: 0.4, value: 0.4, fmt: ParamFormat.rate-hz },
-            p2: { id: "feedback", label: "Feedback", min: 0, max: 100, step: 1, default-value: 55, value: 55, fmt: ParamFormat.percent } } },
-    ];
-}

@@ -1,65 +1,112 @@
 name: Release
 
 # Pushing a tag that starts with v (v0.3.0, v0.3.0-alpha.1, ...) builds the
-# app for all three platforms and publishes a GitHub release under that tag
-# with a DMG, Windows installer EXE and Linux AppImage. Asset names stay
-# stable so the website can always use GitHub's /releases/latest/download URL.
+# app for every platform and architecture and publishes a GitHub release
+# under that tag with one bundle per target, stable direct-download installers,
+# and a checksum file. A tag
+# containing a hyphen is a pre-release. The tag must be the workspace's
+# version, alone or with a pre-release suffix: a release whose files say
+# one number and whose tag says another is a release nobody can reason
+# about.
 #
-# Each package contains the application and the non-system runtime libraries
-# it needs. The workflow uses ad-hoc/unsigned packaging until the project owner
-# configures platform signing credentials.
+# The bundles are self-contained: the macOS .dmg carries its FFmpeg dylibs
+# and is notarised when the signing secrets are set; the Linux tarball and
+# the Windows zip carry the FFmpeg runtime libraries beside the binary.
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: An existing tag to build and publish, e.g. v0.3.0
+        required: true
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
+  check:
+    name: Tag matches the version
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - id: tag
+        run: |
+          tag="${{ inputs.tag || github.ref_name }}"
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' engine/Cargo.toml | head -1)
+          # The tag is the version, or the version with a pre-release
+          # suffix: v0.2.0 and v0.2.0-alpha.22 both belong to 0.2.0.
+          case "$tag" in
+            "v$version" | "v$version-"*) ;;
+            *)
+              echo "tag $tag does not match engine/Cargo.toml version $version" >&2
+              exit 1
+              ;;
+          esac
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
   build:
+    needs: [check]
     uses: ./.github/workflows/build-app.yml
-    with:
-      package: true
+    secrets: inherit
 
   publish:
     name: Publish release
-    needs: [build]
+    needs: [check, build]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - uses: actions/download-artifact@v8
         with:
-          pattern: Concat-*-package
-          path: release
+          path: bundles
           merge-multiple: true
 
-      - name: Verify release installers
+      - name: Checksums
         run: |
           set -euo pipefail
-          test -f release/Concat-macOS.dmg
-          test -f release/Concat-Windows-Setup.exe
-          test -f release/Concat-Linux-x86_64.AppImage
-          ls -lh release
+          cd bundles
+          test -f Concat-macOS.dmg
+          test -f Concat-Windows-Setup.exe
+          test -f Concat-Linux-x86_64.AppImage
+          ls -l
+          sha256sum -- * > SHA256SUMS
+
+      # The notes are the commits since the previous tag; see the script.
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.check.outputs.tag }}
+          fetch-depth: 0
+          path: source
+      - name: Write the notes
+        id: notes
+        run: |
+          set -euo pipefail
+          cd source
+          tag="${{ needs.check.outputs.tag }}"
+          previous=$(git describe --tags --abbrev=0 --match 'v*' "$tag^" 2>/dev/null || git rev-list --max-parents=0 HEAD | tail -1)
+          .github/release-notes.sh "$previous" "$tag" "Concat ${tag#v}" > "$RUNNER_TEMP/notes.md"
+          cat >> "$RUNNER_TEMP/notes.md" <<'NOTES'
+
+          ## Installer trust
+
+          The macOS build is Developer ID signed and Apple-notarised when the
+          repository signing secrets are configured; otherwise it is ad-hoc
+          signed and macOS displays a Gatekeeper warning. The Windows installer
+          remains unsigned until a Windows signing certificate is configured.
+          NOTES
+          cat "$RUNNER_TEMP/notes.md"
 
       - uses: softprops/action-gh-release@v3
         with:
-          name: Concat ${{ github.ref_name }}
-          prerelease: ${{ contains(github.ref_name, '-') }}
-          generate_release_notes: true
-          body: |
-            Concat is AGPL-3.0-or-later, with a plugin exception for Concat API
-            plugins ([LICENSE-EXCEPTIONS.md](https://github.com/jub0t/Concat/blob/main/LICENSE-EXCEPTIONS.md)).
-            The binaries link FFmpeg (GPL builds with x264; the Windows and
-            Linux archives carry its runtime libraries), compile in whisper.cpp
-            (MIT), and statically link sherpa-onnx with GPL-3.0 espeak-ng -
-            sources and licences in
-            [THIRD_PARTY_NOTICES.md](https://github.com/jub0t/Concat/blob/main/THIRD_PARTY_NOTICES.md).
-            Slint is used under its GPL-3.0-only option.
-
-            The macOS app is ad-hoc signed but not Apple-notarized, and the
-            Windows installer is currently unsigned. Your operating system may
-            show a trust warning until project-owner signing credentials are
-            configured.
+          tag_name: ${{ needs.check.outputs.tag }}
+          name: Concat ${{ needs.check.outputs.tag }}
+          prerelease: ${{ contains(needs.check.outputs.tag, '-') }}
+          body_path: ${{ runner.temp }}/notes.md
           fail_on_unmatched_files: true
-          files: |
-            release/Concat-macOS.dmg
-            release/Concat-Windows-Setup.exe
-            release/Concat-Linux-x86_64.AppImage
+          files: bundles/*

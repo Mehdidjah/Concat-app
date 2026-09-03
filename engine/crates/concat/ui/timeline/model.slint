@@ -151,7 +151,9 @@ export enum TextAlignment { left, center, right }
 /// one per control.
 export enum ClipField {
     scale, offset-x, offset-y, rotation, opacity,
-    volume, speed, preserve-pitch, fade-in, fade-out,
+    volume, speed, preserve-pitch, speed-curve, reverse, fade-in, fade-out,
+    anim-in, anim-out, anim-combo, anim-in-duration, anim-out-duration,
+    flip-h, flip-v, blend, crop-left, crop-top, crop-right, crop-bottom,
     font-size, font-weight, italic, text-opacity, align,
     stroke-width, shadow, line-height, tracking,
 }
@@ -182,22 +184,34 @@ export struct SelectedClipData {
     offset-y: float,
     rotation: float,
     opacity: float,
-    /// One diamond captures all five visual values as a pose.
-    transform-keyframe-count: int,
-    transform-keyframe-here: bool,
-    previous-transform-keyframe: float,
-    next-transform-keyframe: float,
-    transform-curve-editable: bool,
-    transform-curve-x1: float,
-    transform-curve-y1: float,
-    transform-curve-x2: float,
-    transform-curve-y2: float,
 
     // sound — everything but a still
     /// linear gain; the fader works in decibels and converts
     volume: float,
     speed: float,
     preserve-pitch: bool,
+    /// Which preset shape the speed curve is: -1 for a constant rate, the
+    /// presets' count for a custom shape.
+    speed-curve: int,
+    reverse: bool,
+
+    // animation — a shape per slot, as an index into the slot's list, or
+    // -1 for none; the seconds the head and tail shapes take
+    anim-in: int,
+    anim-out: int,
+    anim-combo: int,
+    anim-in-duration: float,
+    anim-out-duration: float,
+
+    // the picture's edges and colour
+    flip-h: bool,
+    flip-v: bool,
+    /// index into the blend list: normal, multiply, screen, add, lighten, darken
+    blend: int,
+    crop-left: float,
+    crop-top: float,
+    crop-right: float,
+    crop-bottom: float,
     fade-in: float,
     fade-out: float,
 
@@ -222,4 +236,41 @@ export struct SelectedClipData {
     plated: bool,
     line-height: float,
     tracking: float,
+}
+
+/// One picture under the playhead, as the monitor places it.
+///
+/// Everything is a fraction of the output frame rather than a pixel: the
+/// stage is drawn at whatever size the pane allows, and a box that is 40% of
+/// the frame wide is 40% of the stage wide at every size. Published for every
+/// picture and not only the selected ones, so a press on the stage has a
+/// list to test against — the hit-test itself is Rust's, because a rotated
+/// box is not something a TouchArea can be the shape of.
+export struct StageItemData {
+    id: string,
+    kind: ClipKind,
+    selected: bool,
+    /// The picture's centre, in fractions of the frame's width and height.
+    cx: float,
+    cy: float,
+    /// How much of the frame's width and height the picture covers, before
+    /// rotation. For a title this is an estimate: the engine does not report
+    /// where its glyphs landed.
+    w: float,
+    h: float,
+    /// Clockwise degrees, about the centre.
+    rotation: float,
+    /// The clip's scale, for the readout under the box.
+    scale: float,
+}
+
+/// One snap guide across the stage while a picture is dragged: the line the
+/// picture's centre or edge has just landed on, at the target's position.
+/// A vertical guide says the x axis snapped, a horizontal one the y axis;
+/// centring on both draws both, as a crosshair through the frame.
+export struct StageGuideData {
+    vertical: bool,
+    /// Where the line is, as a fraction of the frame's width (vertical) or
+    /// height (horizontal).
+    at: float,
 }

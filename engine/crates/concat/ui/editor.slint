@@ -2,13 +2,17 @@
 // SPDX-FileCopyrightText: 2026 Jareer and Concat contributors
 
 import { EffectData } from "demo/effects-panel.slint";
+import {
+    AppliedEntryData, AppliedParamData, CatalogueEntryData,
+} from "inspector/clip-inspector.slint";
 import { MediaFilter, MediaItemData } from "workspace/media-pane.slint";
 import { DockDivider, DockSide, SeatBox } from "dock.slint";
 import { PaneKind } from "workspace/pane-switcher.slint";
 import { MenuItemData } from "primitives/context-menu.slint";
 import {
     ClipData, ClipField, ClipTextField, DropData, SelectedClipData,
-    TimelineTabData, TimelineTool, TrackData, TrackSize,
+    StageGuideData, StageItemData, TimelineTabData, TimelineTool, TrackData,
+    TrackSize,
 } from "timeline/model.slint";
 
 // Everything the four editor views read and everything they report, in one
@@ -86,6 +90,7 @@ export global Editor {
     callback library-apply-effect(effect-id: string);
     callback library-apply-transition(transition-id: string);
     callback library-apply-filter(filter-id: string, label: string);
+    callback library-apply-audio(effect-id: string);
     callback library-save-template();
 
     // ── the inspector ──
@@ -94,9 +99,38 @@ export global Editor {
     callback clip-set-text(field: ClipTextField, value: string);
     callback clip-set-colour(field: ClipTextField, value: color);
     callback clip-commit();
-    callback transform-keyframe-toggle();
-    callback transform-keyframe-seek(direction: int);
-    callback transform-keyframe-easing(x1: float, y1: float, x2: float, y2: float);
+
+    // The effect catalogue's shelves, published once, and the selected
+    // clip's two chains with a row per parameter. See PresetStack.
+    in-out property <[CatalogueEntryData]> catalogue-effects;
+    in-out property <[CatalogueEntryData]> catalogue-filters;
+    in-out property <[CatalogueEntryData]> catalogue-audio;
+    in-out property <[string]> effect-groups;
+    in-out property <[string]> filter-groups;
+    in-out property <[string]> audio-groups;
+    in-out property <[AppliedEntryData]> applied-visual;
+    in-out property <[AppliedEntryData]> applied-audio;
+    in-out property <[AppliedParamData]> visual-params;
+    in-out property <[AppliedParamData]> audio-params;
+    /// The Adjust tab: the colour package's knobs for the selected clip.
+    in-out property <[AppliedParamData]> adjust-params;
+    callback adjust-set(key: string, value: float);
+
+    /// Something was just applied from the library: the inspector should
+    /// show it. The token changes with every application; the tab and
+    /// section say where the thing landed. An inspector that opens later
+    /// reads them too, so the first one up shows the effect.
+    in-out property <int> inspector-jump-token;
+    in-out property <string> inspector-jump-tab;
+    in-out property <string> inspector-jump-section;
+    /// `audio` picks the chain: the sound's, or the picture's. A parameter
+    /// change lands on the echo and `clip-commit` makes it a command, the
+    /// same as every other inspector control.
+    callback chain-add(audio: bool, id: string);
+    callback chain-toggle(audio: bool, index: int);
+    callback chain-move-by(audio: bool, index: int, delta: int);
+    callback chain-remove(audio: bool, index: int);
+    callback chain-set-param(audio: bool, index: int, key: string, value: float);
 
     in-out property <[EffectData]> video-effects;
     in-out property <[EffectData]> audio-effects;
@@ -123,6 +157,25 @@ export global Editor {
     callback step-frames(frames: float);
     callback ratio-changed(index: int);
     callback quality-changed(index: int);
+
+    /// Every picture under the playhead, placed as the compositor places it.
+    /// The stage outlines the selected ones and lets them be moved, scaled
+    /// and turned in place; see StageOverlay in the preview pane.
+    in-out property <[StageItemData]> stage-items;
+    /// The snap lines live while a picture is being moved on the stage, and
+    /// empty otherwise. Rust decides what snapped; the pane only draws it.
+    in-out property <[StageGuideData]> stage-guides;
+    /// A press on the stage itself, in fractions of the frame. Rust decides
+    /// what it landed on — a picture starts a move, empty stage clears the
+    /// selection — the way `clip-pressed` does for the lanes.
+    callback stage-pressed(x: float, y: float, additive: bool);
+    /// A press on one of a selected box's grips: 0..3 are its corners,
+    /// clockwise from top-left, and 4 is the rotation handle above it.
+    callback stage-grip-pressed(id: string, grip: int, x: float, y: float);
+    /// The pointer moved with a stage gesture live. `snap` is shift: an axis
+    /// for a move, steps for a scale, fifteen degrees for a turn.
+    callback stage-dragged(x: float, y: float, snap: bool);
+    callback stage-released();
 
     // ── the timeline ──
     in-out property <[TimelineTabData]> timeline-tabs;

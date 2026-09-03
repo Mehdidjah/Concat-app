@@ -12,7 +12,9 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::animate::Animation;
 use crate::arena::{Arena, Id};
+use crate::retime::SpeedCurve;
 use crate::time::{FrameRate, Rational, TimeRange};
 
 /// Handle to a [`Track`].
@@ -83,9 +85,75 @@ pub struct Clip {
     pub video_fade_out: Rational,
     /// How the picture sits in the frame. Identity is fitted and centred.
     pub transform: Transform,
-    /// Animated poses ordered by clip-local time. Empty means `transform` and
-    /// `opacity` remain constant.
-    pub transform_keyframes: Vec<TransformKeyframe>,
+    /// Speed as it changes over the clip, when it does. Overrides `speed`
+    /// for the time map; `speed` is then the curve's mean, kept so a sound
+    /// path that needs one number has one. See [`SpeedCurve`].
+    pub retime: Option<SpeedCurve>,
+    /// Played backwards: the source is consumed from its far end towards
+    /// `source_start`.
+    pub reverse: bool,
+    /// Keys over the clip's placement and opacity, when it has any. See
+    /// [`Animation`].
+    pub animation: Option<Animation>,
+    /// How the clip's colour meets what is beneath it.
+    pub blend: Blend,
+}
+
+/// How a layer's colour meets what is beneath it.
+///
+/// Source-over is the ordinary case. The rest are the fixed-function
+/// blends a GPU offers over premultiplied colour, spelled the same way on
+/// the CPU so the two paths agree pixel for pixel: with `s` the layer's
+/// colour times its alpha and `d` the ground, Multiply is `s·d + d(1-a)`,
+/// Screen `s(1-d) + d`, Add `s + d`, Lighten `max(s, d)`, Darken
+/// `min(s, d)`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Blend {
+    /// Source over: the layer covers what is beneath by its alpha.
+    #[default]
+    Normal,
+    /// Darkens: the ground times the layer.
+    Multiply,
+    /// Lightens: the inverse of multiplying the inverses.
+    Screen,
+    /// The sum, clipped.
+    Add,
+    /// The brighter of the two, per channel.
+    Lighten,
+    /// The darker of the two, per channel.
+    Darken,
+}
+
+impl Blend {
+    /// Every mode, in menu order.
+    pub const ALL: [Blend; 6] = [
+        Blend::Normal,
+        Blend::Multiply,
+        Blend::Screen,
+        Blend::Add,
+        Blend::Lighten,
+        Blend::Darken,
+    ];
+
+    /// The mode's name in a document: "normal", "multiply", ...
+    pub fn name(self) -> &'static str {
+        match self {
+            Blend::Normal => "normal",
+            Blend::Multiply => "multiply",
+            Blend::Screen => "screen",
+            Blend::Add => "add",
+            Blend::Lighten => "lighten",
+            Blend::Darken => "darken",
+        }
+    }
+
+    /// The mode a document names, Normal for anything unknown.
+    pub fn parse(name: &str) -> Blend {
+        Blend::ALL
+            .into_iter()
+            .find(|mode| mode.name() == name.trim())
+            .unwrap_or_default()
+    }
 }
 
 /// A clip's placement in the output frame.
@@ -104,79 +172,6 @@ pub struct Transform {
     pub offset_y: f64,
     /// Clockwise rotation about the picture's centre, in degrees.
     pub rotation: f64,
-}
-
-/// A cubic timing curve between two transform poses.
-#[derive(Clone, Copy, PartialEq, Debug)]
-pub struct CubicBezier {
-    /// First control point's horizontal coordinate.
-    pub x1: f64,
-    /// First control point's vertical coordinate.
-    pub y1: f64,
-    /// Second control point's horizontal coordinate.
-    pub x2: f64,
-    /// Second control point's vertical coordinate.
-    pub y2: f64,
-}
-
-impl CubicBezier {
-    /// No acceleration.
-    pub const LINEAR: Self = Self {
-        x1: 0.0,
-        y1: 0.0,
-        x2: 1.0,
-        y2: 1.0,
-    };
-
-    /// Solves the curve for y at a given x.
-    pub fn sample(self, x: f64) -> f64 {
-        fn axis(p1: f64, p2: f64, t: f64) -> f64 {
-            let u = 1.0 - t;
-            3.0 * u * u * t * p1 + 3.0 * u * t * t * p2 + t * t * t
-        }
-        fn slope(p1: f64, p2: f64, t: f64) -> f64 {
-            3.0 * (1.0 - t).powi(2) * p1
-                + 6.0 * (1.0 - t) * t * (p2 - p1)
-                + 3.0 * t * t * (1.0 - p2)
-        }
-
-        let x = x.clamp(0.0, 1.0);
-        let mut t = x;
-        for _ in 0..8 {
-            let error = axis(self.x1, self.x2, t) - x;
-            if error.abs() < 1e-7 {
-                return axis(self.y1, self.y2, t);
-            }
-            let derivative = slope(self.x1, self.x2, t);
-            if derivative.abs() < 1e-7 {
-                break;
-            }
-            t = (t - error / derivative).clamp(0.0, 1.0);
-        }
-        let (mut low, mut high) = (0.0, 1.0);
-        for _ in 0..16 {
-            t = (low + high) / 2.0;
-            if axis(self.x1, self.x2, t) < x {
-                low = t;
-            } else {
-                high = t;
-            }
-        }
-        axis(self.y1, self.y2, t)
-    }
-}
-
-/// A complete visual pose at a clip-local instant.
-#[derive(Clone, Copy, PartialEq, Debug)]
-pub struct TransformKeyframe {
-    /// Time from the clip's start.
-    pub time: Rational,
-    /// Placement at this instant.
-    pub transform: Transform,
-    /// Blend strength at this instant.
-    pub opacity: f32,
-    /// Curve from this pose to the next.
-    pub easing: CubicBezier,
 }
 
 impl Transform {
@@ -213,51 +208,38 @@ impl Clip {
             video_fade_in: Rational::ZERO,
             video_fade_out: Rational::ZERO,
             transform: Transform::IDENTITY,
-            transform_keyframes: Vec::new(),
+            retime: None,
+            reverse: false,
+            animation: None,
+            blend: Blend::Normal,
         }
     }
 
-    /// Placement and opacity at a timeline instant. The first and last poses
-    /// hold outside the animated span.
-    pub fn visual_at(&self, time: Rational) -> (Transform, f32) {
-        let Some(first) = self.transform_keyframes.first() else {
-            return (self.transform, self.opacity);
-        };
-        let local = time - self.start;
-        if local <= first.time || self.transform_keyframes.len() == 1 {
-            return (first.transform, first.opacity);
+    /// Where in the clip `time` falls, `0..=1`; zero outside it.
+    pub fn fraction_at(&self, time: Rational) -> f64 {
+        if self.duration.is_zero() {
+            return 0.0;
         }
-        let last = self
-            .transform_keyframes
-            .last()
-            .expect("a first keyframe exists");
-        if local >= last.time {
-            return (last.transform, last.opacity);
+        ((time - self.start) / self.duration)
+            .as_f64()
+            .clamp(0.0, 1.0)
+    }
+
+    /// The placement at `time`: the clip's own, moved by its animation.
+    pub fn transform_at(&self, time: Rational) -> Transform {
+        match &self.animation {
+            Some(animation) => animation.transform_at(self.transform, self.fraction_at(time)),
+            None => self.transform,
         }
-        for pair in self.transform_keyframes.windows(2) {
-            let (left, right) = (pair[0], pair[1]);
-            if local <= right.time {
-                let span = right.time - left.time;
-                if span.is_zero() {
-                    return (right.transform, right.opacity);
-                }
-                let amount = left.easing.sample(((local - left.time) / span).as_f64());
-                let lerp = |a: f64, b: f64| a + (b - a) * amount;
-                let rotation_delta =
-                    ((right.transform.rotation - left.transform.rotation + 540.0) % 360.0) - 180.0;
-                return (
-                    Transform {
-                        scale: lerp(left.transform.scale, right.transform.scale),
-                        offset_x: lerp(left.transform.offset_x, right.transform.offset_x),
-                        offset_y: lerp(left.transform.offset_y, right.transform.offset_y),
-                        rotation: left.transform.rotation + rotation_delta * amount,
-                    },
-                    (f64::from(left.opacity) + f64::from(right.opacity - left.opacity) * amount)
-                        .clamp(0.0, 1.0) as f32,
-                );
-            }
+    }
+
+    /// The opacity at `time`, before the fade ramps: the clip's own, scaled
+    /// by its animation.
+    pub fn opacity_at(&self, time: Rational) -> f32 {
+        match &self.animation {
+            Some(animation) => animation.opacity_at(self.opacity, self.fraction_at(time)),
+            None => self.opacity,
         }
-        (self.transform, self.opacity)
     }
 
     /// The opacity ramp factor at `time`, in `0.0..=1.0`.
@@ -297,13 +279,47 @@ impl Clip {
     /// piece of arithmetic that every trim, ripple, slip and retime operation
     /// ultimately has to agree with, so it lives in exactly one place.
     pub fn source_time_at(&self, time: Rational) -> Option<Rational> {
-        self.contains(time)
-            .then(|| self.source_start + (time - self.start) * self.speed)
+        if !self.contains(time) {
+            return None;
+        }
+        let forward = match &self.retime {
+            // The area under the curve, in fractions of the clip's length,
+            // scaled back to seconds. Approximated to a rational at the end
+            // so the rest of the arithmetic stays exact.
+            Some(curve) => {
+                let x = ((time - self.start) / self.duration).as_f64();
+                let consumed = curve.consumed(x) * self.duration.as_f64();
+                Rational::approximate(consumed).unwrap_or(Rational::ZERO)
+            }
+            None => (time - self.start) * self.speed,
+        };
+        Some(if self.reverse {
+            // From the far end back: the last instant lands on the first
+            // source frame, and the first on the frame just short of the
+            // end, which is the one a forward play would have shown last.
+            let span = self.source_duration();
+            let back = span - forward;
+            self.source_start + back.clamp_to(Rational::ZERO, span)
+        } else {
+            self.source_start + forward
+        })
     }
 
-    /// How much of the source this clip consumes: `duration * speed`.
+    /// How much of the source this clip consumes: `duration * speed`, or the
+    /// area under the curve when there is one.
     pub fn source_duration(&self) -> Rational {
-        self.duration * self.speed
+        match &self.retime {
+            Some(curve) => Rational::approximate(curve.mean() * self.duration.as_f64())
+                .unwrap_or(self.duration),
+            None => self.duration * self.speed,
+        }
+    }
+
+    /// Whether a decoder can be paced at one rate for this clip: false when
+    /// the speed changes over it or it runs backwards, in which case every
+    /// frame has to be sought by its own source time.
+    pub fn is_paced(&self) -> bool {
+        self.retime.is_none() && !self.reverse
     }
 }
 
@@ -496,6 +512,7 @@ impl Project {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::retime::SpeedCurve;
 
     fn seconds(value: i64) -> Rational {
         Rational::from_int(value)
@@ -526,6 +543,38 @@ mod tests {
             None,
             "the end is exclusive"
         );
+    }
+
+    /// A curve makes the map the area under the speed line, and a reverse
+    /// walks it from the far end; both keep the source covered the same.
+    #[test]
+    fn a_curve_bends_the_map_and_a_reverse_walks_it_backwards() {
+        let mut clip = Clip::new(
+            MediaRef::new("a.mp4"),
+            Rational::ZERO,
+            Rational::from_int(10),
+        );
+        // Half speed for the first half, double for the second: 2.5 s of
+        // source in the first 5 s of timeline, 10 s in the second.
+        clip.retime = SpeedCurve::new(&[(0.0, 0.5), (0.5, 0.5), (0.5, 2.0), (1.0, 2.0)]);
+        fn at(clip: &Clip, seconds: i64) -> f64 {
+            clip.source_time_at(Rational::from_int(seconds))
+                .unwrap()
+                .as_f64()
+        }
+        assert!((at(&clip, 5) - 2.5).abs() < 1e-6);
+        assert!((at(&clip, 9) - 10.5).abs() < 1e-3);
+        assert!((clip.source_duration().as_f64() - 12.5).abs() < 1e-6);
+        assert!(!clip.is_paced());
+
+        clip.retime = None;
+        clip.speed = Rational::from_int(2);
+        clip.reverse = true;
+        // Backwards at 2x over 10 s covers 20 s of source: the start shows
+        // the far end, the middle the middle.
+        assert!((at(&clip, 0) - 20.0).abs() < 1e-9);
+        assert!((at(&clip, 5) - 10.0).abs() < 1e-9);
+        assert!(!clip.is_paced());
     }
 
     #[test]

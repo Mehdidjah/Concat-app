@@ -21,6 +21,7 @@
 pub mod catalogue;
 pub mod expr;
 pub mod manifest;
+pub mod shader;
 pub mod template;
 
 mod builtins {
@@ -29,6 +30,7 @@ mod builtins {
 
 pub use catalogue::{At, Catalogue, Fixture, Package};
 pub use manifest::{Kind, Manifest, Param, ParamType};
+pub use shader::Shader;
 
 /// Why a package could not be loaded.
 #[derive(thiserror::Error, Debug)]
@@ -69,6 +71,30 @@ mod tests {
                 .collect(),
             enabled: true,
         }
+    }
+
+    /// A filter below full intensity is split, looked at on one copy and
+    /// blended back; at full intensity it is the bare fragment. An effect
+    /// never mixes: intensity is a filter's word.
+    #[test]
+    fn a_filter_mixes_by_its_intensity_and_an_effect_does_not() {
+        let catalogue = Catalogue::builtin();
+        let full = catalogue.video_chain(&[applied("concat.warm", &[])]);
+        assert_eq!(full, "colortemperature=temperature=4600");
+        let half = catalogue.video_chain(&[
+            applied("concat.sepia", &[]),
+            applied("concat.warm", &[("intensity", 50.0)]),
+        ]);
+        assert!(half.starts_with("colorchannelmixer"), "{half}");
+        assert!(
+            half.ends_with(
+                "split[m1a][m1b];[m1b]colortemperature=temperature=4600[m1c];\
+                 [m1a][m1c]blend=all_mode=normal:all_opacity=0.500"
+            ),
+            "{half}"
+        );
+        let effect = catalogue.video_chain(&[applied("concat.sepia", &[("intensity", 50.0)])]);
+        assert!(!effect.contains("blend"), "{effect}");
     }
 
     #[test]
@@ -244,6 +270,7 @@ mod tests {
         let package = || {
             Package::from_sources(
                 "[effect]\nid = \"a.b\"\nname = \"B\"\nkind = \"effect\"\n[ffmpeg]\nchain = \"negate\"\n",
+                None,
                 None,
             )
             .expect("loads")

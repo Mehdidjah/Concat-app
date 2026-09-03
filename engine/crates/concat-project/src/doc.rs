@@ -21,8 +21,8 @@
 use serde_json::{Map, Value, json};
 
 use crate::model::{
-    AppliedFilter, Clip, ClipKind, CubicBezier, CustomFont, MediaItem, MediaKind, Project,
-    TextAlign, TextStyle, Timeline, Track, TransformKeyframe, Transition,
+    AppliedFilter, Clip, ClipAnimation, ClipKind, Crop, CustomFont, MediaItem, MediaKind, Project,
+    SpeedPoint, TextAlign, TextStyle, Timeline, Track, Transition,
 };
 
 /// Bumped only when a change cannot be absorbed by defaulting.
@@ -159,36 +159,6 @@ fn read_text_style(raw: Option<&Value>) -> TextStyle {
     }
 }
 
-fn read_transform_keyframes(raw: Option<&Value>, duration: f64) -> Vec<TransformKeyframe> {
-    let Some(entries) = raw.and_then(Value::as_array) else {
-        return Vec::new();
-    };
-    let mut keyframes: Vec<_> = entries
-        .iter()
-        .map(|entry| {
-            let easing = entry.get("easing");
-            TransformKeyframe {
-                time: number(entry.get("time"), 0.0).clamp(0.0, duration),
-                scale: number(entry.get("scale"), 1.0).clamp(0.05, 8.0),
-                offset_x: number(entry.get("offsetX"), 0.0).clamp(-3.0, 3.0),
-                offset_y: number(entry.get("offsetY"), 0.0).clamp(-3.0, 3.0),
-                rotation: number(entry.get("rotation"), 0.0),
-                opacity: number(entry.get("opacity"), 1.0).clamp(0.0, 1.0),
-                easing: CubicBezier {
-                    x1: number(easing.and_then(|curve| curve.get("x1")), 0.42),
-                    y1: number(easing.and_then(|curve| curve.get("y1")), 0.0),
-                    x2: number(easing.and_then(|curve| curve.get("x2")), 0.58),
-                    y2: number(easing.and_then(|curve| curve.get("y2")), 1.0),
-                }
-                .sanitised(),
-            }
-        })
-        .collect();
-    keyframes.sort_by(|left, right| left.time.total_cmp(&right.time));
-    keyframes.dedup_by(|left, right| (left.time - right.time).abs() < 1e-6);
-    keyframes
-}
-
 fn read_clips(raw: Option<&Value>, tracks: &[Track], media: &[MediaItem]) -> Vec<Clip> {
     let Some(entries) = raw.and_then(Value::as_array) else {
         return Vec::new();
@@ -203,8 +173,10 @@ fn read_clips(raw: Option<&Value>, tracks: &[Track], media: &[MediaItem]) -> Vec
                 return None;
             }
 
-            let is_text = entry.get("kind").and_then(Value::as_str) == Some("text");
-            let media_id = if is_text {
+            let kind_name = entry.get("kind").and_then(Value::as_str);
+            let is_text = kind_name == Some("text");
+            let is_layer = kind_name == Some("layer");
+            let media_id = if is_text || is_layer {
                 String::new()
             } else {
                 let media_id = entry.get("mediaId")?.as_str()?.to_owned();
@@ -218,20 +190,21 @@ fn read_clips(raw: Option<&Value>, tracks: &[Track], media: &[MediaItem]) -> Vec
 
             let kind = if is_text {
                 ClipKind::Text
+            } else if is_layer {
+                ClipKind::Layer
             } else {
-                match entry.get("kind").and_then(Value::as_str) {
+                match kind_name {
                     Some("audio") => ClipKind::Audio,
                     Some("image") => ClipKind::Image,
                     _ => ClipKind::Video,
                 }
             };
 
-            let duration = number(entry.get("duration"), 1.0).max(0.01);
             Some(Clip {
                 name: text(entry.get("name"), "clip"),
                 kind,
                 start: number(entry.get("start"), 0.0).max(0.0),
-                duration,
+                duration: number(entry.get("duration"), 1.0).max(0.01),
                 source_start: number(entry.get("sourceStart"), 0.0).max(0.0),
                 volume: number(entry.get("volume"), 1.0).max(0.0),
                 fade_in: number(entry.get("fadeIn"), 0.0).max(0.0),
@@ -243,11 +216,35 @@ fn read_clips(raw: Option<&Value>, tracks: &[Track], media: &[MediaItem]) -> Vec
                 // Clamped: a hand-edited 2 would export differently from how
                 // the preview clamps it on screen.
                 opacity: number(entry.get("opacity"), 1.0).clamp(0.0, 1.0),
-                transform_keyframes: read_transform_keyframes(
-                    entry.get("transformKeyframes"),
-                    duration,
-                ),
                 speed: number(entry.get("speed"), 1.0).clamp(0.0625, 16.0),
+                speed_curve: entry.get("speedCurve").and_then(|value| {
+                    let points: Vec<SpeedPoint> = value
+                        .as_array()?
+                        .iter()
+                        .map(|point| SpeedPoint {
+                            at: number(point.get("at"), -1.0),
+                            speed: number(point.get("speed"), 1.0),
+                        })
+                        .filter(|point| (0.0..=1.0).contains(&point.at))
+                        .collect();
+                    (!points.is_empty()).then_some(points)
+                }),
+                reverse: flag(entry.get("reverse"), false),
+                animation_in: read_animation(entry.get("animationIn")),
+                animation_out: read_animation(entry.get("animationOut")),
+                animation_combo: read_animation(entry.get("animationCombo")),
+                flip_h: flag(entry.get("flipH"), false),
+                flip_v: flag(entry.get("flipV"), false),
+                blend: text(entry.get("blend"), ""),
+                crop: entry.get("crop").map(|crop| {
+                    Crop {
+                        left: number(crop.get("left"), 0.0),
+                        top: number(crop.get("top"), 0.0),
+                        right: number(crop.get("right"), 0.0),
+                        bottom: number(crop.get("bottom"), 0.0),
+                    }
+                    .tidy()
+                }),
                 preserve_pitch: flag(entry.get("preservePitch"), true),
                 filters: read_filters(entry.get("filters")),
                 video_effects: read_filters(entry.get("videoEffects")),
@@ -401,4 +398,17 @@ pub fn to_document(settings: &DocumentSettings, project: &Project) -> Value {
     );
     document.insert("activeTimelineId".into(), json!(project.active_timeline_id));
     Value::Object(document)
+}
+
+/// A named animation on a slot, or None when the entry says nothing usable.
+fn read_animation(value: Option<&Value>) -> Option<ClipAnimation> {
+    let value = value?;
+    let preset = value.get("preset")?.as_str()?.trim().to_owned();
+    if preset.is_empty() {
+        return None;
+    }
+    Some(ClipAnimation {
+        preset,
+        duration: number(value.get("duration"), 0.5).max(0.0),
+    })
 }

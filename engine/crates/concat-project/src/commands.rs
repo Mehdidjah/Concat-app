@@ -12,8 +12,8 @@ use std::collections::HashSet;
 use serde::{Deserialize, Serialize};
 
 use crate::model::{
-    AppliedFilter, Clip, ClipKind, CubicBezier, CustomFont, MediaItem, MediaKind, Project,
-    TextStyle, Timeline, Track, TransformKeyframe, Transition,
+    AnimationSlot, AppliedFilter, Clip, ClipAnimation, ClipKind, Crop, CustomFont, MediaItem,
+    MediaKind, Project, SpeedPoint, TextStyle, Timeline, Track, Transition,
 };
 
 /// Fallback length for media whose container reports no duration.
@@ -22,6 +22,8 @@ const UNKNOWN_DURATION: f64 = 5.0;
 const DEFAULT_IMAGE_DURATION: f64 = 5.0;
 /// How long a title lasts when first placed.
 const DEFAULT_TEXT_DURATION: f64 = 4.0;
+/// How long a layer covers when first placed. Editorial default, not a fact.
+const DEFAULT_LAYER_DURATION: f64 = 5.0;
 const MIN_CLIP_DURATION: f64 = 1.0 / 60.0;
 /// The engine's speed range (concat-media `SPEED_RANGE`), verbatim.
 const MIN_SPEED: f64 = 0.0625;
@@ -88,6 +90,21 @@ pub struct ClipPatch {
     pub opacity: Option<f64>,
     /// New pitch-preservation setting, taken as sent.
     pub preserve_pitch: Option<bool>,
+    /// Play backwards.
+    #[serde(default)]
+    pub reverse: Option<bool>,
+    /// Mirror left to right.
+    #[serde(default)]
+    pub flip_h: Option<bool>,
+    /// Mirror top to bottom.
+    #[serde(default)]
+    pub flip_v: Option<bool>,
+    /// The blend mode's name; empty is normal.
+    #[serde(default)]
+    pub blend: Option<String>,
+    /// The crop; `Some(None)` takes it off.
+    #[serde(default)]
+    pub crop: Option<Option<Crop>>,
     /// Wholesale replacement of the audio filter chain - the UI sends the
     /// full list, not a diff.
     pub filters: Option<Vec<AppliedFilter>>,
@@ -247,6 +264,41 @@ pub enum Command {
         #[serde(default)]
         offset_y: Option<f64>,
     },
+    /// Places a layer: a look or an effect over a span of the timeline that
+    /// treats everything beneath it. No media; the chain starts as the one
+    /// package named, at its defaults, and the clip's opacity is how hard it
+    /// is applied.
+    AddLayerClip {
+        /// The lane to place it on; None picks the first free track.
+        track_id: Option<String>,
+        /// Timeline position in seconds, floored at 0.
+        start: f64,
+        /// Seconds on the timeline; the editorial default when absent.
+        #[serde(default)]
+        duration: Option<f64>,
+        /// The package the layer applies, e.g. "concat.warm".
+        effect_id: String,
+        /// What the lane calls it.
+        name: String,
+    },
+    /// Gives a clip a speed curve, or takes it away. The source covered is
+    /// held constant, as a speed change does, so the clip's timeline length
+    /// follows the curve's mean; `speed` is kept at that mean.
+    SetClipSpeedCurve {
+        /// The clip to retime.
+        clip_id: String,
+        /// The curve, or None for a constant rate at the current mean.
+        curve: Option<Vec<SpeedPoint>>,
+    },
+    /// Sets or clears the animation on one slot of a clip.
+    SetClipAnimation {
+        /// The clip.
+        clip_id: String,
+        /// Which end, or the whole.
+        slot: AnimationSlot,
+        /// The shape and its seconds, or None to take it off.
+        animation: Option<ClipAnimation>,
+    },
     /// Repositions any number of clips in one edit - one undo step for a
     /// whole multi-selection drag. Unknown clips and tracks are tolerated
     /// per [`ClipMove`].
@@ -321,15 +373,6 @@ pub enum Command {
         /// New rotation in degrees, wrapped into (-180, 180] so a full drag
         /// never accumulates turns.
         rotation: Option<f64>,
-    },
-    /// Replaces a clip's transform animation as one undoable edit. Keyframes
-    /// are clamped to the clip, sorted, and de-duplicated by time.
-    SetTransformKeyframes {
-        /// The visual clip to animate. An unknown id is a no-op.
-        clip_id: String,
-        /// Complete transform poses at clip-local times. Empty disables the
-        /// animation and returns the clip to its static transform.
-        keyframes: Vec<TransformKeyframe>,
     },
     /// Pulls a video clip's sound out into its own audio clip on a free
     /// lane (minting one if none is free), muting the video and moving its
@@ -547,9 +590,17 @@ fn default_clip(id: String, track_id: String, media: &MediaItem, start: f64) -> 
         offset_y: 0.0,
         rotation: 0.0,
         opacity: 1.0,
-        transform_keyframes: Vec::new(),
         speed: 1.0,
         preserve_pitch: true,
+        speed_curve: None,
+        reverse: false,
+        animation_in: None,
+        animation_out: None,
+        animation_combo: None,
+        flip_h: false,
+        flip_v: false,
+        blend: String::new(),
+        crop: None,
         filters: Vec::new(),
         video_effects: Vec::new(),
         muted: None,
@@ -650,87 +701,6 @@ fn assign<T: PartialEq>(slot: &mut T, value: T) -> bool {
         *slot = value;
         true
     }
-}
-
-/// The outgoing curve at `local_time`, including the curve that was active
-/// when a trim or split lands between two existing poses.
-fn transform_easing_at(clip: &Clip, local_time: f64) -> CubicBezier {
-    let keyframes = &clip.transform_keyframes;
-    let Some(first) = keyframes.first() else {
-        return CubicBezier::default();
-    };
-    keyframes
-        .iter()
-        .rposition(|keyframe| keyframe.time <= local_time + JOIN_EPSILON)
-        .map(|index| keyframes[index.min(keyframes.len().saturating_sub(2))].easing)
-        .unwrap_or(first.easing)
-}
-
-/// Captures the exact visual value at a clip-local instant. This is used to
-/// create invisible boundary poses when an edit cuts through an animation.
-fn transform_keyframe_at(clip: &Clip, local_time: f64) -> TransformKeyframe {
-    let value = clip.transform_at(clip.start + local_time);
-    TransformKeyframe {
-        time: local_time,
-        scale: value.scale,
-        offset_x: value.offset_x,
-        offset_y: value.offset_y,
-        rotation: value.rotation,
-        opacity: value.opacity,
-        easing: transform_easing_at(clip, local_time),
-    }
-}
-
-/// Keeps the animation over `[from, to]`, rebased so `from` becomes zero.
-/// Boundary poses preserve the rendered value when the edit lands between
-/// two keyframes rather than exactly on a diamond.
-fn sliced_transform_keyframes(
-    clip: &Clip,
-    from: f64,
-    to: f64,
-    anchor_start: bool,
-    anchor_end: bool,
-) -> Vec<TransformKeyframe> {
-    if clip.transform_keyframes.is_empty() {
-        return Vec::new();
-    }
-
-    let span = (to - from).max(0.0);
-    let mut keyframes: Vec<_> = clip
-        .transform_keyframes
-        .iter()
-        .filter(|keyframe| {
-            keyframe.time >= from - JOIN_EPSILON && keyframe.time <= to + JOIN_EPSILON
-        })
-        .cloned()
-        .map(|mut keyframe| {
-            keyframe.time = (keyframe.time - from).clamp(0.0, span);
-            keyframe
-        })
-        .collect();
-
-    if anchor_start
-        && !keyframes
-            .iter()
-            .any(|keyframe| keyframe.time.abs() <= JOIN_EPSILON)
-    {
-        let mut boundary = transform_keyframe_at(clip, from);
-        boundary.time = 0.0;
-        keyframes.push(boundary);
-    }
-    if anchor_end
-        && !keyframes
-            .iter()
-            .any(|keyframe| (keyframe.time - span).abs() <= JOIN_EPSILON)
-    {
-        let mut boundary = transform_keyframe_at(clip, to);
-        boundary.time = span;
-        keyframes.push(boundary);
-    }
-
-    keyframes.sort_by(|left, right| left.time.total_cmp(&right.time));
-    keyframes.dedup_by(|left, right| (left.time - right.time).abs() <= JOIN_EPSILON);
-    keyframes
 }
 
 /// Applies one command. Errors are [`CommandError`]s, each rendering as a
@@ -961,15 +931,91 @@ pub fn apply(
                 offset_y: offset_y.unwrap_or(0.0).clamp(-MAX_OFFSET, MAX_OFFSET),
                 rotation: 0.0,
                 opacity: 1.0,
-                transform_keyframes: Vec::new(),
                 speed: 1.0,
                 preserve_pitch: true,
+                speed_curve: None,
+                reverse: false,
+                animation_in: None,
+                animation_out: None,
+                animation_combo: None,
+                flip_h: false,
+                flip_v: false,
+                blend: String::new(),
+                crop: None,
                 filters: Vec::new(),
                 video_effects: Vec::new(),
                 muted: None,
                 detached_from: None,
                 transition_in: None,
                 text: Some(style),
+            });
+            Ok(Outcome {
+                created_id: Some(id),
+                applied: true,
+            })
+        }
+
+        Command::AddLayerClip {
+            track_id,
+            start,
+            duration,
+            effect_id,
+            name,
+        } => {
+            let duration = duration
+                .unwrap_or(DEFAULT_LAYER_DURATION)
+                .max(MIN_CLIP_DURATION);
+            let timeline = project.active_mut();
+            let track_id = match track_id {
+                Some(id) if timeline.track(&id).is_some() => id,
+                Some(_) => return Err(CommandError::TrackGone),
+                None => {
+                    first_free_track(timeline, start, duration).ok_or(CommandError::NoTracks)?
+                }
+            };
+            let id = mint.next("c");
+            timeline.clips.push(Clip {
+                id: id.clone(),
+                track_id,
+                media_id: String::new(),
+                name: if name.trim().is_empty() {
+                    effect_id.clone()
+                } else {
+                    name
+                },
+                kind: ClipKind::Layer,
+                start: start.max(0.0),
+                duration,
+                source_start: 0.0,
+                volume: 1.0,
+                fade_in: 0.0,
+                fade_out: 0.0,
+                scale: 1.0,
+                offset_x: 0.0,
+                offset_y: 0.0,
+                rotation: 0.0,
+                opacity: 1.0,
+                speed: 1.0,
+                preserve_pitch: true,
+                speed_curve: None,
+                reverse: false,
+                animation_in: None,
+                animation_out: None,
+                animation_combo: None,
+                flip_h: false,
+                flip_v: false,
+                blend: String::new(),
+                crop: None,
+                filters: Vec::new(),
+                video_effects: vec![AppliedFilter {
+                    id: effect_id,
+                    params: Default::default(),
+                    enabled: true,
+                }],
+                muted: None,
+                detached_from: None,
+                transition_in: None,
+                text: None,
             });
             Ok(Outcome {
                 created_id: Some(id),
@@ -1011,15 +1057,7 @@ pub fn apply(
             let applied = match edge {
                 TrimEdge::End => {
                     let duration = (clip.duration + delta).max(MIN_CLIP_DURATION);
-                    let keyframes = sliced_transform_keyframes(
-                        clip,
-                        0.0,
-                        duration,
-                        false,
-                        duration < clip.duration,
-                    );
                     assign(&mut clip.duration, duration)
-                        | assign(&mut clip.transform_keyframes, keyframes)
                 }
                 TrimEdge::Start => {
                     // Dragging the head moves the in-point too, so the pixels
@@ -1029,18 +1067,10 @@ pub fn apply(
                     let moved = start - clip.start;
                     let duration = clip.duration - moved;
                     let source_start = (clip.source_start + moved * clip.speed).max(0.0);
-                    let keyframes = sliced_transform_keyframes(
-                        clip,
-                        moved,
-                        clip.duration,
-                        moved.abs() > JOIN_EPSILON,
-                        false,
-                    );
                     // Bitwise so no assignment is short-circuited away.
                     assign(&mut clip.start, start)
                         | assign(&mut clip.duration, duration)
                         | assign(&mut clip.source_start, source_start)
-                        | assign(&mut clip.transform_keyframes, keyframes)
                 }
             };
             Ok(Outcome {
@@ -1056,7 +1086,22 @@ pub fn apply(
                 let Some(index) = timeline.clips.iter().position(|clip| clip.id == clip_id) else {
                     continue;
                 };
-                let clip = timeline.clips[index].clone();
+                {
+                    // A curve or a reverse does not survive a cut in halves:
+                    // the map from here to the source is not affine, so both
+                    // halves go to the constant mean, which is what they
+                    // averaged.
+                    let clip = &mut timeline.clips[index];
+                    let offset = time - clip.start;
+                    if offset > MIN_CLIP_DURATION
+                        && offset < clip.duration - MIN_CLIP_DURATION
+                        && (clip.speed_curve.is_some() || clip.reverse)
+                    {
+                        clip.speed_curve = None;
+                        clip.reverse = false;
+                    }
+                }
+                let clip = &timeline.clips[index];
                 let offset = time - clip.start;
                 if offset <= MIN_CLIP_DURATION || offset >= clip.duration - MIN_CLIP_DURATION {
                     continue;
@@ -1069,12 +1114,8 @@ pub fn apply(
                 // The transition belongs to the cut at the original clip's
                 // start, which the head keeps.
                 tail.transition_in = None;
-                tail.transform_keyframes =
-                    sliced_transform_keyframes(&clip, offset, clip.duration, true, false);
                 created = Some(tail.id.clone());
                 timeline.clips[index].duration = offset;
-                timeline.clips[index].transform_keyframes =
-                    sliced_transform_keyframes(&clip, 0.0, offset, false, true);
                 timeline.clips.insert(index + 1, tail);
             }
             // A split always mints the tail, so "minted anything" and
@@ -1154,6 +1195,27 @@ pub fn apply(
             if let Some(preserve) = patch.preserve_pitch {
                 applied |= assign(&mut clip.preserve_pitch, preserve);
             }
+            if let Some(reverse) = patch.reverse {
+                applied |= assign(&mut clip.reverse, reverse);
+            }
+            if let Some(flip) = patch.flip_h {
+                applied |= assign(&mut clip.flip_h, flip);
+            }
+            if let Some(flip) = patch.flip_v {
+                applied |= assign(&mut clip.flip_v, flip);
+            }
+            if let Some(blend) = patch.blend {
+                let blend = if blend == "normal" {
+                    String::new()
+                } else {
+                    blend
+                };
+                applied |= assign(&mut clip.blend, blend);
+            }
+            if let Some(crop) = patch.crop {
+                let crop = crop.map(Crop::tidy).filter(|crop| !crop.is_none());
+                applied |= assign(&mut clip.crop, crop);
+            }
             if let Some(filters) = patch.filters {
                 applied |= assign(&mut clip.filters, filters);
             }
@@ -1185,18 +1247,65 @@ pub fn apply(
             // makes this a speed change rather than a trim.
             let next = speed.clamp(MIN_SPEED, MAX_SPEED);
             let source_covered = clip.duration * clip.speed;
-            let old_duration = clip.duration;
-            let duration = (source_covered / next).max(MIN_CLIP_DURATION);
-            let mut keyframes = clip.transform_keyframes.clone();
-            if old_duration > f64::EPSILON {
-                for keyframe in &mut keyframes {
-                    keyframe.time *= duration / old_duration;
-                }
-            }
-            // Bitwise so no assignment is short-circuited away.
+            // Bitwise so no assignment is short-circuited away. A rate set
+            // by hand is a constant rate: the curve goes.
             let applied = assign(&mut clip.speed, next)
-                | assign(&mut clip.duration, duration)
-                | assign(&mut clip.transform_keyframes, keyframes);
+                | assign(
+                    &mut clip.duration,
+                    (source_covered / next).max(MIN_CLIP_DURATION),
+                )
+                | assign(&mut clip.speed_curve, None);
+            Ok(Outcome {
+                created_id: None,
+                applied,
+            })
+        }
+
+        Command::SetClipAnimation {
+            clip_id,
+            slot,
+            animation,
+        } => {
+            let timeline = project.active_mut();
+            let Some(clip) = timeline.clip_mut(&clip_id) else {
+                return Ok(Outcome::default());
+            };
+            let animation = animation
+                .filter(|set| crate::animation::index_of(slot, &set.preset).is_some())
+                .map(|set| ClipAnimation {
+                    preset: set.preset,
+                    duration: set.duration.clamp(0.05, 60.0),
+                });
+            let field = match slot {
+                AnimationSlot::In => &mut clip.animation_in,
+                AnimationSlot::Out => &mut clip.animation_out,
+                AnimationSlot::Combo => &mut clip.animation_combo,
+            };
+            let applied = assign(field, animation);
+            Ok(Outcome {
+                created_id: None,
+                applied,
+            })
+        }
+
+        Command::SetClipSpeedCurve { clip_id, curve } => {
+            let timeline = project.active_mut();
+            let Some(clip) = timeline.clip_mut(&clip_id) else {
+                return Ok(Outcome::default());
+            };
+            let curve = curve.filter(|points| crate::speed::curve_of(points).is_some());
+            let source_covered = clip.duration * clip.speed;
+            let mean = curve
+                .as_ref()
+                .map(|points| crate::speed::mean_of(points))
+                .unwrap_or(clip.speed)
+                .clamp(MIN_SPEED, MAX_SPEED);
+            let applied = assign(&mut clip.speed_curve, curve)
+                | assign(&mut clip.speed, mean)
+                | assign(
+                    &mut clip.duration,
+                    (source_covered / mean).max(MIN_CLIP_DURATION),
+                );
             Ok(Outcome {
                 created_id: None,
                 applied,
@@ -1230,32 +1339,6 @@ pub fn apply(
                 let next = if wrapped == -180.0 { 180.0 } else { wrapped };
                 applied |= assign(&mut clip.rotation, next);
             }
-            Ok(Outcome {
-                created_id: None,
-                applied,
-            })
-        }
-
-        Command::SetTransformKeyframes {
-            clip_id,
-            mut keyframes,
-        } => {
-            let timeline = project.active_mut();
-            let Some(clip) = timeline.clip_mut(&clip_id) else {
-                return Ok(Outcome::default());
-            };
-            for keyframe in &mut keyframes {
-                keyframe.time = keyframe.time.clamp(0.0, clip.duration);
-                keyframe.scale = keyframe.scale.clamp(MIN_SCALE, MAX_SCALE);
-                keyframe.offset_x = keyframe.offset_x.clamp(-MAX_OFFSET, MAX_OFFSET);
-                keyframe.offset_y = keyframe.offset_y.clamp(-MAX_OFFSET, MAX_OFFSET);
-                keyframe.rotation = ((keyframe.rotation % 360.0) + 540.0) % 360.0 - 180.0;
-                keyframe.opacity = keyframe.opacity.clamp(0.0, 1.0);
-                keyframe.easing = keyframe.easing.sanitised();
-            }
-            keyframes.sort_by(|left, right| left.time.total_cmp(&right.time));
-            keyframes.dedup_by(|left, right| (left.time - right.time).abs() < 1e-6);
-            let applied = assign(&mut clip.transform_keyframes, keyframes);
             Ok(Outcome {
                 created_id: None,
                 applied,

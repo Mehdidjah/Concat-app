@@ -115,6 +115,7 @@ export component Seat inherits Rectangle {
             apply-effect(id) => { Editor.library-apply-effect(id); }
             apply-transition(id) => { Editor.library-apply-transition(id); }
             apply-filter(id, label) => { Editor.library-apply-filter(id, label); }
+            apply-audio(id) => { Editor.library-apply-audio(id); }
             save-template => { Editor.library-save-template(); }
         }
 
@@ -140,12 +141,20 @@ export component Seat inherits Rectangle {
             has-picture: Editor.has-picture;
             clip-name: Editor.preview-clip-name;
             frame: Editor.preview-frame;
+            stage-items: Editor.stage-items;
+            stage-guides: Editor.stage-guides;
 
             play-toggled => { Editor.play-toggled(); }
             seek(seconds) => { Editor.seek(seconds); }
             step(frames) => { Editor.step-frames(frames); }
             ratio-changed(index) => { Editor.ratio-changed(index); }
             quality-changed(index) => { Editor.quality-changed(index); }
+            stage-pressed(x, y, additive) => { Editor.stage-pressed(x, y, additive); }
+            stage-grip-pressed(id, grip, x, y) => {
+                Editor.stage-grip-pressed(id, grip, x, y);
+            }
+            stage-dragged(x, y, snap) => { Editor.stage-dragged(x, y, snap); }
+            stage-released => { Editor.stage-released(); }
         }
 
     if root.kind == PaneKind.inspector: ConfigPane {
@@ -166,16 +175,34 @@ export component Seat inherits Rectangle {
             add-effect(audio) => { Editor.add-effect(audio); }
             remove-effect(id) => { Editor.remove-effect(id); }
 
+            catalogue-effects: Editor.catalogue-effects;
+            catalogue-filters: Editor.catalogue-filters;
+            catalogue-audio: Editor.catalogue-audio;
+            effect-groups: Editor.effect-groups;
+            filter-groups: Editor.filter-groups;
+            audio-groups: Editor.audio-groups;
+            applied-visual: Editor.applied-visual;
+            applied-audio: Editor.applied-audio;
+            visual-params: Editor.visual-params;
+            audio-params: Editor.audio-params;
+            adjust-params: Editor.adjust-params;
+            adjust-set(key, value) => { Editor.adjust-set(key, value); }
+            jump-token: Editor.inspector-jump-token;
+            jump-tab: Editor.inspector-jump-tab;
+            jump-section: Editor.inspector-jump-section;
+            chain-add(audio, id) => { Editor.chain-add(audio, id); }
+            chain-toggle(audio, index) => { Editor.chain-toggle(audio, index); }
+            chain-move-by(audio, index, delta) => { Editor.chain-move-by(audio, index, delta); }
+            chain-remove(audio, index) => { Editor.chain-remove(audio, index); }
+            chain-set-param(audio, index, key, value) => {
+                Editor.chain-set-param(audio, index, key, value);
+            }
+
             selected: Editor.selected-clip;
             clip-set(field, value) => { Editor.clip-set(field, value); }
             clip-set-text(field, value) => { Editor.clip-set-text(field, value); }
             clip-set-colour(field, value) => { Editor.clip-set-colour(field, value); }
             clip-commit => { Editor.clip-commit(); }
-            transform-keyframe-toggle => { Editor.transform-keyframe-toggle(); }
-            transform-keyframe-seek(direction) => { Editor.transform-keyframe-seek(direction); }
-            transform-keyframe-easing(x1, y1, x2, y2) => {
-                Editor.transform-keyframe-easing(x1, y1, x2, y2);
-            }
         }
 
     // Declared before the views, so anything inside one of them that takes

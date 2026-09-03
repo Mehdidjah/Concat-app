@@ -28,22 +28,28 @@ import { Editor } from "editor.slint";
 import { PaneKind } from "workspace/pane-switcher.slint";
 import { RecentProjectData, StartData, StartScreen } from "start.slint";
 import { TitleBar } from "title-bar.slint";
+import {
+    AppliedEntryData, AppliedParamData, CatalogueEntryData,
+} from "inspector/clip-inspector.slint";
+import { ParamFormat } from "inspector/controls.slint";
 import { ToastData, ToastLayer } from "primitives/toast.slint";
 import { TooltipLayer } from "primitives/tooltip.slint";
 import { Workspace } from "workspace/workspace.slint";
 import {
     ClipData, ClipField, ClipKind, ClipTextField, DropData, SelectedClipData,
-    TextAlignment, TimelineTabData, TimelineTool, TrackData, TrackSize,
+    StageGuideData, StageItemData, TextAlignment, TimelineTabData, TimelineTool,
+    TrackData, TrackSize,
 } from "timeline/model.slint";
 
 // Re-exported so main.rs can reach the globals and the struct.
 export {
     Curves, Fmt, Payload, Theme, Bezier, Editor,
+    AppliedEntryData, AppliedParamData, CatalogueEntryData, ParamFormat,
     DockDivider, DockSide, PaneKind, SeatBox,
     EffectData, MediaFilter, MediaItemData, MediaKind,
     ClipData, ClipField, ClipKind, ClipTextField, DropData, SelectedClipData,
-    TextAlignment, TimelineTabData, TimelineTool, TrackData, TrackSize,
-    MenuItemData, MenuRow, ExportData, ExportPhase, ModelData, SettingsData,
+    StageGuideData, StageItemData, TextAlignment, TimelineTabData, TimelineTool,
+    TrackData, TrackSize, MenuItemData, MenuRow, ExportData, ExportPhase, ModelData, SettingsData,
     RecentProjectData, StartData, SystemFactData, ToastData,
 }
 
@@ -203,6 +209,16 @@ export component App inherits Window {
             // why the strip up there is missing the menus this belongs to.
             enabled: !root.on-start;
             activated => { root.app-menu-selected("save"); }
+        }
+        KeyBinding {
+            keys: @keys(Control + Z);
+            enabled: !root.on-start;
+            activated => { root.app-menu-selected("undo"); }
+        }
+        KeyBinding {
+            keys: @keys(Control + Shift + Z);
+            enabled: !root.on-start;
+            activated => { root.app-menu-selected("redo"); }
         }
 
         // Space plays and pauses, the way it does in every editor. It lands

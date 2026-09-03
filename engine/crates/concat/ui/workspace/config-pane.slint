@@ -2,11 +2,13 @@
 // SPDX-FileCopyrightText: 2026 Jareer and Concat contributors
 
 import { Theme, SegmentedControl } from "../primitives/primitives.slint";
+import { Select } from "../primitives/select.slint";
 import { Pane, PaneBody, PaneScroll } from "pane.slint";
 import { PaneKind, PaneSwitcher } from "pane-switcher.slint";
 import { EffectData } from "../demo/effects-panel.slint";
 import {
-    AdjustPanel, AppliedPresetData, FilterPanel, PresetCatalog, PresetStack,
+    AdjustPanel, AnimationPanel, AppliedEntryData, AppliedParamData, AudioPanel,
+    CatalogueEntryData, FilterPanel, PresetStack, SpeedPanel, VideoPanel,
 } from "../inspector/clip-inspector.slint";
 import { TextPanel } from "../inspector/text-panel.slint";
 import {
@@ -120,45 +122,64 @@ export component ConfigPane inherits Rectangle {
     callback pane-removed();
 
     // ── the clip inspector's chains, owned by Rust ───────────────────────
-    in property <[AppliedPresetData]> filters-applied;
-    in property <[AppliedPresetData]> effects-applied;
+    //
+    // The library shelves come from the effect catalogue, the applied lists
+    // from the selected clip. Two chains: the picture's, which the Filters
+    // and Effects tabs both edit, and the sound's, which Audio edits. A
+    // `audio` flag on every callback says which.
+    in property <[CatalogueEntryData]> catalogue-effects;
+    in property <[CatalogueEntryData]> catalogue-filters;
+    in property <[CatalogueEntryData]> catalogue-audio;
+    in property <[string]> effect-groups;
+    in property <[string]> filter-groups;
+    in property <[string]> audio-groups;
+    in property <[AppliedEntryData]> applied-visual;
+    in property <[AppliedEntryData]> applied-audio;
+    in property <[AppliedParamData]> visual-params;
+    in property <[AppliedParamData]> audio-params;
+    /// The colour panel's knobs: the adjust package's parameters, at the
+    /// selected clip's values or the defaults.
+    in property <[AppliedParamData]> adjust-params;
+    callback adjust-set(key: string, value: float);
 
-    callback filters-add(preset: AppliedPresetData);
-    callback filters-toggle(index: int);
-    callback filters-move-by(index: int, delta: int);
-    callback filters-remove(index: int);
-    callback filters-set-param(index: int, second: bool, value: float);
+    /// See Editor.inspector-jump-token: the library applied something and
+    /// this pane should show it.
+    in property <int> jump-token;
+    in property <string> jump-tab;
+    in property <string> jump-section;
+
+    callback chain-add(audio: bool, id: string);
+    callback chain-toggle(audio: bool, index: int);
+    callback chain-move-by(audio: bool, index: int, delta: int);
+    callback chain-remove(audio: bool, index: int);
+    callback chain-set-param(audio: bool, index: int, key: string, value: float);
 
     callback clip-set(field: ClipField, value: float);
     callback clip-set-text(field: ClipTextField, value: string);
     callback clip-set-colour(field: ClipTextField, value: color);
     callback clip-commit();
-    callback transform-keyframe-toggle();
-    callback transform-keyframe-seek(direction: int);
-    callback transform-keyframe-easing(x1: float, y1: float, x2: float, y2: float);
 
-    callback effects-add(preset: AppliedPresetData);
-    callback effects-toggle(index: int);
-    callback effects-move-by(index: int, delta: int);
-    callback effects-remove(index: int);
-    callback effects-set-param(index: int, second: bool, value: float);
 
-    // The tab strip follows the selection: nothing selected shows only
-    // Details, since there is nothing to edit; a media clip shows what can be
-    // changed and what can be added; a still gets Effects but not Filters,
-    // because it has picture and no sound; and a title gets Text alone — it
-    // has no volume, no speed and no audio filters, and offering those tabs
+    // The tab strip follows the selection, and stays short: three tabs at
+    // most, each with a dropdown of its sections, because seven tabs on a
+    // strip this narrow cannot be read. Video holds what happens to the
+    // picture - its placement, its speed, its animation, its colour; Audio
+    // the level, the fades and the voice and room chain; Effects the two
+    // shelves and the picture's chain. A still loses Audio, a sound clip
+    // keeps Audio alone, and a title gets Text alone — offering the others
     // would be offering panels that can only say "nothing here".
     property <bool> is-text: root.selected.kind == ClipKind.text;
     property <bool> is-image: root.selected.kind == ClipKind.image;
+    property <bool> is-audio: root.selected.kind == ClipKind.audio;
     /// A filter layer gets its own lone tab for the same reason a title does:
     /// it has no transform, no gain and no rate, and every other tab could
     /// only say "nothing here".
     property <bool> is-layer: root.selected.kind == ClipKind.filter;
     property <[string]> tabs: root.is-text ? ["Text"]
         : root.is-layer ? ["Filter"]
-        : root.is-image ? ["Adjust", "Effects"]
-        : ["Adjust", "Filters", "Effects"];
+        : root.is-image ? ["Video", "Effects"]
+        : root.is-audio ? ["Audio"]
+        : ["Video", "Audio", "Effects"];
     /// A one-segment segmented control is a label wearing a costume, so a lone
     /// tab renders as the panel's plain heading instead.
     property <bool> single: root.tabs.length < 2;
@@ -167,7 +188,7 @@ export component ConfigPane inherits Rectangle {
     // drop any binding declared here, so it is assigned and never bound.
     property <int> tab;
     /// The kind the strip was last built for. A selection change can leave the
-    /// strip pointing past the end of a shorter list — Filters on a still,
+    /// strip pointing past the end of a shorter list — Audio on a still,
     /// anything at all on a title — so the index is pulled back in when the
     /// shape of the strip changes, and left alone when it has not.
     property <ClipKind> strip-kind;
@@ -175,16 +196,63 @@ export component ConfigPane inherits Rectangle {
         if (root.selected.kind != root.strip-kind) {
             root.strip-kind = root.selected.kind;
             // Clamped rather than reset: going from a video to a still should
-            // stay on Effects, which both offer, instead of jumping back to
-            // Adjust.
+            // stay on Effects, which both offer, instead of jumping back.
             root.tab = Math.min(root.tab, root.tabs.length - 1);
         }
     }
 
-    /// Which panel the index names, resolved once rather than at each `if`:
-    /// the same number means different things depending on what is selected.
-    property <string> showing: root.tabs[Math.max(0,
+    /// Which tab the index names.
+    property <string> heading: root.tabs[Math.max(0,
         Math.min(root.tab, root.tabs.length - 1))];
+
+    /// The sections of the current tab, as the dropdown lists them.
+    property <[string]> sections: root.heading == "Video"
+            ? (root.is-image ? ["Basic", "Animation", "Adjust"]
+                : ["Basic", "Speed", "Animation", "Adjust"])
+        : root.heading == "Audio"
+            ? (root.is-audio ? ["Sound", "Speed"] : ["Sound"])
+        : root.heading == "Effects" ? ["Filters", "Effects"]
+        : root.heading == "Text" ? ["Text", "Animation"]
+        : ["Layer"];
+
+    // Each tab remembers its own section, so flipping to Audio and back
+    // lands on the colour panel you were adjusting. Assigned, never bound,
+    // for the same reason `tab` is.
+    property <int> section-video;
+    property <int> section-audio;
+    property <int> section-effects;
+    property <int> section-text;
+    property <int> section: root.heading == "Video" ? root.section-video
+        : root.heading == "Audio" ? root.section-audio
+        : root.heading == "Effects" ? root.section-effects
+        : root.heading == "Text" ? root.section-text
+        : 0;
+    function pick-section(index: int) {
+        if (root.heading == "Video") { root.section-video = index; }
+        else if (root.heading == "Audio") { root.section-audio = index; }
+        else if (root.heading == "Effects") { root.section-effects = index; }
+        else if (root.heading == "Text") { root.section-text = index; }
+    }
+
+    /// Which panel is up, resolved once rather than at each `if`: the same
+    /// number means different things depending on what is selected.
+    property <string> showing: root.sections[Math.max(0,
+        Math.min(root.section, root.sections.length - 1))];
+
+    // Go where the library just put something. On a fresh token, and once
+    // on opening, so an inspector that was not on screen when the effect
+    // was applied still opens on it.
+    function jump() {
+        if (root.jump-token == 0) { return; }
+        if (root.jump-tab == "Video") { root.tab = 0; }
+        else if (root.jump-tab == "Audio") { root.tab = root.is-audio ? 0 : 1; }
+        else if (root.jump-tab == "Effects") { root.tab = root.tabs.length - 1; }
+        if (root.jump-section == "Effects") { root.pick-section(1); }
+        else if (root.jump-section == "Filters") { root.pick-section(0); }
+        else { root.pick-section(0); }
+    }
+    changed jump-token => { root.jump(); }
+    init => { root.jump(); }
 
     Pane {
         // ── details ──────────────────────────────────────────────────────
@@ -366,24 +434,66 @@ export component ConfigPane inherits Rectangle {
             }
         }
 
+        // The tab's sections, as a second strip under the first, in the
+        // same segmented style. One section needs no strip: the tab already
+        // says where you are.
+        if root.has-selection && root.sections.length > 1: Rectangle {
+            height: 40px;
+            background: Theme.panel;
+
+            Rectangle {
+                x: 0;
+                y: parent.height - 1px;
+                width: parent.width;
+                height: 1px;
+                background: Theme.line;
+            }
+
+            HorizontalLayout {
+                padding-left: 8px;
+                padding-right: 8px;
+                VerticalLayout {
+                    alignment: center;
+                    SegmentedControl {
+                        options: root.sections;
+                        current: Math.max(0, Math.min(root.section, root.sections.length - 1));
+                        changed(index) => { root.pick-section(index); }
+                    }
+                }
+            }
+        }
+
         if root.has-selection: PaneBody {
             // No padding: the inspector rows carry their own 14px inset, and
             // sections run edge to edge so their hairlines reach both sides.
             padding: 0px;
 
             PaneScroll {
-                if root.showing == "Adjust": AdjustPanel {
+                if root.showing == "Basic": VideoPanel {
                     selected: root.selected;
                     set(field, value) => { root.clip-set(field, value); }
                     commit => { root.clip-commit(); }
-                    keyframe-toggle => { root.transform-keyframe-toggle(); }
-                    keyframe-seek(direction) => { root.transform-keyframe-seek(direction); }
-                    keyframe-easing(x1, y1, x2, y2) => {
-                        root.transform-keyframe-easing(x1, y1, x2, y2);
-                    }
                 }
 
-                if root.showing == "Filter": FilterPanel {
+                if root.showing == "Animation": AnimationPanel {
+                    selected: root.selected;
+                    set(field, value) => { root.clip-set(field, value); }
+                    commit => { root.clip-commit(); }
+                }
+
+                if root.showing == "Speed": SpeedPanel {
+                    selected: root.selected;
+                    set(field, value) => { root.clip-set(field, value); }
+                    commit => { root.clip-commit(); }
+                }
+
+                if root.showing == "Adjust": AdjustPanel {
+                    params: root.adjust-params;
+                    set(key, value) => { root.adjust-set(key, value); }
+                    commit => { root.clip-commit(); }
+                }
+
+                if root.showing == "Layer": FilterPanel {
                     selected: root.selected;
                     set(field, value) => { root.clip-set(field, value); }
                     commit => { root.clip-commit(); }
@@ -397,36 +507,70 @@ export component ConfigPane inherits Rectangle {
                     commit => { root.clip-commit(); }
                 }
 
+                // Audio: the level and fades, then the voice and room chain
+                // under them, as CapCut's audio tab has it.
+                if root.showing == "Sound": VerticalLayout {
+                    AudioPanel {
+                        selected: root.selected;
+                        set(field, value) => { root.clip-set(field, value); }
+                        commit => { root.clip-commit(); }
+                    }
+                    PresetStack {
+                        noun: "audio effect";
+                        library-title: "Audio effects";
+                        group-labels: root.audio-groups;
+                        catalogue: root.catalogue-audio;
+                        applied: root.applied-audio;
+                        params: root.audio-params;
+
+                        add(id) => { root.chain-add(true, id); }
+                        toggle(index) => { root.chain-toggle(true, index); }
+                        move-by(index, delta) => { root.chain-move-by(true, index, delta); }
+                        remove(index) => { root.chain-remove(true, index); }
+                        set-param(index, key, value) => {
+                            root.chain-set-param(true, index, key, value);
+                        }
+                        commit => { root.clip-commit(); }
+                    }
+                }
+
+                // Filters and Effects share one chain — a look and a blur
+                // are links of the same picture chain, in one order — and
+                // differ only in which shelves they offer.
                 if root.showing == "Filters": PresetStack {
                     noun: "filter";
                     library-title: "Filter library";
-                    group-labels: PresetCatalog.filter-groups;
-                    catalogue: PresetCatalog.filters;
-                    applied: root.filters-applied;
+                    group-labels: root.filter-groups;
+                    catalogue: root.catalogue-filters;
+                    applied: root.applied-visual;
+                    params: root.visual-params;
 
-                    add(preset) => { root.filters-add(preset); }
-                    toggle(index) => { root.filters-toggle(index); }
-                    move-by(index, delta) => { root.filters-move-by(index, delta); }
-                    remove(index) => { root.filters-remove(index); }
-                    set-param(index, second, value) => {
-                        root.filters-set-param(index, second, value);
+                    add(id) => { root.chain-add(false, id); }
+                    toggle(index) => { root.chain-toggle(false, index); }
+                    move-by(index, delta) => { root.chain-move-by(false, index, delta); }
+                    remove(index) => { root.chain-remove(false, index); }
+                    set-param(index, key, value) => {
+                        root.chain-set-param(false, index, key, value);
                     }
+                    commit => { root.clip-commit(); }
                 }
 
                 if root.showing == "Effects": PresetStack {
                     noun: "effect";
                     library-title: "Effect library";
-                    group-labels: PresetCatalog.effect-groups;
-                    catalogue: PresetCatalog.effects;
-                    applied: root.effects-applied;
+                    group-labels: root.effect-groups;
+                    catalogue: root.catalogue-effects;
+                    applied: root.applied-visual;
+                    params: root.visual-params;
 
-                    add(preset) => { root.effects-add(preset); }
-                    toggle(index) => { root.effects-toggle(index); }
-                    move-by(index, delta) => { root.effects-move-by(index, delta); }
-                    remove(index) => { root.effects-remove(index); }
-                    set-param(index, second, value) => {
-                        root.effects-set-param(index, second, value);
+                    add(id) => { root.chain-add(false, id); }
+                    toggle(index) => { root.chain-toggle(false, index); }
+                    move-by(index, delta) => { root.chain-move-by(false, index, delta); }
+                    remove(index) => { root.chain-remove(false, index); }
+                    set-param(index, key, value) => {
+                        root.chain-set-param(false, index, key, value);
                     }
+                    commit => { root.clip-commit(); }
                 }
             }
         }

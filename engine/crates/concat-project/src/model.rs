@@ -41,6 +41,11 @@ pub enum ClipKind {
     Image,
     /// A title. No media behind it; the content lives in [`Clip::text`].
     Text,
+    /// A treatment over everything beneath it for as long as it runs - a
+    /// look or an effect placed as a layer. No media behind it; the chain
+    /// lives in [`Clip::video_effects`], its strength in [`Clip::opacity`]
+    /// and its ramps in the fades.
+    Layer,
 }
 
 impl ClipKind {
@@ -134,6 +139,79 @@ fn yes() -> bool {
     true
 }
 
+/// A crop: what is taken off each edge, as fractions of the source.
+#[derive(Clone, Copy, PartialEq, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Crop {
+    /// Off the left, `0..1`.
+    pub left: f64,
+    /// Off the top.
+    pub top: f64,
+    /// Off the right.
+    pub right: f64,
+    /// Off the bottom.
+    pub bottom: f64,
+}
+
+impl Crop {
+    /// True when nothing is cut.
+    pub fn is_none(&self) -> bool {
+        self.left <= 0.0 && self.top <= 0.0 && self.right <= 0.0 && self.bottom <= 0.0
+    }
+
+    /// Each edge held to `0..=0.9`, and a pair that would meet pulled back
+    /// so at least a tenth of the picture is left.
+    pub fn tidy(self) -> Crop {
+        let mut out = Crop {
+            left: self.left.clamp(0.0, 0.9),
+            top: self.top.clamp(0.0, 0.9),
+            right: self.right.clamp(0.0, 0.9),
+            bottom: self.bottom.clamp(0.0, 0.9),
+        };
+        if out.left + out.right > 0.9 {
+            out.right = (0.9 - out.left).max(0.0);
+        }
+        if out.top + out.bottom > 0.9 {
+            out.bottom = (0.9 - out.top).max(0.0);
+        }
+        out
+    }
+}
+
+/// Which end of a clip an animation belongs to, or the whole of it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AnimationSlot {
+    /// The first seconds.
+    In,
+    /// The last seconds.
+    Out,
+    /// The whole clip.
+    Combo,
+}
+
+/// A named animation on one slot. The keys are made from the name for the
+/// clip's current length whenever they are needed; see the `animation`
+/// module.
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClipAnimation {
+    /// The shape's name, e.g. "Fade".
+    pub preset: String,
+    /// Seconds the shape takes, for In and Out; ignored by a Combo.
+    pub duration: f64,
+}
+
+/// One point of a speed curve.
+#[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SpeedPoint {
+    /// Where in the clip, as a fraction of its timeline length, 0..=1.
+    pub at: f64,
+    /// Source seconds per timeline second there.
+    pub speed: f64,
+}
+
 /// A transition on the cut into a clip.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -142,132 +220,6 @@ pub struct Transition {
     pub id: String,
     /// Seconds the transition covers.
     pub duration: f64,
-}
-
-/// The timing curve carried by a transform keyframe. The endpoints are
-/// always (0, 0) and (1, 1); these are the two editable control points.
-#[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CubicBezier {
-    /// First control point's horizontal coordinate, in 0..=1.
-    pub x1: f64,
-    /// First control point's vertical coordinate. Values outside 0..=1 make
-    /// overshoot curves possible.
-    pub y1: f64,
-    /// Second control point's horizontal coordinate, in 0..=1.
-    pub x2: f64,
-    /// Second control point's vertical coordinate.
-    pub y2: f64,
-}
-
-impl CubicBezier {
-    /// No acceleration.
-    pub const LINEAR: Self = Self {
-        x1: 0.0,
-        y1: 0.0,
-        x2: 1.0,
-        y2: 1.0,
-    };
-    /// The familiar editor default: gently leave one value and arrive at the
-    /// next, without an overshoot.
-    pub const EASE_IN_OUT: Self = Self {
-        x1: 0.42,
-        y1: 0.0,
-        x2: 0.58,
-        y2: 1.0,
-    };
-
-    /// Clamps a hand-edited document to a valid timing function.
-    pub fn sanitised(self) -> Self {
-        Self {
-            x1: self.x1.clamp(0.0, 1.0),
-            y1: self.y1.clamp(-2.0, 3.0),
-            x2: self.x2.clamp(0.0, 1.0),
-            y2: self.y2.clamp(-2.0, 3.0),
-        }
-    }
-
-    /// Solves this cubic timing function for y at a given x.
-    pub fn sample(self, x: f64) -> f64 {
-        fn axis(p1: f64, p2: f64, t: f64) -> f64 {
-            let u = 1.0 - t;
-            3.0 * u * u * t * p1 + 3.0 * u * t * t * p2 + t * t * t
-        }
-        fn slope(p1: f64, p2: f64, t: f64) -> f64 {
-            3.0 * (1.0 - t).powi(2) * p1
-                + 6.0 * (1.0 - t) * t * (p2 - p1)
-                + 3.0 * t * t * (1.0 - p2)
-        }
-
-        let curve = self.sanitised();
-        let x = x.clamp(0.0, 1.0);
-        let mut t = x;
-        for _ in 0..8 {
-            let error = axis(curve.x1, curve.x2, t) - x;
-            if error.abs() < 1e-7 {
-                return axis(curve.y1, curve.y2, t);
-            }
-            let derivative = slope(curve.x1, curve.x2, t);
-            if derivative.abs() < 1e-7 {
-                break;
-            }
-            t = (t - error / derivative).clamp(0.0, 1.0);
-        }
-        let (mut low, mut high) = (0.0, 1.0);
-        for _ in 0..16 {
-            t = (low + high) / 2.0;
-            if axis(curve.x1, curve.x2, t) < x {
-                low = t;
-            } else {
-                high = t;
-            }
-        }
-        axis(curve.y1, curve.y2, t)
-    }
-}
-
-impl Default for CubicBezier {
-    fn default() -> Self {
-        Self::EASE_IN_OUT
-    }
-}
-
-/// One complete transform pose at a clip-local time. Keeping the visual
-/// properties together makes a diamond behave like the keyframe control in
-/// mainstream editors: one click captures the visible pose as a unit.
-#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TransformKeyframe {
-    /// Seconds from the clip's own start.
-    pub time: f64,
-    /// Multiplier over the clip's fitted size.
-    pub scale: f64,
-    /// Horizontal frame-fraction offset.
-    pub offset_x: f64,
-    /// Vertical frame-fraction offset.
-    pub offset_y: f64,
-    /// Clockwise rotation in degrees.
-    pub rotation: f64,
-    /// Blend strength in 0..=1.
-    pub opacity: f64,
-    /// Curve from this pose to the next pose.
-    #[serde(default)]
-    pub easing: CubicBezier,
-}
-
-/// The transform value a renderer or inspector should use at one instant.
-#[derive(Clone, Copy, PartialEq, Debug)]
-pub struct EvaluatedTransform {
-    /// Multiplier over the fitted size.
-    pub scale: f64,
-    /// Horizontal frame-fraction offset.
-    pub offset_x: f64,
-    /// Vertical frame-fraction offset.
-    pub offset_y: f64,
-    /// Clockwise rotation in degrees.
-    pub rotation: f64,
-    /// Blend strength in 0..=1.
-    pub opacity: f64,
 }
 
 /// How a title's lines sit within their block. The block itself is placed by
@@ -390,12 +342,39 @@ pub struct Clip {
     pub rotation: f64,
     /// Blend strength over whatever is beneath, in 0..1.
     pub opacity: f64,
-    /// Animated visual poses, ordered by clip-local time. Empty keeps the
-    /// static transform fields above as the source of truth.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub transform_keyframes: Vec<TransformKeyframe>,
-    /// Playback rate. 1 is normal.
+    /// Playback rate. 1 is normal. With a curve set this is the curve's
+    /// mean, kept in step by the commands that set either.
     pub speed: f64,
+    /// Speed as it changes over the clip: points of `(at, speed)`, `at` a
+    /// fraction of the clip's timeline length. None is the constant rate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speed_curve: Option<Vec<SpeedPoint>>,
+    /// Played backwards.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub reverse: bool,
+    /// How the clip comes in: a named shape over its first seconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub animation_in: Option<ClipAnimation>,
+    /// How it goes out: a named shape over its last seconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub animation_out: Option<ClipAnimation>,
+    /// A shape over its whole length.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub animation_combo: Option<ClipAnimation>,
+    /// Mirrored left to right.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub flip_h: bool,
+    /// Mirrored top to bottom.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub flip_v: bool,
+    /// How the picture's colour meets what is beneath it: "normal",
+    /// "multiply", "screen", "add", "lighten", "darken".
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub blend: String,
+    /// What is cut off each edge of the source before it is fitted, as
+    /// fractions of the source's width and height.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub crop: Option<Crop>,
     /// Keep voices at their natural pitch when `speed` is not 1. On by
     /// default; off gives the tape-machine chipmunk/slow-motion sound.
     pub preserve_pitch: bool,
@@ -417,67 +396,6 @@ pub struct Clip {
     /// The overlay, when this is a text clip.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text: Option<TextStyle>,
-}
-
-impl Clip {
-    /// The visual pose at a timeline timestamp. Before the first keyframe and
-    /// after the last, the nearest pose holds.
-    pub fn transform_at(&self, timeline_time: f64) -> EvaluatedTransform {
-        let static_value = EvaluatedTransform {
-            scale: self.scale,
-            offset_x: self.offset_x,
-            offset_y: self.offset_y,
-            rotation: self.rotation,
-            opacity: self.opacity,
-        };
-        let Some(first) = self.transform_keyframes.first() else {
-            return static_value;
-        };
-        let local = (timeline_time - self.start).clamp(0.0, self.duration.max(0.0));
-        if local <= first.time || self.transform_keyframes.len() == 1 {
-            return first.into();
-        }
-        let last = self
-            .transform_keyframes
-            .last()
-            .expect("a first keyframe exists");
-        if local >= last.time {
-            return last.into();
-        }
-        for pair in self.transform_keyframes.windows(2) {
-            let (left, right) = (&pair[0], &pair[1]);
-            if local <= right.time {
-                let span = right.time - left.time;
-                if span <= f64::EPSILON {
-                    return right.into();
-                }
-                let amount = left.easing.sample((local - left.time) / span);
-                let lerp = |a: f64, b: f64| a + (b - a) * amount;
-                // Rotation takes the shortest path through the wrapped range.
-                let rotation_delta = ((right.rotation - left.rotation + 540.0) % 360.0) - 180.0;
-                return EvaluatedTransform {
-                    scale: lerp(left.scale, right.scale),
-                    offset_x: lerp(left.offset_x, right.offset_x),
-                    offset_y: lerp(left.offset_y, right.offset_y),
-                    rotation: left.rotation + rotation_delta * amount,
-                    opacity: lerp(left.opacity, right.opacity).clamp(0.0, 1.0),
-                };
-            }
-        }
-        static_value
-    }
-}
-
-impl From<&TransformKeyframe> for EvaluatedTransform {
-    fn from(keyframe: &TransformKeyframe) -> Self {
-        Self {
-            scale: keyframe.scale,
-            offset_x: keyframe.offset_x,
-            offset_y: keyframe.offset_y,
-            rotation: keyframe.rotation,
-            opacity: keyframe.opacity,
-        }
-    }
 }
 
 /// One timeline: a name and its lanes and clips. Every operation takes the

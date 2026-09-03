@@ -27,14 +27,16 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use concat_core::SpeedCurve;
+use concat_core::animate::Animation;
 use concat_core::frame::Frame;
+use concat_core::shader::ShaderPass;
 use concat_core::time::{FrameRate, Rational};
-use concat_core::timeline::{
-    Clip, ClipId, CubicBezier as CoreBezier, MediaRef, Timeline, Track, TrackKind, Transform,
-    TransformKeyframe as CoreTransformKeyframe,
-};
+use concat_core::timeline::{Clip, ClipId, MediaRef, Timeline, Track, TrackKind, Transform};
+use concat_effects::Catalogue;
 use concat_media::audio::{self, AudioClip};
 use concat_media::{DecodeOptions, Decoder, EncodeOptions, Encoder, FrameSink, FrameSource};
+use concat_project::model::AppliedFilter;
 use concat_render::{Compositor, CpuCompositor, Layer, Placement, plan_frame};
 use serde::Deserialize;
 
@@ -49,6 +51,10 @@ pub enum ClipKind {
     Audio,
     /// A still: a one-frame stream, decoded looping.
     Image,
+    /// A treatment with no pixels of its own: its chain runs over everything
+    /// composited beneath its track for its span, blended back by its
+    /// opacity, ramped by its fades. See `composite_treated`.
+    Layer,
 }
 
 impl ClipKind {
@@ -96,6 +102,40 @@ pub struct ExportClip {
     /// False lets pitch rise with the rate, like tape.
     #[serde(default = "yes")]
     pub preserve_pitch: bool,
+    /// Speed over the clip as `(at, speed)` points, `at` a fraction of the
+    /// clip's length; empty for the constant `speed`. See `SpeedCurve`.
+    #[serde(default)]
+    pub speed_curve: Vec<(f64, f64)>,
+    /// Played backwards.
+    #[serde(default)]
+    pub reverse: bool,
+    /// Keys over the clip's placement and opacity, resolved by the UI from
+    /// its animation presets. Empty for none.
+    #[serde(default)]
+    pub animation: Vec<ExportKey>,
+    /// Mirrored left to right.
+    #[serde(default)]
+    pub flip_h: bool,
+    /// Mirrored top to bottom.
+    #[serde(default)]
+    pub flip_v: bool,
+    /// The blend mode's name; empty or "normal" is source-over.
+    #[serde(default)]
+    pub blend: String,
+    /// Fractions cut off the source's left, top, right and bottom before it
+    /// is fitted; absent for none.
+    #[serde(default)]
+    pub crop: Option<[f64; 4]>,
+    /// The clip's applied effects, as the document holds them. When present
+    /// they take precedence over `video_filter_chain`: the renderer builds
+    /// the chain for its own backend from them, and runs the ones with
+    /// shaders on the GPU.
+    #[serde(default)]
+    pub effects: Vec<AppliedFilter>,
+    /// The fades transition resolution bakes in, kept apart from the effects
+    /// so either can be rebuilt without the other.
+    #[serde(skip)]
+    pub transition_chain: String,
     /// Multiplier over the fitted size. 1 fills the frame, preserving aspect.
     #[serde(default = "unity")]
     pub scale: f64,
@@ -112,9 +152,6 @@ pub struct ExportClip {
     /// requests from a UI that predates it.
     #[serde(default = "unity")]
     pub opacity: f64,
-    /// Animated transform poses at clip-local times.
-    #[serde(default)]
-    pub transform_keyframes: Vec<TransformKeyframeSpec>,
     /// FFmpeg *video* filter chain from the Effects tab, or empty. Applied at
     /// decode, after scaling - see `DecodeOptions::filter_chain`.
     #[serde(default)]
@@ -143,31 +180,20 @@ pub struct ExportClip {
     pub has_audio: Option<bool>,
 }
 
-/// A serialisable transform pose carried from the project document into the
-/// shared preview/export renderer.
-#[derive(Deserialize, Clone)]
+/// One animation key, as the flattener hands it over.
+#[derive(Deserialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "camelCase")]
-pub struct TransformKeyframeSpec {
-    /// Seconds from the clip's start.
-    pub time: f64,
-    /// Multiplier over the fitted size.
-    pub scale: f64,
-    /// Horizontal frame-fraction offset.
-    pub offset_x: f64,
-    /// Vertical frame-fraction offset.
-    pub offset_y: f64,
-    /// Clockwise rotation in degrees.
-    pub rotation: f64,
-    /// Blend strength in 0..=1.
-    pub opacity: f64,
-    /// First Bézier control point's horizontal coordinate.
-    pub x1: f64,
-    /// First Bézier control point's vertical coordinate.
-    pub y1: f64,
-    /// Second Bézier control point's horizontal coordinate.
-    pub x2: f64,
-    /// Second Bézier control point's vertical coordinate.
-    pub y2: f64,
+pub struct ExportKey {
+    /// "scale", "offsetX", "offsetY", "rotation" or "opacity".
+    pub property: String,
+    /// Where in the clip, `0..=1`.
+    pub at: f64,
+    /// The value there, relative to the clip's own; see the engine's
+    /// `animate` module.
+    pub value: f64,
+    /// "linear", "in", "out" or "inOut".
+    #[serde(default)]
+    pub ease: String,
 }
 
 /// A transition on the cut into a clip.
@@ -332,7 +358,7 @@ fn resolve_transitions(clips: &mut [ExportClip], rate: FrameRate, bake_fades: bo
                     let frames = ((half.min(a.duration) * fps).round() as i64).max(1);
                     let total = (a.duration * fps).round() as i64;
                     append_filter(
-                        &mut a.video_filter_chain,
+                        &mut a.transition_chain,
                         &format!(
                             "fade=t=out:start_frame={}:nb_frames={frames}{colour}",
                             (total - frames).max(0)
@@ -343,7 +369,7 @@ fn resolve_transitions(clips: &mut [ExportClip], rate: FrameRate, bake_fades: bo
                     let b = &mut clips[cut.incoming];
                     let frames = ((half.min(b.duration) * fps).round() as i64).max(1);
                     append_filter(
-                        &mut b.video_filter_chain,
+                        &mut b.transition_chain,
                         &format!("fade=t=in:start_frame=0:nb_frames={frames}{colour}"),
                     );
                 }
@@ -384,7 +410,7 @@ pub fn render(request: &ExportRequest, mut reporter: Reporter<'_>) -> Result<Str
     // decoded, which is handled where the decoder is opened.
     let visible: Vec<&ExportClip> = resolved
         .iter()
-        .filter(|clip| clip.kind.is_visual() && !clip.hidden)
+        .filter(|clip| (clip.kind.is_visual() || clip.kind == ClipKind::Layer) && !clip.hidden)
         .collect();
     let audible: Vec<&ExportClip> = resolved
         .iter()
@@ -451,7 +477,7 @@ pub fn render(request: &ExportRequest, mut reporter: Reporter<'_>) -> Result<Str
 
         reporter.cancelled()?;
         reporter.emit(0, total_frames, "mixing audio");
-        let mix: Vec<AudioClip> = sound.iter().map(|clip| audio_clip(clip)).collect();
+        let mix: Vec<AudioClip> = sound.iter().flat_map(|clip| audio_pieces(clip)).collect();
         audio::mix_to_file(&mix, timeline_end, &mixed).map_err(|error| error.to_string())?;
 
         reporter.cancelled()?;
@@ -465,20 +491,84 @@ pub fn render(request: &ExportRequest, mut reporter: Reporter<'_>) -> Result<Str
     result.map(|()| output.to_string_lossy().into_owned())
 }
 
-/// The engine's view of one audible clip.
-fn audio_clip(clip: &ExportClip) -> AudioClip {
-    AudioClip {
-        path: PathBuf::from(&clip.path),
-        start: clip.start,
-        duration: clip.duration,
-        source_start: clip.source_start,
-        speed: audio::clamp_speed(clip.speed),
-        preserve_pitch: clip.preserve_pitch,
-        volume: clip.volume,
-        fade_in: clip.fade_in,
-        fade_out: clip.fade_out,
-        filter_chain: clip.filter_chain.clone(),
+/// The engine's view of one audible clip - or several, when its speed
+/// changes over it. Sound can only change tempo in steps, so a curve is cut
+/// into pieces of constant rate, each at the mean of its stretch of the
+/// curve and starting where the curve says the source had got to. A reverse
+/// runs the pieces' sound backwards, and the pieces themselves in reverse
+/// order of source, which is what playing the clip backwards means.
+pub fn audio_pieces(clip: &ExportClip) -> Vec<AudioClip> {
+    let mut chain = clip.filter_chain.clone();
+    if clip.reverse {
+        chain = if chain.is_empty() {
+            "areverse".to_owned()
+        } else {
+            format!("areverse,{chain}")
+        };
     }
+    let Some(curve) = SpeedCurve::new(&clip.speed_curve) else {
+        return vec![AudioClip {
+            path: PathBuf::from(&clip.path),
+            start: clip.start,
+            duration: clip.duration,
+            source_start: clip.source_start,
+            speed: audio::clamp_speed(clip.speed),
+            preserve_pitch: clip.preserve_pitch,
+            volume: clip.volume,
+            fade_in: clip.fade_in,
+            fade_out: clip.fade_out,
+            filter_chain: chain,
+        }];
+    };
+    // Pieces a tenth of a second long, or eight at least: fine enough that
+    // a tempo step is not heard, coarse enough that the graph stays small.
+    let count = ((clip.duration / 0.1).ceil() as usize).clamp(8, 400);
+    let span = curve.mean() * clip.duration;
+    curve
+        .pieces(count)
+        .into_iter()
+        .map(|(x0, x1, consumed, mean)| {
+            let piece_duration = (x1 - x0) * clip.duration;
+            let forward = consumed * clip.duration;
+            let source_start = if clip.reverse {
+                // Backwards: this piece plays the source that ends where the
+                // forward map had got to, so it starts one piece earlier.
+                clip.source_start + (span - forward - mean * piece_duration).max(0.0)
+            } else {
+                clip.source_start + forward
+            };
+            let piece_start = clip.start + x0 * clip.duration;
+            let piece_end = piece_start + piece_duration;
+            // The clip's fades, as they fall on this piece.
+            let fade_in = (clip.fade_in - x0 * clip.duration).clamp(0.0, piece_duration);
+            let fade_out_from = clip.start + clip.duration - clip.fade_out;
+            let fade_out = (piece_end - fade_out_from.max(piece_start)).clamp(0.0, piece_duration);
+            AudioClip {
+                path: PathBuf::from(&clip.path),
+                start: piece_start,
+                duration: piece_duration,
+                source_start,
+                speed: audio::clamp_speed(mean),
+                preserve_pitch: clip.preserve_pitch,
+                volume: clip.volume,
+                fade_in: if clip.fade_in > 0.0 { fade_in } else { 0.0 },
+                fade_out: if clip.fade_out > 0.0 { fade_out } else { 0.0 },
+                filter_chain: chain.clone(),
+            }
+        })
+        .collect()
+}
+
+/// One decoded picture on its way to the compositor, with everything the
+/// layer it becomes needs. Generic over how the frame is held: owned in the
+/// export, shared out of the reader pool in the monitor.
+struct Source<F> {
+    frame: F,
+    opacity: f32,
+    transform: Transform,
+    track: usize,
+    blend: concat_core::timeline::Blend,
+    passes: Vec<ShaderPass>,
 }
 
 /// The fraction-to-pixel placement of one composited layer: fitted and
@@ -514,12 +604,12 @@ fn place_layer<'a>(
 /// The best compositor this machine offers: the GPU when the `gpu` feature is
 /// on and the machine has one, the CPU reference otherwise. Never an error -
 /// a machine with no adapter renders slower, not not-at-all.
-fn best_compositor() -> Box<dyn Compositor> {
+fn best_compositor() -> (Box<dyn Compositor>, bool) {
     #[cfg(feature = "gpu")]
     if let Some(gpu) = concat_render::WgpuCompositor::new() {
-        return Box::new(gpu);
+        return (Box::new(gpu), true);
     }
-    Box::new(CpuCompositor)
+    (Box::new(CpuCompositor), false)
 }
 
 /// Composites every frame of the timeline into a soundless video file.
@@ -531,12 +621,17 @@ fn render_picture(
     destination: &Path,
     reporter: &mut Reporter<'_>,
 ) -> Result<(), String> {
+    let (mut compositor, gpu) = best_compositor();
     let BuiltTimeline {
         timeline,
         stills,
         decode_sizes,
         filter_chains,
-    } = build_timeline(request, rate, visible);
+        tracks,
+        treatments,
+        pre_chains,
+        passes,
+    } = build_timeline(request, rate, visible, gpu);
 
     let mut encoder = Encoder::create(
         destination,
@@ -551,14 +646,16 @@ fn render_picture(
     )
     .map_err(|error| error.to_string())?;
 
-    let mut compositor = best_compositor();
-
     // One decoder per clip, opened at its in-point the first time the clip is
     // needed and dropped the moment it leaves the playhead. Every decoder is
     // opened at `output rate / clip speed`, so pulling exactly one frame per
     // output frame keeps each of them in step with the plan's source times
     // without any seeking - including retimed clips.
     let mut decoders: HashMap<ClipId, Decoder> = HashMap::new();
+    // A clip whose speed changes, or runs backwards, cannot be followed by a
+    // paced decoder: each of its frames is sought by its own source time,
+    // through a pool that keeps the reader rolling where it can.
+    let sought = concat_media::ReaderPool::with_defaults();
 
     for index in 0..total_frames {
         reporter.cancelled()?;
@@ -566,8 +663,35 @@ fn render_picture(
         let time = rate.time_of_frame(index);
         let plan = plan_frame(&timeline, time);
 
-        let mut sources: Vec<(Frame, f32, Transform)> = Vec::with_capacity(plan.layers.len());
+        let mut sources: Vec<Source<Frame>> = Vec::with_capacity(plan.layers.len());
         for layer in &plan.layers {
+            if !layer.paced {
+                let (decode_width, decode_height) = decode_sizes
+                    .get(&layer.clip)
+                    .copied()
+                    .unwrap_or((request.width, request.height));
+                let chain = filter_chains.get(&layer.clip).map(String::as_str);
+                let pre = pre_chains.get(&layer.clip).map(String::as_str);
+                if let Ok(frame) = sought.frame_at(
+                    &layer.media,
+                    layer.source_time,
+                    decode_width,
+                    decode_height,
+                    stills.contains(&layer.clip),
+                    chain,
+                    pre,
+                ) {
+                    sources.push(Source {
+                        frame: frame.as_ref().clone(),
+                        opacity: layer.opacity,
+                        transform: layer.transform,
+                        track: tracks.get(&layer.clip).copied().unwrap_or(0),
+                        blend: layer.blend,
+                        passes: passes.get(&layer.clip).cloned().unwrap_or_default(),
+                    });
+                }
+                continue;
+            }
             let decoder = match decoders.entry(layer.clip) {
                 std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
                 std::collections::hash_map::Entry::Vacant(entry) => {
@@ -601,6 +725,9 @@ fn render_picture(
                     if let Some(chain) = filter_chains.get(&layer.clip) {
                         options = options.filtered(chain.clone());
                     }
+                    if let Some(pre) = pre_chains.get(&layer.clip) {
+                        options = options.prefiltered(pre.clone());
+                    }
 
                     // A still is a one-frame stream. Without looping it would
                     // contribute a single frame and then disappear.
@@ -618,18 +745,45 @@ fn render_picture(
             // aborting the export - a clip trimmed past its media's end is a
             // mistake in the edit, not a failure of the renderer.
             if let Some(frame) = decoder.next_frame().map_err(|error| error.to_string())? {
-                sources.push((frame, layer.opacity, layer.transform));
+                sources.push(Source {
+                    frame,
+                    opacity: layer.opacity,
+                    transform: layer.transform,
+                    track: tracks.get(&layer.clip).copied().unwrap_or(0),
+                    blend: layer.blend,
+                    passes: passes.get(&layer.clip).cloned().unwrap_or_default(),
+                });
             }
         }
 
-        let layers: Vec<Layer<'_>> = sources
+        let seconds = time.as_f64() as f32;
+        let layers: Vec<(Layer<'_>, usize)> = sources
             .iter()
-            .map(|(frame, opacity, transform)| {
-                place_layer(frame, *opacity, transform, request.width, request.height)
+            .map(|source| {
+                (
+                    place_layer(
+                        &source.frame,
+                        source.opacity,
+                        &source.transform,
+                        request.width,
+                        request.height,
+                    )
+                    .with_blend(source.blend)
+                    .with_passes(&source.passes)
+                    .at_time(seconds),
+                    source.track,
+                )
             })
             .collect();
 
-        let composed = compositor.composite(request.width, request.height, &layers);
+        let composed = composite_treated(
+            &mut *compositor,
+            request.width,
+            request.height,
+            time,
+            &layers,
+            &treatments,
+        );
         encoder
             .write_frame(&composed)
             .map_err(|error| error.to_string())?;
@@ -657,6 +811,131 @@ struct BuiltTimeline {
     decode_sizes: HashMap<ClipId, (u32, u32)>,
     /// The clip's effect chain, where it has one.
     filter_chains: HashMap<ClipId, String>,
+    /// Each picture's track, so a treatment knows what lies beneath it.
+    tracks: HashMap<ClipId, usize>,
+    /// The clip's pre-fit chain - its crop - where it has one.
+    pre_chains: HashMap<ClipId, String>,
+    /// The clip's shader passes, on a GPU renderer.
+    passes: HashMap<ClipId, Vec<ShaderPass>>,
+    /// The layers: treatments over the stack, by span.
+    treatments: Vec<Treatment>,
+}
+
+/// A layer clip, as the compositor needs it: when, over which tracks, what
+/// chain, and how hard.
+#[derive(Clone, Debug)]
+struct Treatment {
+    start: Rational,
+    end: Rational,
+    track: usize,
+    chain: String,
+    /// The layer's shader passes, when the renderer runs them; the chain is
+    /// then whatever the GPU cannot.
+    passes: Vec<ShaderPass>,
+    strength: f32,
+    ramp_in: f64,
+    ramp_out: f64,
+}
+
+impl Treatment {
+    fn covers(&self, time: Rational) -> bool {
+        self.start <= time && time < self.end
+    }
+
+    /// How hard the treatment is applied at `time`: the strength, eased in
+    /// and out over the ramps at either end.
+    fn strength_at(&self, time: Rational) -> f32 {
+        let at = time.as_f64() - self.start.as_f64();
+        let left = self.end.as_f64() - time.as_f64();
+        let mut ramp = 1.0_f64;
+        if self.ramp_in > 0.0 && at < self.ramp_in {
+            ramp = ramp.min(at / self.ramp_in);
+        }
+        if self.ramp_out > 0.0 && left < self.ramp_out {
+            ramp = ramp.min(left / self.ramp_out);
+        }
+        (f64::from(self.strength) * ramp.clamp(0.0, 1.0)) as f32
+    }
+}
+
+/// `a` towards `b` by `amount`, per channel.
+fn mix(a: &Frame, b: &Frame, amount: f32) -> Frame {
+    let amount = amount.clamp(0.0, 1.0);
+    let mut out = a.clone();
+    for (pixel, over) in out.pixels_mut().iter_mut().zip(b.pixels().iter()) {
+        let base = f32::from(*pixel);
+        *pixel = (base + (f32::from(*over) - base) * amount).round() as u8;
+    }
+    out
+}
+
+/// Composites `sources` - each placed layer with the track it came from,
+/// bottom-most first - with every treatment live at `time` applied to the
+/// stack beneath its track. Without a live treatment this is one composite;
+/// with one, the stack is drawn up to the treatment's track, run through its
+/// chain, blended back by its strength, and used as the ground for the rest.
+fn composite_treated(
+    compositor: &mut dyn Compositor,
+    width: u32,
+    height: u32,
+    time: Rational,
+    sources: &[(Layer<'_>, usize)],
+    treatments: &[Treatment],
+) -> Frame {
+    let mut live: Vec<&Treatment> = treatments
+        .iter()
+        .filter(|treatment| treatment.covers(time))
+        .collect();
+    if live.is_empty() {
+        let layers: Vec<Layer<'_>> = sources.iter().map(|(layer, _)| *layer).collect();
+        return compositor.composite(width, height, &layers);
+    }
+    live.sort_by_key(|treatment| treatment.track);
+
+    let mut ground: Option<Frame> = None;
+    let mut next = 0;
+    for treatment in live {
+        let below = {
+            let mut layers: Vec<Layer<'_>> = ground.as_ref().map(Layer::new).into_iter().collect();
+            while next < sources.len() && sources[next].1 < treatment.track {
+                layers.push(sources[next].0);
+                next += 1;
+            }
+            compositor.composite(width, height, &layers)
+        };
+        let strength = treatment.strength_at(time);
+        let treated = if strength <= 0.0 {
+            below
+        } else {
+            // Shader passes run through the compositor over the ground as a
+            // layer of its own; whatever is left for FFmpeg runs after.
+            let shaded = if treatment.passes.is_empty() {
+                below.clone()
+            } else {
+                let ground = [Layer::new(&below)
+                    .with_passes(&treatment.passes)
+                    .at_time(time.as_f64() as f32)];
+                compositor.composite(width, height, &ground)
+            };
+            let result = if treatment.chain.is_empty() {
+                Ok(shaded)
+            } else {
+                concat_media::treat(&shaded, &treatment.chain)
+            };
+            match result {
+                Ok(treated) if strength >= 1.0 => treated,
+                Ok(treated) => mix(&below, &treated, strength),
+                // A chain FFmpeg refuses leaves the picture as it was
+                // rather than blanking it; the export says nothing because
+                // the catalogue validated every template at load.
+                Err(_) => below,
+            }
+        };
+        ground = Some(treated);
+    }
+    let mut layers: Vec<Layer<'_>> = ground.as_ref().map(Layer::new).into_iter().collect();
+    layers.extend(sources[next..].iter().map(|(layer, _)| *layer));
+    compositor.composite(width, height, &layers)
 }
 
 /// Converts the flattened clip list into an engine timeline.
@@ -664,11 +943,16 @@ fn build_timeline(
     request: &ExportRequest,
     rate: FrameRate,
     visible: &[&ExportClip],
+    gpu: bool,
 ) -> BuiltTimeline {
     let mut timeline = Timeline::new(request.width, request.height, rate);
     let mut stills = std::collections::HashSet::new();
     let mut decode_sizes: HashMap<ClipId, (u32, u32)> = HashMap::new();
     let mut filter_chains: HashMap<ClipId, String> = HashMap::new();
+    let mut tracks_of: HashMap<ClipId, usize> = HashMap::new();
+    let mut treatments: Vec<Treatment> = Vec::new();
+    let mut pre_chains: HashMap<ClipId, String> = HashMap::new();
+    let mut passes: HashMap<ClipId, Vec<ShaderPass>> = HashMap::new();
 
     let lanes = visible.iter().map(|clip| clip.track).max().unwrap_or(0) + 1;
     let tracks: Vec<_> = (0..lanes)
@@ -685,6 +969,26 @@ fn build_timeline(
             continue;
         }
 
+        // A layer has no pixels to decode: it is a treatment over the
+        // stack, kept beside the timeline rather than in it.
+        if clip.kind == ClipKind::Layer {
+            let chain = full_chain(clip, gpu);
+            let layer_passes = if gpu { shader_passes(clip) } else { Vec::new() };
+            if !chain.is_empty() || !layer_passes.is_empty() {
+                treatments.push(Treatment {
+                    start,
+                    end: start + duration,
+                    track: clip.track,
+                    chain,
+                    passes: layer_passes,
+                    strength: clip.opacity.clamp(0.0, 1.0) as f32,
+                    ramp_in: clip.fade_in.max(0.0),
+                    ramp_out: clip.fade_out.max(0.0),
+                });
+            }
+            continue;
+        }
+
         let mut engine_clip = Clip::new(MediaRef::new(&clip.path), start, duration);
         engine_clip.source_start = quantise(clip.source_start, rate);
         // The same clamp the audio path applies, so a 2x clip means the same
@@ -692,7 +996,11 @@ fn build_timeline(
         if clip.kind != ClipKind::Image {
             engine_clip.speed =
                 Rational::approximate(audio::clamp_speed(clip.speed)).unwrap_or(Rational::ONE);
+            engine_clip.retime = SpeedCurve::new(&clip.speed_curve);
+            engine_clip.reverse = clip.reverse;
         }
+        engine_clip.animation = animation_of(&clip.animation);
+        engine_clip.blend = concat_core::timeline::Blend::parse(&clip.blend);
         engine_clip.transform = Transform {
             scale: clip.scale,
             offset_x: clip.offset_x,
@@ -700,39 +1008,31 @@ fn build_timeline(
             rotation: clip.rotation,
         };
         engine_clip.opacity = clip.opacity.clamp(0.0, 1.0) as f32;
-        engine_clip.transform_keyframes = clip
-            .transform_keyframes
-            .iter()
-            .map(|keyframe| CoreTransformKeyframe {
-                time: quantise(keyframe.time.clamp(0.0, clip.duration), rate),
-                transform: Transform {
-                    scale: keyframe.scale.clamp(0.05, 8.0),
-                    offset_x: keyframe.offset_x.clamp(-3.0, 3.0),
-                    offset_y: keyframe.offset_y.clamp(-3.0, 3.0),
-                    rotation: keyframe.rotation,
-                },
-                opacity: keyframe.opacity.clamp(0.0, 1.0) as f32,
-                easing: CoreBezier {
-                    x1: keyframe.x1.clamp(0.0, 1.0),
-                    y1: keyframe.y1.clamp(-2.0, 3.0),
-                    x2: keyframe.x2.clamp(0.0, 1.0),
-                    y2: keyframe.y2.clamp(-2.0, 3.0),
-                },
-            })
-            .collect();
         // Quantised like every other time: the ramp must land on the same
         // frame grid the overlap does, or the dissolve ends a frame early.
         engine_clip.video_fade_in = quantise(clip.video_fade_in, rate);
 
         if let Some(id) = timeline.add_clip(tracks[clip.track], engine_clip) {
+            tracks_of.insert(id, clip.track);
             if clip.kind == ClipKind::Image {
                 stills.insert(id);
             }
             if let Some(size) = fitted_size(request, clip) {
                 decode_sizes.insert(id, size);
             }
-            if !clip.video_filter_chain.is_empty() {
-                filter_chains.insert(id, clip.video_filter_chain.clone());
+            let chain = full_chain(clip, gpu);
+            if !chain.is_empty() {
+                filter_chains.insert(id, chain);
+            }
+            let pre = pre_chain(clip);
+            if !pre.is_empty() {
+                pre_chains.insert(id, pre);
+            }
+            if gpu {
+                let clip_passes = shader_passes(clip);
+                if !clip_passes.is_empty() {
+                    passes.insert(id, clip_passes);
+                }
             }
         }
     }
@@ -742,7 +1042,100 @@ fn build_timeline(
         stills,
         decode_sizes,
         filter_chains,
+        tracks: tracks_of,
+        treatments,
+        pre_chains,
+        passes,
     }
+}
+
+/// The chain that runs in the source's own pixels before the fit: the crop.
+fn pre_chain(clip: &ExportClip) -> String {
+    match clip.crop {
+        Some([left, top, right, bottom])
+            if left > 0.0 || top > 0.0 || right > 0.0 || bottom > 0.0 =>
+        {
+            let w = (1.0 - left - right).max(0.1);
+            let h = (1.0 - top - bottom).max(0.1);
+            // Even sizes, for the same reason `fitted_size` wants them.
+            format!(
+                "crop=w=floor(iw*{w:.4}/2)*2:h=floor(ih*{h:.4}/2)*2:x=floor(iw*{left:.4}):y=floor(ih*{top:.4})"
+            )
+        }
+        _ => String::new(),
+    }
+}
+
+/// The clip's FFmpeg chain for one backend: flips first - a flip is a
+/// treatment of the picture like any other, and comes first so the effects
+/// see the picture the viewer will - then the effects this backend runs as
+/// chains, then the transition fades. On the GPU every effect with a shader
+/// is left out here and carried by [`shader_passes`] instead.
+fn full_chain(clip: &ExportClip, gpu: bool) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if clip.flip_h {
+        parts.push("hflip".to_owned());
+    }
+    if clip.flip_v {
+        parts.push("vflip".to_owned());
+    }
+    let effects = if clip.effects.is_empty() {
+        clip.video_filter_chain.clone()
+    } else if gpu {
+        Catalogue::builtin().video_chain_gpu(&clip.effects)
+    } else {
+        Catalogue::builtin().video_chain(&clip.effects)
+    };
+    if !effects.is_empty() {
+        parts.push(effects);
+    }
+    if !clip.transition_chain.is_empty() {
+        parts.push(clip.transition_chain.clone());
+    }
+    parts.join(",")
+}
+
+/// The clip's shader passes, for a renderer that runs them.
+fn shader_passes(clip: &ExportClip) -> Vec<ShaderPass> {
+    Catalogue::builtin().shader_passes(&clip.effects)
+}
+
+/// The engine's keys for a flattened clip's animation, or None for none.
+fn animation_of(keys: &[ExportKey]) -> Option<Animation> {
+    use concat_core::animate::{Ease, Key, Track};
+    if keys.is_empty() {
+        return None;
+    }
+    let mut tracks: [Vec<Key>; 5] = Default::default();
+    for key in keys {
+        let slot = match key.property.as_str() {
+            "scale" => 0,
+            "offsetX" => 1,
+            "offsetY" => 2,
+            "rotation" => 3,
+            "opacity" => 4,
+            _ => continue,
+        };
+        tracks[slot].push(Key {
+            at: key.at,
+            value: key.value,
+            ease: match key.ease.as_str() {
+                "in" => Ease::In,
+                "out" => Ease::Out,
+                "inOut" => Ease::InOut,
+                _ => Ease::Linear,
+            },
+        });
+    }
+    let [scale, x, y, rotation, opacity] = tracks;
+    let animation = Animation {
+        scale: Track::new(scale),
+        offset_x: Track::new(x),
+        offset_y: Track::new(y),
+        rotation: Track::new(rotation),
+        opacity: Track::new(opacity),
+    };
+    (!animation.is_empty()).then_some(animation)
 }
 
 /// The source's contain-fitted size inside the output frame, or `None` when
@@ -750,6 +1143,18 @@ fn build_timeline(
 fn fitted_size(request: &ExportRequest, clip: &ExportClip) -> Option<(u32, u32)> {
     let media_width = clip.media_width.filter(|value| *value > 0)?;
     let media_height = clip.media_height.filter(|value| *value > 0)?;
+    // What is left after the crop is what gets fitted.
+    let (media_width, media_height) = match clip.crop {
+        Some([left, top, right, bottom]) => (
+            (f64::from(media_width) * (1.0 - left - right).max(0.1))
+                .round()
+                .max(2.0) as u32,
+            (f64::from(media_height) * (1.0 - top - bottom).max(0.1))
+                .round()
+                .max(2.0) as u32,
+        ),
+        None => (media_width, media_height),
+    };
 
     let fit = (f64::from(request.width) / f64::from(media_width))
         .min(f64::from(request.height) / f64::from(media_height));
@@ -795,33 +1200,84 @@ pub fn preview_frame(
     pool: &concat_media::ReaderPool,
     request: &PreviewFrameRequest,
 ) -> Result<Vec<u8>, String> {
-    let sources = preview_sources(pool, request)?;
-    let layers = sources.layers();
+    let sources = preview_sources(pool, request, false)?;
     // CPU on purpose: one frame at preview size is milliseconds, and holding
     // a GPU context alive for occasional scrubs is not worth its memory. The
     // window composites on its own device through `preview_sources`.
-    let composed = CpuCompositor.composite(request.width, request.height, &layers);
-    Ok(composed.into_pixels())
+    Ok(sources.composite(&mut CpuCompositor).into_pixels())
 }
 
 /// The decoded pictures under the playhead and where each goes: what a
 /// compositor needs to draw the paused monitor's frame, decoded but not yet
 /// drawn, so a caller with a GPU can draw them where they are shown.
 pub struct PreviewSources {
-    sources: Vec<(std::sync::Arc<Frame>, f32, Transform)>,
+    sources: Vec<Source<std::sync::Arc<Frame>>>,
     width: u32,
     height: u32,
+    time: Rational,
+    treatments: Vec<Treatment>,
 }
 
 impl PreviewSources {
-    /// The layers, placed the exporter's way, bottom-most first.
+    /// The layers, placed the exporter's way, bottom-most first. Bare: a
+    /// caller drawing these itself is skipping the treatments, so check
+    /// [`PreviewSources::has_treatments`] first.
     pub fn layers(&self) -> Vec<Layer<'_>> {
+        let seconds = self.time.as_f64() as f32;
         self.sources
             .iter()
-            .map(|(frame, opacity, transform)| {
-                place_layer(frame.as_ref(), *opacity, transform, self.width, self.height)
+            .map(|source| {
+                place_layer(
+                    source.frame.as_ref(),
+                    source.opacity,
+                    &source.transform,
+                    self.width,
+                    self.height,
+                )
+                .with_blend(source.blend)
+                .with_passes(&source.passes)
+                .at_time(seconds)
             })
             .collect()
+    }
+
+    /// Whether a layer clip is live at this instant, in which case the frame
+    /// cannot be drawn from `layers` alone: see [`PreviewSources::composite`].
+    pub fn has_treatments(&self) -> bool {
+        self.treatments
+            .iter()
+            .any(|treatment| treatment.covers(self.time))
+    }
+
+    /// The frame, treatments included, drawn with `compositor`.
+    pub fn composite(&self, compositor: &mut dyn Compositor) -> Frame {
+        let placed: Vec<(Layer<'_>, usize)> = self
+            .sources
+            .iter()
+            .map(|source| {
+                (
+                    place_layer(
+                        source.frame.as_ref(),
+                        source.opacity,
+                        &source.transform,
+                        self.width,
+                        self.height,
+                    )
+                    .with_blend(source.blend)
+                    .with_passes(&source.passes)
+                    .at_time(self.time.as_f64() as f32),
+                    source.track,
+                )
+            })
+            .collect();
+        composite_treated(
+            compositor,
+            self.width,
+            self.height,
+            self.time,
+            &placed,
+            &self.treatments,
+        )
     }
 
     /// The output width the layers were placed for.
@@ -841,6 +1297,7 @@ impl PreviewSources {
 pub fn preview_sources(
     pool: &concat_media::ReaderPool,
     request: &PreviewFrameRequest,
+    gpu: bool,
 ) -> Result<PreviewSources, String> {
     let rate = FrameRate::new(Rational::new(request.rate_num, request.rate_den));
     let BuiltTimeline {
@@ -848,11 +1305,15 @@ pub fn preview_sources(
         stills,
         decode_sizes,
         filter_chains,
-    } = preview_timeline(request, rate);
-    let plan = plan_frame(&timeline, quantise(request.time, rate));
+        tracks,
+        treatments,
+        pre_chains,
+        passes,
+    } = preview_timeline(request, rate, gpu);
+    let time = quantise(request.time, rate);
+    let plan = plan_frame(&timeline, time);
 
-    let mut sources: Vec<(std::sync::Arc<Frame>, f32, Transform)> =
-        Vec::with_capacity(plan.layers.len());
+    let mut sources: Vec<Source<std::sync::Arc<Frame>>> = Vec::with_capacity(plan.layers.len());
     let mut failures: Vec<String> = Vec::new();
     for layer in &plan.layers {
         let (decode_width, decode_height) = decode_sizes
@@ -860,6 +1321,7 @@ pub fn preview_sources(
             .copied()
             .unwrap_or((request.width, request.height));
         let chain = filter_chains.get(&layer.clip).map(String::as_str);
+        let pre = pre_chains.get(&layer.clip).map(String::as_str);
         // A source that fails to decode contributes nothing rather than
         // blanking the monitor - same grace the exporter extends.
         match pool.frame_at(
@@ -869,8 +1331,16 @@ pub fn preview_sources(
             decode_height,
             stills.contains(&layer.clip),
             chain,
+            pre,
         ) {
-            Ok(frame) => sources.push((frame, layer.opacity, layer.transform)),
+            Ok(frame) => sources.push(Source {
+                frame,
+                opacity: layer.opacity,
+                transform: layer.transform,
+                track: tracks.get(&layer.clip).copied().unwrap_or(0),
+                blend: layer.blend,
+                passes: passes.get(&layer.clip).cloned().unwrap_or_default(),
+            }),
             Err(error) => failures.push(format!("{}: {error}", layer.media.display())),
         }
     }
@@ -890,16 +1360,18 @@ pub fn preview_sources(
         sources,
         width: request.width,
         height: request.height,
+        time,
+        treatments,
     })
 }
 
 /// The preview's timeline, built the exporter's way.
-fn preview_timeline(request: &PreviewFrameRequest, rate: FrameRate) -> BuiltTimeline {
+fn preview_timeline(request: &PreviewFrameRequest, rate: FrameRate, gpu: bool) -> BuiltTimeline {
     let mut resolved = request.clips.clone();
     resolve_transitions(&mut resolved, rate, false);
     let visible: Vec<&ExportClip> = resolved
         .iter()
-        .filter(|clip| clip.kind.is_visual() && !clip.hidden)
+        .filter(|clip| (clip.kind.is_visual() || clip.kind == ClipKind::Layer) && !clip.hidden)
         .collect();
 
     // build_timeline reads only the output format off the request; the shim
@@ -914,7 +1386,7 @@ fn preview_timeline(request: &PreviewFrameRequest, rate: FrameRate) -> BuiltTime
         preset: String::new(),
         clips: Vec::new(),
     };
-    build_timeline(&shim, rate, &visible)
+    build_timeline(&shim, rate, &visible, gpu)
 }
 
 /// Warms the reader pool for the frames about to be presented.
@@ -932,6 +1404,7 @@ pub fn preview_prefetch(
     pool: &concat_media::ReaderPool,
     request: &PreviewFrameRequest,
     frames: u32,
+    gpu: bool,
 ) {
     let rate = FrameRate::new(Rational::new(request.rate_num, request.rate_den));
     let BuiltTimeline {
@@ -939,7 +1412,9 @@ pub fn preview_prefetch(
         stills,
         decode_sizes,
         filter_chains,
-    } = preview_timeline(request, rate);
+        pre_chains,
+        ..
+    } = preview_timeline(request, rate, gpu);
     let fps = rate.fps().as_f64();
 
     for ahead in 0..frames {
@@ -951,6 +1426,7 @@ pub fn preview_prefetch(
                 .copied()
                 .unwrap_or((request.width, request.height));
             let chain = filter_chains.get(&layer.clip).map(String::as_str);
+            let pre = pre_chains.get(&layer.clip).map(String::as_str);
             let _ = pool.frame_at(
                 std::path::Path::new(&layer.media),
                 layer.source_time,
@@ -958,6 +1434,7 @@ pub fn preview_prefetch(
                 decode_height,
                 stills.contains(&layer.clip),
                 chain,
+                pre,
             );
         }
     }
@@ -965,6 +1442,80 @@ pub fn preview_prefetch(
 
 #[cfg(test)]
 mod tests {
+    /// A treatment on track 1 runs over what track 0 drew and not over what
+    /// track 2 draws on top of it, and its strength blends the result back.
+    #[test]
+    fn a_treatment_covers_the_stack_beneath_its_track_only() {
+        fn solid(width: u32, height: u32, rgba: [u8; 4]) -> Frame {
+            let mut frame = Frame::black(width, height);
+            for pixel in frame.pixels_mut().chunks_exact_mut(4) {
+                pixel.copy_from_slice(&rgba);
+            }
+            frame
+        }
+        // Red fills the frame on track 0; a small blue square sits on
+        // track 2 at the top-left.
+        let red = solid(8, 8, [255, 0, 0, 255]);
+        let blue = solid(2, 2, [0, 0, 255, 255]);
+        let sources = [(Layer::new(&red), 0usize), (Layer::new(&blue), 2usize)];
+        let negate = Treatment {
+            start: Rational::ZERO,
+            end: Rational::from_int(10),
+            track: 1,
+            chain: "negate".to_owned(),
+            passes: Vec::new(),
+            strength: 1.0,
+            ramp_in: 0.0,
+            ramp_out: 0.0,
+        };
+        let mut compositor = CpuCompositor;
+        let out = composite_treated(
+            &mut compositor,
+            8,
+            8,
+            Rational::from_int(1),
+            &sources,
+            std::slice::from_ref(&negate),
+        );
+        // Red negated is cyan where nothing sits on top...
+        let at = |x: usize, y: usize| &out.pixels()[(y * 8 + x) * 4..(y * 8 + x) * 4 + 3];
+        assert_eq!(at(7, 7), &[0, 255, 255]);
+        // ...and the blue square above the treatment is untouched.
+        assert_eq!(at(0, 0), &[0, 0, 255]);
+
+        // At half strength the ground is halfway between red and cyan.
+        let half = Treatment {
+            strength: 0.5,
+            ..negate.clone()
+        };
+        let out = composite_treated(
+            &mut compositor,
+            8,
+            8,
+            Rational::from_int(1),
+            &sources,
+            &[half],
+        );
+        let pixel = &out.pixels()[(7 * 8 + 7) * 4..(7 * 8 + 7) * 4 + 3];
+        assert!(pixel[0] > 120 && pixel[0] < 136, "{pixel:?}");
+        assert!(pixel[1] > 120 && pixel[1] < 136, "{pixel:?}");
+
+        // Outside its span the treatment does nothing.
+        let out = composite_treated(
+            &mut compositor,
+            8,
+            8,
+            Rational::from_int(20),
+            &sources,
+            &[negate],
+        );
+        assert_eq!(at_of(&out, 7, 7), [255, 0, 0]);
+        fn at_of(frame: &Frame, x: usize, y: usize) -> [u8; 3] {
+            let p = &frame.pixels()[(y * 8 + x) * 4..(y * 8 + x) * 4 + 3];
+            [p[0], p[1], p[2]]
+        }
+    }
+
     use super::*;
 
     fn clip(kind: &str, track: usize, start: f64, duration: f64, source_start: f64) -> ExportClip {
@@ -987,12 +1538,20 @@ mod tests {
             filter_chain: String::new(),
             speed: 1.0,
             preserve_pitch: true,
+            speed_curve: Vec::new(),
+            reverse: false,
+            animation: Vec::new(),
+            flip_h: false,
+            flip_v: false,
+            blend: String::new(),
+            crop: None,
+            effects: Vec::new(),
+            transition_chain: String::new(),
             scale: 1.0,
             offset_x: 0.0,
             offset_y: 0.0,
             rotation: 0.0,
             opacity: 1.0,
-            transform_keyframes: Vec::new(),
             video_filter_chain: String::new(),
             transition: None,
             video_fade_in: 0.0,
@@ -1162,11 +1721,11 @@ mod tests {
 
         // Half a second each side at 30fps is 15 frames.
         assert_eq!(
-            clips[0].video_filter_chain,
+            clips[0].transition_chain,
             "fade=t=out:start_frame=105:nb_frames=15"
         );
         assert_eq!(
-            clips[1].video_filter_chain,
+            clips[1].transition_chain,
             "fade=t=in:start_frame=0:nb_frames=15"
         );
         assert_eq!(clips[1].start, 4.0, "nothing moves for an edge fade");
@@ -1180,8 +1739,8 @@ mod tests {
         ];
         clips[1].transition = spec("fade-white", 0.5);
         resolve_transitions(&mut clips, FrameRate::THIRTY, true);
-        assert!(clips[0].video_filter_chain.ends_with(":color=white"));
-        assert!(clips[1].video_filter_chain.contains("t=in"));
+        assert!(clips[0].transition_chain.ends_with(":color=white"));
+        assert!(clips[1].transition_chain.contains("t=in"));
     }
 
     #[test]
@@ -1193,11 +1752,10 @@ mod tests {
         clips[1].video_filter_chain = "hue=s=0".to_owned();
         clips[1].transition = spec("fade-black", 0.5);
         resolve_transitions(&mut clips, FrameRate::THIRTY, true);
-        assert!(
-            clips[1].video_filter_chain.starts_with("hue=s=0,fade=t=in"),
-            "was: {}",
-            clips[1].video_filter_chain
-        );
+        // The fade lives beside the effects and joins after them when the
+        // decoder's chain is built.
+        let chain = full_chain(&clips[1], false);
+        assert!(chain.starts_with("hue=s=0,fade=t=in"), "was: {chain}");
     }
 
     #[test]

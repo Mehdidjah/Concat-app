@@ -16,11 +16,16 @@
 //! If you are about to add a dependency to this crate, the thing you are adding
 //! probably belongs in `concat-media` or `concat-render` instead.
 
+pub mod animate;
 pub mod arena;
 pub mod frame;
+pub mod retime;
+pub mod shader;
 pub mod time;
 pub mod timeline;
 
 pub use frame::Frame;
+pub use retime::SpeedCurve;
+pub use shader::ShaderPass;
 pub use time::{FrameRate, Rational, TimeRange};
-pub use timeline::{Clip, ClipId, Project, Timeline, Track, TrackId, TrackKind};
+pub use timeline::{Blend, Clip, ClipId, Project, Timeline, Track, TrackId, TrackKind};

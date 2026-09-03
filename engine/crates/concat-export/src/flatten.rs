@@ -16,7 +16,7 @@
 use concat_project::model::{ClipKind as ModelClipKind, Project, Timeline};
 
 use crate::chains::{audio_filter_chain, video_effect_chain};
-use crate::{ClipKind, ExportClip, TransformKeyframeSpec, TransitionSpec};
+use crate::{ClipKind, ExportClip, ExportKey, TransitionSpec};
 
 /// Flattens one timeline of `project` for the exporter - the active one
 /// when `timeline_id` is `None`. Text clips are excluded (they rasterise
@@ -34,12 +34,54 @@ pub fn flatten_timeline(project: &Project, timeline_id: Option<&str>) -> Vec<Exp
             if clip.kind == ModelClipKind::Text {
                 return None;
             }
-            let media = project.media.iter().find(|item| item.id == clip.media_id)?;
             let index = timeline
                 .tracks
                 .iter()
                 .position(|track| track.id == clip.track_id)?;
             let track = &timeline.tracks[index];
+
+            // A layer: no file, a chain over the stack beneath its track,
+            // its opacity the strength and its fades the ramps.
+            if clip.kind == ModelClipKind::Layer {
+                return Some(ExportClip {
+                    path: String::new(),
+                    kind: ClipKind::Layer,
+                    start: clip.start,
+                    duration: clip.duration,
+                    source_start: 0.0,
+                    track: index,
+                    hidden: !track.visible,
+                    muted: true,
+                    volume: 0.0,
+                    fade_in: clip.fade_in,
+                    fade_out: clip.fade_out,
+                    filter_chain: String::new(),
+                    speed: 1.0,
+                    preserve_pitch: true,
+                    speed_curve: Vec::new(),
+                    reverse: false,
+                    animation: Vec::new(),
+                    flip_h: false,
+                    flip_v: false,
+                    blend: String::new(),
+                    crop: None,
+                    effects: clip.video_effects.clone(),
+                    transition_chain: String::new(),
+                    scale: 1.0,
+                    offset_x: 0.0,
+                    offset_y: 0.0,
+                    rotation: 0.0,
+                    opacity: clip.opacity,
+                    video_filter_chain: video_effect_chain(&clip.video_effects),
+                    transition: None,
+                    video_fade_in: 0.0,
+                    media_width: None,
+                    media_height: None,
+                    has_audio: Some(false),
+                });
+            }
+
+            let media = project.media.iter().find(|item| item.id == clip.media_id)?;
 
             Some(ExportClip {
                 path: media.path.clone(),
@@ -47,9 +89,9 @@ pub fn flatten_timeline(project: &Project, timeline_id: Option<&str>) -> Vec<Exp
                     ModelClipKind::Video => ClipKind::Video,
                     ModelClipKind::Audio => ClipKind::Audio,
                     ModelClipKind::Image => ClipKind::Image,
-                    // Filtered above; unreachable spelled as a skip so a new
+                    // Handled above; unreachable spelled as a skip so a new
                     // kind fails soft.
-                    ModelClipKind::Text => return None,
+                    ModelClipKind::Text | ModelClipKind::Layer => return None,
                 },
                 start: clip.start,
                 duration: clip.duration,
@@ -63,27 +105,29 @@ pub fn flatten_timeline(project: &Project, timeline_id: Option<&str>) -> Vec<Exp
                 filter_chain: audio_filter_chain(&clip.filters),
                 speed: clip.speed,
                 preserve_pitch: clip.preserve_pitch,
+                speed_curve: clip
+                    .speed_curve
+                    .as_deref()
+                    .unwrap_or(&[])
+                    .iter()
+                    .map(|point| (point.at, point.speed))
+                    .collect(),
+                reverse: clip.reverse,
+                animation: export_keys(clip),
+                flip_h: clip.flip_h,
+                flip_v: clip.flip_v,
+                blend: clip.blend.clone(),
+                crop: clip
+                    .crop
+                    .filter(|crop| !crop.is_none())
+                    .map(|crop| [crop.left, crop.top, crop.right, crop.bottom]),
+                effects: clip.video_effects.clone(),
+                transition_chain: String::new(),
                 scale: clip.scale,
                 offset_x: clip.offset_x,
                 offset_y: clip.offset_y,
                 rotation: clip.rotation,
                 opacity: clip.opacity,
-                transform_keyframes: clip
-                    .transform_keyframes
-                    .iter()
-                    .map(|keyframe| TransformKeyframeSpec {
-                        time: keyframe.time,
-                        scale: keyframe.scale,
-                        offset_x: keyframe.offset_x,
-                        offset_y: keyframe.offset_y,
-                        rotation: keyframe.rotation,
-                        opacity: keyframe.opacity,
-                        x1: keyframe.easing.x1,
-                        y1: keyframe.easing.y1,
-                        x2: keyframe.easing.x2,
-                        y2: keyframe.easing.y2,
-                    })
-                    .collect(),
                 video_filter_chain: video_effect_chain(&clip.video_effects),
                 // Passed through unconditionally: `resolve_transitions` is
                 // the one adjacency judge (frame/2 tolerance). A fixed
@@ -115,6 +159,39 @@ fn pick_timeline<'a>(project: &'a Project, timeline_id: Option<&str>) -> Option<
         .iter()
         .find(|timeline| timeline.id == wanted)
         .or_else(|| project.timelines.first())
+}
+
+/// The clip's animation presets, materialised for its current length as
+/// the keys the engine plays. See `concat_project::animation`.
+pub fn export_keys(clip: &concat_project::model::Clip) -> Vec<ExportKey> {
+    use concat_core::animate::Ease;
+    let Some(animation) = concat_project::animation::animation_of(clip) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for (property, track) in [
+        ("scale", &animation.scale),
+        ("offsetX", &animation.offset_x),
+        ("offsetY", &animation.offset_y),
+        ("rotation", &animation.rotation),
+        ("opacity", &animation.opacity),
+    ] {
+        for key in track.keys() {
+            out.push(ExportKey {
+                property: property.to_owned(),
+                at: key.at,
+                value: key.value,
+                ease: match key.ease {
+                    Ease::Linear => "linear",
+                    Ease::In => "in",
+                    Ease::Out => "out",
+                    Ease::InOut => "inOut",
+                }
+                .to_owned(),
+            });
+        }
+    }
+    out
 }
 
 #[cfg(test)]

@@ -23,6 +23,8 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
 
+use concat_effects::Catalogue;
+use concat_effects::manifest::Kind as PackageKind;
 use concat_host::export::{self, ExportSpec};
 use concat_host::playback::ClipSpec;
 use concat_host::preview::FrameSpec;
@@ -30,8 +32,7 @@ use concat_host::{ProjectInfo, Session, media, projects, templates};
 use concat_media::Peaks;
 use concat_project::commands::{ClipMove, ClipPatch, TrackFlag, TrimEdge};
 use concat_project::model::{
-    self, AppliedFilter, Clip, CubicBezier, Project, TextAlign, TextStyle, Timeline, Track,
-    TransformKeyframe, Transition,
+    self, AppliedFilter, Clip, Project, TextAlign, TextStyle, Timeline, Track, Transition,
 };
 use concat_project::{Command, why_not_merge};
 use slint::{Model, SharedString, VecModel};
@@ -271,6 +272,85 @@ pub enum Gesture {
         duration: f32,
         source_start: f32,
     },
+    /// A drag on the stage: every selected picture under the playhead slides
+    /// with the pointer, from where each one was when the press landed.
+    StageMove {
+        /// The picture grabbed; it is the one that snaps, and the rest
+        /// follow it by the same amount.
+        primary: String,
+        origins: Vec<StageOrigin>,
+        /// The press, in fractions of the frame.
+        from: (f64, f64),
+    },
+    /// A corner grip dragged: the picture scales about its centre, by the
+    /// ratio of the pointer's distance from that centre to what it was.
+    StageScale {
+        clip: String,
+        scale: f64,
+        /// The centre, in frame pixels — the unit the ratio is taken in, so
+        /// a tall frame and a wide one scale at the same rate.
+        centre: (f64, f64),
+        from: f64,
+    },
+    /// The rotation grip dragged: the picture turns by the angle the pointer
+    /// has swept about the centre since the press.
+    StageRotate {
+        clip: String,
+        rotation: f64,
+        centre: (f64, f64),
+        from: f64,
+    },
+}
+
+/// Where a picture was when a stage move began.
+pub struct StageOrigin {
+    pub clip: String,
+    pub offset_x: f64,
+    pub offset_y: f64,
+}
+
+/// A picture's footprint in the output frame, in fractions of it: where the
+/// centre is, how much of the frame's width and height it covers before it
+/// is turned, and the clockwise turn. The one place the monitor's box and
+/// the compositor's quad agree, so the outline lands on the pixels.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Footprint {
+    pub cx: f64,
+    pub cy: f64,
+    pub w: f64,
+    pub h: f64,
+    pub rotation: f64,
+}
+
+impl Footprint {
+    /// The half-extents of the turned box's axis-aligned bounds, in fractions
+    /// of the frame: what snapping measures, since an edge of a turned
+    /// picture is not a line the frame's edges can meet.
+    pub fn half_bounds(&self, frame: (u32, u32)) -> (f64, f64) {
+        let (width, height) = (f64::from(frame.0), f64::from(frame.1));
+        let (sin, cos) = self.rotation.to_radians().sin_cos();
+        let w = self.w * width;
+        let h = self.h * height;
+        (
+            (w * cos.abs() + h * sin.abs()) / 2.0 / width,
+            (w * sin.abs() + h * cos.abs()) / 2.0 / height,
+        )
+    }
+
+    /// True when the frame point `(x, y)`, in fractions, is inside the turned
+    /// box. `frame` is the output size, because the box is not square in
+    /// pixels and the turn has to happen in pixels.
+    pub fn contains(&self, x: f64, y: f64, frame: (u32, u32)) -> bool {
+        let (width, height) = (f64::from(frame.0), f64::from(frame.1));
+        let dx = (x - self.cx) * width;
+        let dy = (y - self.cy) * height;
+        let (sin, cos) = self.rotation.to_radians().sin_cos();
+        // The inverse of the compositor's forward map: undo the clockwise
+        // turn to land in the box's own frame, then it is an axis test.
+        let lx = dx * cos + dy * sin;
+        let ly = -dx * sin + dy * cos;
+        lx.abs() <= self.w * width / 2.0 && ly.abs() <= self.h * height / 2.0
+    }
 }
 
 /// A drag from the library, resolved against the timeline: the ghost the
@@ -294,9 +374,25 @@ pub struct Models {
     pub tabs: Rc<VecModel<TimelineTabData>>,
     pub tracks: Rc<VecModel<TrackData>>,
     pub clips: Rc<VecModel<ClipData>>,
+    pub stage: Rc<VecModel<StageItemData>>,
+    pub guides: Rc<VecModel<StageGuideData>>,
     pub media: Rc<VecModel<MediaItemData>>,
     pub video_effects: Rc<VecModel<EffectData>>,
     pub audio_effects: Rc<VecModel<EffectData>>,
+    /// The catalogue's shelves, one list per kind, and the shelf labels.
+    pub catalogue_effects: Rc<VecModel<CatalogueEntryData>>,
+    pub catalogue_filters: Rc<VecModel<CatalogueEntryData>>,
+    pub catalogue_audio: Rc<VecModel<CatalogueEntryData>>,
+    pub effect_groups: Rc<VecModel<SharedString>>,
+    pub filter_groups: Rc<VecModel<SharedString>>,
+    pub audio_groups: Rc<VecModel<SharedString>>,
+    /// The selected clip's two chains and their knobs.
+    pub applied_visual: Rc<VecModel<AppliedEntryData>>,
+    pub applied_audio: Rc<VecModel<AppliedEntryData>>,
+    pub visual_params: Rc<VecModel<AppliedParamData>>,
+    pub audio_params: Rc<VecModel<AppliedParamData>>,
+    /// The colour panel's knobs.
+    pub adjust_params: Rc<VecModel<AppliedParamData>>,
     pub menu: Rc<VecModel<MenuItemData>>,
     pub av: Rc<VecModel<MenuItemData>>,
     pub bar: Rc<VecModel<MenuItemData>>,
@@ -313,9 +409,22 @@ impl Models {
             tabs: Rc::new(VecModel::default()),
             tracks: Rc::new(VecModel::default()),
             clips: Rc::new(VecModel::default()),
+            stage: Rc::new(VecModel::default()),
+            guides: Rc::new(VecModel::default()),
             media: Rc::new(VecModel::default()),
             video_effects: Rc::new(VecModel::default()),
             audio_effects: Rc::new(VecModel::default()),
+            catalogue_effects: Rc::new(VecModel::default()),
+            catalogue_filters: Rc::new(VecModel::default()),
+            catalogue_audio: Rc::new(VecModel::default()),
+            effect_groups: Rc::new(VecModel::default()),
+            filter_groups: Rc::new(VecModel::default()),
+            audio_groups: Rc::new(VecModel::default()),
+            applied_visual: Rc::new(VecModel::default()),
+            applied_audio: Rc::new(VecModel::default()),
+            visual_params: Rc::new(VecModel::default()),
+            audio_params: Rc::new(VecModel::default()),
+            adjust_params: Rc::new(VecModel::default()),
             menu: Rc::new(VecModel::default()),
             av: Rc::new(VecModel::default()),
             bar: Rc::new(VecModel::default()),
@@ -430,6 +539,20 @@ pub struct Studio {
     pub workspace: (f32, f32),
     pub divider_press: Option<(usize, f32, f32)>,
     pub gesture: Gesture,
+    /// The snap lines of a stage move in flight; empty between moves.
+    pub stage_guides: Vec<StageGuideData>,
+    /// Where the inspector should go, and a count that changes every time
+    /// something is applied from the library; see `Editor.inspector-jump-token`.
+    pub inspector_jump: (i32, &'static str, &'static str),
+    /// The last inspector commit: what it changed and when. A control that
+    /// is dragged commits on every move, and each of those would be an undo
+    /// step of its own; a commit that changes the same thing as the last
+    /// one, within a moment of it, replaces it in the history instead.
+    last_commit: Option<(String, std::time::Instant)>,
+    /// Each title's painted block in frame pixels, by clip id, as of the
+    /// last time the monitor asked for a frame. What the stage box for a
+    /// text clip is drawn from; see `footprint`.
+    pub title_blocks: HashMap<String, (u32, u32)>,
     pub drop: Option<DropPlan>,
 }
 
@@ -441,6 +564,7 @@ fn kind_of(clip: &Clip) -> ClipKind {
         model::ClipKind::Audio => ClipKind::Audio,
         model::ClipKind::Image => ClipKind::Image,
         model::ClipKind::Text => ClipKind::Text,
+        model::ClipKind::Layer => ClipKind::Filter,
     }
 }
 
@@ -471,6 +595,249 @@ fn new_title_style() -> TextStyle {
 }
 
 /// A label for a catalogue id: "black-white" reads as "Black White".
+/// One kind's shelves for the inspector: the shelf labels, in catalogue
+/// order, and every package on them with the index of its shelf.
+fn shelves(kind: PackageKind) -> (Vec<SharedString>, Vec<CatalogueEntryData>) {
+    let mut groups: Vec<String> = Vec::new();
+    let mut entries = Vec::new();
+    for package in Catalogue::builtin().of_kind(kind) {
+        let meta = &package.manifest.effect;
+        // The colour panel's own package: every picture clip can carry it,
+        // and it has a tab, not a shelf.
+        if meta.id == ADJUST_ID {
+            continue;
+        }
+        let category = if meta.category.is_empty() {
+            "Other".to_owned()
+        } else {
+            meta.category.clone()
+        };
+        let group = match groups.iter().position(|held| *held == category) {
+            Some(index) => index,
+            None => {
+                groups.push(category.clone());
+                groups.len() - 1
+            }
+        };
+        entries.push(CatalogueEntryData {
+            id: meta.id.as_str().into(),
+            name: meta.name.as_str().into(),
+            category: category.as_str().into(),
+            group: group as i32,
+            description: meta.description.as_str().into(),
+        });
+    }
+    (
+        groups.into_iter().map(SharedString::from).collect(),
+        entries,
+    )
+}
+
+/// How a manifest's unit is read out. Anything the inspector has no words
+/// for is a plain number.
+fn format_of(unit: &str) -> ParamFormat {
+    match unit.trim() {
+        "%" => ParamFormat::Percent,
+        "dB" => ParamFormat::Decibels,
+        "Hz" => ParamFormat::Hertz,
+        "s" => ParamFormat::Seconds,
+        "ms" => ParamFormat::Millis,
+        "st" => ParamFormat::Pitch,
+        "K" => ParamFormat::Kelvin,
+        "EV" => ParamFormat::Stops,
+        "°" => ParamFormat::Degrees,
+        "x" => ParamFormat::Rate,
+        _ => ParamFormat::Plain,
+    }
+}
+
+/// What a batch of inspector commands touches, as a string two commits can
+/// be compared by: the variant names, and for a patch the fields it sets.
+fn commit_key(commands: &[Command]) -> String {
+    commands
+        .iter()
+        .map(|command| match command {
+            Command::SetClipTransform { .. } => "transform".to_owned(),
+            Command::SetClipSpeed { .. } => "speed".to_owned(),
+            Command::SetClipSpeedCurve { .. } => "curve".to_owned(),
+            Command::SetClipAnimation { slot, .. } => format!("animation:{slot:?}"),
+            Command::UpdateClip { patch, .. } => {
+                let mut fields = Vec::new();
+                if patch.name.is_some() {
+                    fields.push("name");
+                }
+                if patch.volume.is_some() {
+                    fields.push("volume");
+                }
+                if patch.fade_in.is_some() {
+                    fields.push("fade_in");
+                }
+                if patch.fade_out.is_some() {
+                    fields.push("fade_out");
+                }
+                if patch.opacity.is_some() {
+                    fields.push("opacity");
+                }
+                if patch.text.is_some() {
+                    fields.push("text");
+                }
+                if patch.video_effects.is_some() {
+                    fields.push("video_effects");
+                }
+                if patch.filters.is_some() {
+                    fields.push("filters");
+                }
+                if patch.crop.is_some() {
+                    fields.push("crop");
+                }
+                format!("patch:{}", fields.join("+"))
+            }
+            _ => "other".to_owned(),
+        })
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+/// The menu row of a slot's animation: -1 for none.
+fn slot_index(
+    slot: concat_project::model::AnimationSlot,
+    set: &Option<concat_project::model::ClipAnimation>,
+) -> i32 {
+    set.as_ref()
+        .and_then(|set| concat_project::animation::index_of(slot, &set.preset))
+        .map(|index| index as i32)
+        .unwrap_or(-1)
+}
+
+/// A slot set from its menu row: -1 takes it off, else the row's shape at
+/// the length already set or `seconds`.
+fn set_slot(
+    slot: concat_project::model::AnimationSlot,
+    field: &mut Option<concat_project::model::ClipAnimation>,
+    row: f64,
+    seconds: f64,
+) {
+    if row < 0.0 {
+        *field = None;
+        return;
+    }
+    let names = concat_project::animation::names(slot);
+    let Some(name) = names.get(row as usize) else {
+        return;
+    };
+    let duration = field.as_ref().map(|set| set.duration).unwrap_or(seconds);
+    *field = Some(concat_project::model::ClipAnimation {
+        preset: (*name).to_owned(),
+        duration,
+    });
+}
+
+/// The built-in colour package's id; see `adjust_rows` and `Studio::adjust_set`.
+const ADJUST_ID: &str = "concat.adjust";
+
+/// The colour panel's rows: the adjust package's parameters, at the values
+/// the clip's chain holds or at the defaults when the clip carries none.
+fn adjust_rows(chain: &[AppliedFilter]) -> Vec<AppliedParamData> {
+    let Some(package) = Catalogue::builtin().get(ADJUST_ID) else {
+        return Vec::new();
+    };
+    let held = chain.iter().find(|entry| entry.id == ADJUST_ID);
+    package
+        .manifest
+        .params
+        .iter()
+        .map(|param| AppliedParamData {
+            entry: -1,
+            key: param.key.as_str().into(),
+            label: param.label.as_str().into(),
+            min: param.min as f32,
+            max: param.max as f32,
+            step: if param.step > 0.0 {
+                param.step as f32
+            } else {
+                ((param.max - param.min) / 200.0) as f32
+            },
+            default_value: param.default as f32,
+            value: held
+                .and_then(|entry| entry.params.get(&param.key).copied())
+                .unwrap_or(param.default) as f32,
+            fmt: format_of(&param.unit),
+        })
+        .collect()
+}
+
+/// A chain as the inspector's stack draws it: one row per link, and one per
+/// knob its package declares, holding the document's value or the default.
+/// A link no package answers to keeps its row - so it can be removed - and
+/// gets no knobs.
+fn chain_rows(chain: &[AppliedFilter]) -> (Vec<AppliedEntryData>, Vec<AppliedParamData>) {
+    let catalogue = Catalogue::builtin();
+    let mut rows = Vec::new();
+    let mut knobs = Vec::new();
+    for (index, entry) in chain.iter().enumerate() {
+        let package = catalogue
+            .packages()
+            .find(|package| package.answers_to(&entry.id));
+        rows.push(AppliedEntryData {
+            id: entry.id.as_str().into(),
+            name: package
+                .map(|package| package.manifest.effect.name.clone())
+                .unwrap_or_else(|| label_of(&entry.id))
+                .into(),
+            on: entry.enabled,
+            known: package.is_some(),
+        });
+        let Some(package) = package else { continue };
+        // The adjust link shows as a link - it can be bypassed or removed
+        // here - but its knobs are the Adjust tab's, not the chain's.
+        if package.id() == ADJUST_ID {
+            continue;
+        }
+        // Every filter has an intensity whether or not it says so: the one
+        // slider a look is expected to have. First, above the look's own.
+        if package.kind() == PackageKind::Filter {
+            knobs.push(AppliedParamData {
+                entry: index as i32,
+                key: concat_effects::catalogue::INTENSITY.into(),
+                label: "Intensity".into(),
+                min: 0.0,
+                max: 100.0,
+                step: 1.0,
+                default_value: 100.0,
+                value: entry
+                    .params
+                    .get(concat_effects::catalogue::INTENSITY)
+                    .copied()
+                    .unwrap_or(100.0) as f32,
+                fmt: ParamFormat::Percent,
+            });
+        }
+        for param in &package.manifest.params {
+            let step = if param.step > 0.0 {
+                param.step
+            } else {
+                (param.max - param.min) / 200.0
+            };
+            knobs.push(AppliedParamData {
+                entry: index as i32,
+                key: param.key.as_str().into(),
+                label: param.label.as_str().into(),
+                min: param.min as f32,
+                max: param.max as f32,
+                step: step as f32,
+                default_value: param.default as f32,
+                value: entry
+                    .params
+                    .get(&param.key)
+                    .copied()
+                    .unwrap_or(param.default) as f32,
+                fmt: format_of(&param.unit),
+            });
+        }
+    }
+    (rows, knobs)
+}
+
 fn label_of(id: &str) -> String {
     id.split(['-', '_'])
         .map(|word| {
@@ -542,6 +909,10 @@ impl Studio {
             workspace: (0.0, 0.0),
             divider_press: None,
             gesture: Gesture::None,
+            stage_guides: Vec::new(),
+            inspector_jump: (0, "", ""),
+            last_commit: None,
+            title_blocks: HashMap::new(),
             drop: None,
             host,
         };
@@ -637,6 +1008,7 @@ impl Studio {
                     .map(|clip| match clip.kind {
                         model::ClipKind::Video | model::ClipKind::Image => LANE_LARGE,
                         model::ClipKind::Audio | model::ClipKind::Text => LANE_MEDIUM,
+                        model::ClipKind::Layer => LANE_SMALL,
                     })
                     .fold(0.0_f32, f32::max);
                 if tallest > 0.0 { tallest } else { LANE_MEDIUM }
@@ -699,6 +1071,9 @@ impl Studio {
     /// because the session's project is the truth again.
     pub fn apply(&mut self, command: Command) -> Option<String> {
         self.echo = None;
+        // Anything but an inspector commit ends the coalescing window; the
+        // commit path sets `last_commit` again right after calling here.
+        self.last_commit = None;
         let session = self.session.as_mut()?;
         match session.apply(command) {
             Ok(view) => {
@@ -813,17 +1188,20 @@ impl Studio {
                         || (clip.kind == concat_export::ClipKind::Video
                             && clip.has_audio.unwrap_or(true)))
             })
-            .map(|clip| ClipSpec {
-                path: clip.path.clone(),
-                start: clip.start,
-                duration: clip.duration,
-                source_start: clip.source_start,
-                volume: clip.volume as f32,
-                fade_in: clip.fade_in,
-                fade_out: clip.fade_out,
-                speed: clip.speed,
-                preserve_pitch: clip.preserve_pitch,
-                chain: clip.filter_chain.clone(),
+            // Through the exporter's own cut into pieces, so a curve or a
+            // reverse sounds in the window as it will in the file.
+            .flat_map(concat_export::audio_pieces)
+            .map(|piece| ClipSpec {
+                path: piece.path.to_string_lossy().into_owned(),
+                start: piece.start,
+                duration: piece.duration,
+                source_start: piece.source_start,
+                volume: piece.volume as f32,
+                fade_in: piece.fade_in,
+                fade_out: piece.fade_out,
+                speed: piece.speed,
+                preserve_pitch: piece.preserve_pitch,
+                chain: piece.filter_chain,
             })
             .collect();
         self.host
@@ -854,7 +1232,16 @@ impl Studio {
         let Some(session) = self.session.as_ref() else {
             return;
         };
+        // The echo when there is one: a picture being dragged on the stage
+        // is drawn where the pointer has it, not where the document last
+        // had it. Same flattening the session does for itself.
+        let mut clips = concat_export::flatten::flatten_timeline(self.project(), None);
         let (width, height) = self.output_size();
+        // Titles, painted to pictures and rejoined; see concat-host's titles.
+        for title in self.host.titles.clips(self.project(), width, height) {
+            self.title_blocks.insert(title.clip_id, title.block);
+            clips.push(title.clip);
+        }
         let scale = match self.quality {
             0 => 1.0,
             1 => 0.5,
@@ -867,7 +1254,6 @@ impl Studio {
             width,
             height,
         };
-        let clips = session.flattened_clips();
         let settings = session.settings().clone();
         let monitor = self.host.monitor.clone();
         self.preview_busy = true;
@@ -1272,6 +1658,16 @@ impl Studio {
                 duration: LAYER_DURATION,
                 row: 0,
             }),
+            // A look dragged from the Filters page: a layer over a span.
+            // The package id rides in `media`, there being no file.
+            "filter" => Some(DropPlan {
+                kind: ClipKind::Filter,
+                label: label.to_owned(),
+                media: id.to_owned(),
+                start: 0.0,
+                duration: LAYER_DURATION,
+                row: 0,
+            }),
             _ => None,
         }
     }
@@ -1309,6 +1705,14 @@ impl Studio {
                 duration: Some(f64::from(plan.duration)),
                 offset_y: None,
             })
+        } else if plan.kind == ClipKind::Filter {
+            self.apply(Command::AddLayerClip {
+                track_id: Some(track_id),
+                start: f64::from(plan.start),
+                duration: Some(f64::from(plan.duration)),
+                effect_id: plan.media.clone(),
+                name: plan.label.clone(),
+            })
         } else {
             self.apply(Command::AddClip {
                 media_id: plan.media.clone(),
@@ -1335,6 +1739,14 @@ impl Studio {
                 style: Some(new_title_style()),
                 duration: Some(f64::from(plan.duration)),
                 offset_y: None,
+            })
+        } else if plan.kind == ClipKind::Filter {
+            self.apply(Command::AddLayerClip {
+                track_id: None,
+                start,
+                duration: Some(f64::from(plan.duration)),
+                effect_id: plan.media.clone(),
+                name: plan.label.clone(),
             })
         } else {
             self.apply(Command::AddClipAtFirstFree {
@@ -1390,6 +1802,24 @@ impl Studio {
             }
         };
         self.apply(Command::UpdateClip { clip_id, patch });
+        // Show it: the applied chain is where the knobs are, and a card
+        // that did something with no visible result reads as a card that
+        // did nothing.
+        let is_look = Catalogue::builtin()
+            .packages()
+            .find(|package| package.answers_to(id))
+            .is_some_and(|package| package.kind() == PackageKind::Filter);
+        self.inspector_jump = (
+            self.inspector_jump.0 + 1,
+            if video { "Effects" } else { "Audio" },
+            if !video {
+                "Sound"
+            } else if is_look {
+                "Filters"
+            } else {
+                "Effects"
+            },
+        );
     }
 
     pub fn apply_transition(&mut self, id: &str) {
@@ -1449,6 +1879,143 @@ impl Studio {
             }
         };
         self.apply(Command::UpdateClip { clip_id, patch });
+    }
+
+    // ── the chains ──
+    //
+    // The picture's chain and the sound's, edited by index from the
+    // inspector's stacks. Adding, removing, reordering and bypassing are
+    // each one command; a knob is a stream and goes through the echo, the
+    // way every other inspector control does.
+
+    /// One edit to the selected clip's chain, as a command. `edit` returns
+    /// false to say it changed nothing.
+    fn chain_edit(&mut self, audio: bool, edit: impl FnOnce(&mut Vec<AppliedFilter>) -> bool) {
+        let Some(clip_id) = self.sole_selection() else {
+            return;
+        };
+        let Some(clip) = self.clip(&clip_id).cloned() else {
+            return;
+        };
+        let mut chain = if audio {
+            clip.filters
+        } else {
+            clip.video_effects
+        };
+        if !edit(&mut chain) {
+            return;
+        }
+        let patch = if audio {
+            ClipPatch {
+                filters: Some(chain),
+                ..ClipPatch::default()
+            }
+        } else {
+            ClipPatch {
+                video_effects: Some(chain),
+                ..ClipPatch::default()
+            }
+        };
+        self.apply(Command::UpdateClip { clip_id, patch });
+    }
+
+    pub fn chain_add(&mut self, audio: bool, id: &str) {
+        self.apply_catalogue(id, !audio);
+    }
+
+    pub fn chain_toggle(&mut self, audio: bool, index: i32) {
+        self.chain_edit(audio, |chain| {
+            let Some(entry) = usize::try_from(index).ok().and_then(|i| chain.get_mut(i)) else {
+                return false;
+            };
+            entry.enabled = !entry.enabled;
+            true
+        });
+    }
+
+    pub fn chain_move(&mut self, audio: bool, index: i32, delta: i32) {
+        self.chain_edit(audio, |chain| {
+            let Ok(from) = usize::try_from(index) else {
+                return false;
+            };
+            let Ok(to) = usize::try_from(index + delta) else {
+                return false;
+            };
+            if from >= chain.len() || to >= chain.len() || from == to {
+                return false;
+            }
+            chain.swap(from, to);
+            true
+        });
+    }
+
+    pub fn chain_remove(&mut self, audio: bool, index: i32) {
+        self.chain_edit(audio, |chain| {
+            let Ok(at) = usize::try_from(index) else {
+                return false;
+            };
+            if at >= chain.len() {
+                return false;
+            }
+            chain.remove(at);
+            true
+        });
+    }
+
+    /// One knob of one link, on the echo. `clip_commit` makes it real.
+    pub fn chain_set_param(&mut self, audio: bool, index: i32, key: &str, value: f32) {
+        let Some(id) = self.sole_selection() else {
+            return;
+        };
+        self.begin_echo();
+        let Some(clip) = self.echo_clip_mut(&id) else {
+            return;
+        };
+        let chain = if audio {
+            &mut clip.filters
+        } else {
+            &mut clip.video_effects
+        };
+        if let Some(entry) = usize::try_from(index).ok().and_then(|i| chain.get_mut(i)) {
+            entry.params.insert(key.to_owned(), f64::from(value));
+        }
+    }
+
+    /// One knob of the colour panel, on the echo. The adjust package joins
+    /// the head of the picture's chain the first time a knob moves, so an
+    /// untouched clip carries nothing.
+    pub fn adjust_set(&mut self, key: &str, value: f32) {
+        let Some(id) = self.sole_selection() else {
+            return;
+        };
+        self.begin_echo();
+        let Some(clip) = self.echo_clip_mut(&id) else {
+            return;
+        };
+        if !clip.kind.is_visual() {
+            return;
+        }
+        let at = match clip
+            .video_effects
+            .iter()
+            .position(|entry| entry.id == ADJUST_ID)
+        {
+            Some(at) => at,
+            None => {
+                clip.video_effects.insert(
+                    0,
+                    AppliedFilter {
+                        id: ADJUST_ID.to_owned(),
+                        params: std::collections::BTreeMap::new(),
+                        enabled: true,
+                    },
+                );
+                0
+            }
+        };
+        clip.video_effects[at]
+            .params
+            .insert(key.to_owned(), f64::from(value));
     }
 
     // ── gestures ──
@@ -1584,7 +2151,12 @@ impl Studio {
                     }
                 }
             }
-            Gesture::None => {}
+            // A stage gesture is the monitor's; the lanes have nothing to
+            // add to it.
+            Gesture::None
+            | Gesture::StageMove { .. }
+            | Gesture::StageScale { .. }
+            | Gesture::StageRotate { .. } => {}
         }
         self.gesture = gesture;
     }
@@ -1641,6 +2213,12 @@ impl Studio {
             Gesture::None => {
                 self.echo = None;
             }
+            // Not a lane gesture: hand it back untouched, echo and all.
+            other @ (Gesture::StageMove { .. }
+            | Gesture::StageScale { .. }
+            | Gesture::StageRotate { .. }) => {
+                self.gesture = other;
+            }
         }
     }
 
@@ -1652,57 +2230,11 @@ impl Studio {
         let Some(id) = self.sole_selection() else {
             return;
         };
-        let playhead = f64::from(self.playhead);
-        let epsilon = 0.5 / f64::from(self.frame_rate().max(1.0));
         self.begin_echo();
         let value = f64::from(value);
         let Some(clip) = self.echo_clip_mut(&id) else {
             return;
         };
-        let transform_field = matches!(
-            field,
-            ClipField::Scale
-                | ClipField::OffsetX
-                | ClipField::OffsetY
-                | ClipField::Rotation
-                | ClipField::Opacity
-        );
-        if transform_field && !clip.transform_keyframes.is_empty() {
-            let local = (playhead - clip.start).clamp(0.0, clip.duration);
-            let visual = clip.transform_at(playhead);
-            let index = clip
-                .transform_keyframes
-                .iter()
-                .position(|keyframe| (keyframe.time - local).abs() <= epsilon);
-            let mut keyframe = index
-                .map(|index| clip.transform_keyframes[index].clone())
-                .unwrap_or(TransformKeyframe {
-                    time: local,
-                    scale: visual.scale,
-                    offset_x: visual.offset_x,
-                    offset_y: visual.offset_y,
-                    rotation: visual.rotation,
-                    opacity: visual.opacity,
-                    easing: CubicBezier::EASE_IN_OUT,
-                });
-            match field {
-                ClipField::Scale => keyframe.scale = value.clamp(0.05, 8.0),
-                ClipField::OffsetX => keyframe.offset_x = value.clamp(-1.0, 1.0),
-                ClipField::OffsetY => keyframe.offset_y = value.clamp(-1.0, 1.0),
-                ClipField::Rotation => keyframe.rotation = value.clamp(-180.0, 180.0),
-                ClipField::Opacity => keyframe.opacity = value.clamp(0.0, 1.0),
-                _ => unreachable!("guarded by transform_field"),
-            }
-            match index {
-                Some(index) => clip.transform_keyframes[index] = keyframe,
-                None => {
-                    clip.transform_keyframes.push(keyframe);
-                    clip.transform_keyframes
-                        .sort_by(|left, right| left.time.total_cmp(&right.time));
-                }
-            }
-            return;
-        }
         let text = clip.text.get_or_insert_with(TextStyle::default);
         match field {
             ClipField::Scale => clip.scale = value.clamp(0.05, 8.0),
@@ -1717,6 +2249,81 @@ impl Studio {
                 clip.speed = speed;
             }
             ClipField::PreservePitch => clip.preserve_pitch = value != 0.0,
+            ClipField::Reverse => clip.reverse = value != 0.0,
+            ClipField::FlipH => clip.flip_h = value != 0.0,
+            ClipField::FlipV => clip.flip_v = value != 0.0,
+            ClipField::Blend => {
+                let mode = concat_core::Blend::ALL
+                    .get(value.max(0.0) as usize)
+                    .copied()
+                    .unwrap_or_default();
+                clip.blend = if mode == concat_core::Blend::Normal {
+                    String::new()
+                } else {
+                    mode.name().to_owned()
+                };
+            }
+            ClipField::CropLeft
+            | ClipField::CropTop
+            | ClipField::CropRight
+            | ClipField::CropBottom => {
+                let mut crop = clip.crop.unwrap_or_default();
+                let edge = match field {
+                    ClipField::CropLeft => &mut crop.left,
+                    ClipField::CropTop => &mut crop.top,
+                    ClipField::CropRight => &mut crop.right,
+                    _ => &mut crop.bottom,
+                };
+                *edge = value.clamp(0.0, 0.9);
+                let crop = crop.tidy();
+                clip.crop = (!crop.is_none()).then_some(crop);
+            }
+            ClipField::AnimIn => set_slot(
+                concat_project::model::AnimationSlot::In,
+                &mut clip.animation_in,
+                value,
+                0.5,
+            ),
+            ClipField::AnimOut => set_slot(
+                concat_project::model::AnimationSlot::Out,
+                &mut clip.animation_out,
+                value,
+                0.5,
+            ),
+            ClipField::AnimCombo => set_slot(
+                concat_project::model::AnimationSlot::Combo,
+                &mut clip.animation_combo,
+                value,
+                clip.duration,
+            ),
+            ClipField::AnimInDuration => {
+                if let Some(set) = clip.animation_in.as_mut() {
+                    set.duration = value.clamp(0.05, 60.0);
+                }
+            }
+            ClipField::AnimOutDuration => {
+                if let Some(set) = clip.animation_out.as_mut() {
+                    set.duration = value.clamp(0.05, 60.0);
+                }
+            }
+            ClipField::SpeedCurve => {
+                // The same arithmetic as the command: the source covered is
+                // held, so the length follows the curve's mean.
+                let curve = if value < 0.0 {
+                    None
+                } else {
+                    concat_project::speed::preset(value as usize)
+                };
+                let covered = clip.duration * clip.speed;
+                let mean = curve
+                    .as_ref()
+                    .map(|points| concat_project::speed::mean_of(points))
+                    .unwrap_or(clip.speed)
+                    .clamp(0.0625, 16.0);
+                clip.speed_curve = curve;
+                clip.speed = mean;
+                clip.duration = (covered / mean).max(f64::from(MIN_DURATION));
+            }
             ClipField::FadeIn => clip.fade_in = value.clamp(0.0, clip.duration / 2.0),
             ClipField::FadeOut => clip.fade_out = value.clamp(0.0, clip.duration / 2.0),
             ClipField::FontSize => text.font_size = value.clamp(0.01, 0.5),
@@ -1739,127 +2346,6 @@ impl Studio {
         if clip.kind != model::ClipKind::Text {
             clip.text = None;
         }
-    }
-
-    /// Adds or removes the complete visual pose at the playhead.
-    pub fn toggle_transform_keyframe(&mut self) {
-        let Some(id) = self.sole_selection() else {
-            return;
-        };
-        let playhead = f64::from(self.playhead);
-        let epsilon = 0.5 / f64::from(self.frame_rate().max(1.0));
-        let Some(clip) = self.clip(&id).cloned() else {
-            return;
-        };
-        if !clip.kind.is_visual() {
-            return;
-        }
-        let local = (playhead - clip.start).clamp(0.0, clip.duration);
-        let mut keyframes = clip.transform_keyframes.clone();
-        if let Some(index) = keyframes
-            .iter()
-            .position(|keyframe| (keyframe.time - local).abs() <= epsilon)
-        {
-            let removed = keyframes.remove(index);
-            if keyframes.is_empty() {
-                self.apply(Command::Batch {
-                    commands: vec![
-                        Command::SetClipTransform {
-                            clip_id: id.clone(),
-                            scale: Some(removed.scale),
-                            offset_x: Some(removed.offset_x),
-                            offset_y: Some(removed.offset_y),
-                            rotation: Some(removed.rotation),
-                        },
-                        Command::UpdateClip {
-                            clip_id: id.clone(),
-                            patch: ClipPatch {
-                                opacity: Some(removed.opacity),
-                                ..ClipPatch::default()
-                            },
-                        },
-                        Command::SetTransformKeyframes {
-                            clip_id: id,
-                            keyframes,
-                        },
-                    ],
-                });
-            } else {
-                self.apply(Command::SetTransformKeyframes {
-                    clip_id: id,
-                    keyframes,
-                });
-            }
-            return;
-        }
-
-        let visual = clip.transform_at(playhead);
-        keyframes.push(TransformKeyframe {
-            time: local,
-            scale: visual.scale,
-            offset_x: visual.offset_x,
-            offset_y: visual.offset_y,
-            rotation: visual.rotation,
-            opacity: visual.opacity,
-            easing: CubicBezier::EASE_IN_OUT,
-        });
-        self.apply(Command::SetTransformKeyframes {
-            clip_id: id,
-            keyframes,
-        });
-    }
-
-    /// Moves the playhead to the previous or next transform keyframe.
-    pub fn seek_transform_keyframe(&mut self, direction: i32) {
-        let Some(clip) = self.sole_selection().and_then(|id| self.clip(&id)).cloned() else {
-            return;
-        };
-        let local = f64::from(self.playhead) - clip.start;
-        let epsilon = 0.5 / f64::from(self.frame_rate().max(1.0));
-        let target = if direction < 0 {
-            clip.transform_keyframes
-                .iter()
-                .rev()
-                .find(|keyframe| keyframe.time < local - epsilon)
-        } else {
-            clip.transform_keyframes
-                .iter()
-                .find(|keyframe| keyframe.time > local + epsilon)
-        };
-        if let Some(target) = target {
-            self.pause();
-            self.seek((clip.start + target.time) as f32);
-        }
-    }
-
-    /// Updates the outgoing curve of the keyframe at, or immediately before,
-    /// the playhead. `clip_commit` turns a drag into one undo entry.
-    pub fn set_transform_keyframe_easing(&mut self, x1: f32, y1: f32, x2: f32, y2: f32) {
-        let Some(id) = self.sole_selection() else {
-            return;
-        };
-        let playhead = f64::from(self.playhead);
-        self.begin_echo();
-        let Some(clip) = self.echo_clip_mut(&id) else {
-            return;
-        };
-        if clip.transform_keyframes.len() < 2 {
-            return;
-        }
-        let local = playhead - clip.start;
-        let index = clip
-            .transform_keyframes
-            .iter()
-            .rposition(|keyframe| keyframe.time <= local)
-            .unwrap_or(0)
-            .min(clip.transform_keyframes.len() - 2);
-        clip.transform_keyframes[index].easing = CubicBezier {
-            x1: f64::from(x1),
-            y1: f64::from(y1),
-            x2: f64::from(x2),
-            y2: f64::from(y2),
-        }
-        .sanitised();
     }
 
     pub fn clip_set_text(&mut self, field: ClipTextField, value: &str) {
@@ -1930,12 +2416,6 @@ impl Studio {
             return;
         };
         let mut commands = Vec::new();
-        if after.transform_keyframes != before.transform_keyframes {
-            commands.push(Command::SetTransformKeyframes {
-                clip_id: id.clone(),
-                keyframes: after.transform_keyframes.clone(),
-            });
-        }
         if after.scale != before.scale
             || after.offset_x != before.offset_x
             || after.offset_y != before.offset_y
@@ -1949,7 +2429,12 @@ impl Studio {
                 rotation: Some(after.rotation),
             });
         }
-        if after.speed != before.speed {
+        if after.speed_curve != before.speed_curve {
+            commands.push(Command::SetClipSpeedCurve {
+                clip_id: id.clone(),
+                curve: after.speed_curve.clone(),
+            });
+        } else if after.speed != before.speed {
             commands.push(Command::SetClipSpeed {
                 clip_id: id.clone(),
                 speed: after.speed,
@@ -1974,15 +2459,518 @@ impl Studio {
         if after.preserve_pitch != before.preserve_pitch {
             patch.preserve_pitch = Some(after.preserve_pitch);
         }
+        if after.reverse != before.reverse {
+            patch.reverse = Some(after.reverse);
+        }
+        if after.flip_h != before.flip_h {
+            patch.flip_h = Some(after.flip_h);
+        }
+        if after.flip_v != before.flip_v {
+            patch.flip_v = Some(after.flip_v);
+        }
+        if after.blend != before.blend {
+            patch.blend = Some(if after.blend.is_empty() {
+                "normal".to_owned()
+            } else {
+                after.blend.clone()
+            });
+        }
+        if after.crop != before.crop {
+            patch.crop = Some(after.crop);
+        }
+        for (slot, now, was) in [
+            (
+                concat_project::model::AnimationSlot::In,
+                &after.animation_in,
+                &before.animation_in,
+            ),
+            (
+                concat_project::model::AnimationSlot::Out,
+                &after.animation_out,
+                &before.animation_out,
+            ),
+            (
+                concat_project::model::AnimationSlot::Combo,
+                &after.animation_combo,
+                &before.animation_combo,
+            ),
+        ] {
+            if now != was {
+                commands.push(Command::SetClipAnimation {
+                    clip_id: id.clone(),
+                    slot,
+                    animation: now.clone(),
+                });
+            }
+        }
         if after.text != before.text {
             patch.text = Some(after.text.clone());
+        }
+        if after.video_effects != before.video_effects {
+            patch.video_effects = Some(after.video_effects.clone());
+        }
+        if after.filters != before.filters {
+            patch.filters = Some(after.filters.clone());
         }
         if patch != ClipPatch::default() {
             commands.push(Command::UpdateClip { clip_id: id, patch });
         }
         self.echo = None;
+        if commands.is_empty() {
+            return;
+        }
+        // One undo step per gesture, not per pointer move: a commit that
+        // changes the same things on the same clip as the last, within a
+        // moment of it, takes the last one's place. Every command here sets
+        // absolute values, so undoing the previous and applying this lands
+        // where this alone would have.
+        let key = format!("{}:{}", after.id, commit_key(&commands));
+        let now = std::time::Instant::now();
+        let coalesce = self
+            .last_commit
+            .as_ref()
+            .is_some_and(|(last, at)| *last == key && now.duration_since(*at).as_millis() < 900);
+        if coalesce
+            && let Some(session) = self.session.as_mut()
+            && session.can_undo()
+        {
+            session.undo();
+        }
         match commands.len() {
-            0 => {}
+            1 => {
+                self.apply(commands.remove(0));
+            }
+            _ => {
+                self.apply(Command::Batch { commands });
+            }
+        }
+        self.last_commit = Some((key, now));
+    }
+
+    // ── the stage ──
+    //
+    // The monitor as a place to edit, not only to look: the pictures under
+    // the playhead can be grabbed, slid, scaled and turned where they are
+    // drawn. The same echo-then-command shape as the lanes and the
+    // inspector, with one difference: the echo is composited too, so the
+    // frame follows the pointer and not only the outline does.
+
+    /// Where `clip` lands in the output frame. The compositor's own rule —
+    /// contain-fitted, then the transform — restated in fractions.
+    pub fn footprint(&self, clip: &Clip) -> Footprint {
+        let (width, height) = self.output_size();
+        let (width, height) = (f64::from(width.max(1)), f64::from(height.max(1)));
+        let painted = (clip.kind == model::ClipKind::Text)
+            .then(|| self.title_blocks.get(&clip.id).copied())
+            .flatten();
+        let (w, h) = if let Some((bw, bh)) = painted {
+            // The painter said how big the block came out.
+            (
+                f64::from(bw) * clip.scale / width,
+                f64::from(bh) * clip.scale / height,
+            )
+        } else if clip.kind == model::ClipKind::Text {
+            // Not painted yet: a reading of the style until it is. An em is
+            // `font_size` of the frame's height, a glyph runs about six
+            // tenths of one, and a little air is left around the block the
+            // way the plate would.
+            let text = clip.text.clone().unwrap_or_default();
+            let lines: Vec<&str> = text.content.lines().collect();
+            let rows = lines.len().max(1) as f64;
+            let longest = lines
+                .iter()
+                .map(|line| line.chars().count())
+                .max()
+                .unwrap_or(0)
+                .max(1) as f64;
+            let em = text.font_size.max(0.005) * height;
+            let glyph = 0.6 * em + text.tracking * height;
+            (
+                (longest * glyph + 0.6 * em) * clip.scale / width,
+                (rows * em * text.line_height.max(0.5) + 0.5 * em) * clip.scale / height,
+            )
+        } else {
+            let media = self.project().media_by_id(&clip.media_id);
+            let source = media
+                .and_then(|item| Some((item.width?, item.height?)))
+                .filter(|(w, h)| *w > 0 && *h > 0)
+                .map(|(w, h)| (f64::from(w), f64::from(h)))
+                // What is left after the crop is what gets fitted.
+                .map(|(w, h)| match clip.crop {
+                    Some(crop) => (
+                        w * (1.0 - crop.left - crop.right).max(0.1),
+                        h * (1.0 - crop.top - crop.bottom).max(0.1),
+                    ),
+                    None => (w, h),
+                });
+            match source {
+                Some((sw, sh)) => {
+                    let fit = (width / sw).min(height / sh);
+                    (
+                        sw * fit * clip.scale / width,
+                        sh * fit * clip.scale / height,
+                    )
+                }
+                // Dimensions never learnt: the frame's own shape, which is
+                // what the compositor falls back to as well.
+                None => (clip.scale, clip.scale),
+            }
+        };
+        // The placement at the playhead: the clip's own, moved by its
+        // animation, so the box follows a slide or a spin.
+        let base = concat_core::timeline::Transform {
+            scale: clip.scale,
+            offset_x: clip.offset_x,
+            offset_y: clip.offset_y,
+            rotation: clip.rotation,
+        };
+        let placed = match concat_project::animation::animation_of(clip) {
+            Some(animation) if clip.duration > 0.0 => {
+                let x = ((f64::from(self.playhead) - clip.start) / clip.duration).clamp(0.0, 1.0);
+                animation.transform_at(base, x)
+            }
+            _ => base,
+        };
+        let factor = placed.scale / clip.scale.max(1e-6);
+        Footprint {
+            cx: 0.5 + placed.offset_x,
+            cy: 0.5 + placed.offset_y,
+            w: w * factor,
+            h: h * factor,
+            rotation: placed.rotation,
+        }
+    }
+
+    /// The pictures under the playhead on lanes that are showing, bottom of
+    /// the stack first — the order the compositor lays them down, and the
+    /// order the overlay draws them in.
+    fn stage_clips(&self) -> Vec<&Clip> {
+        let timeline = self.timeline();
+        let playhead = f64::from(self.playhead);
+        let showing: HashSet<&str> = timeline
+            .tracks
+            .iter()
+            .filter(|track| track.visible)
+            .map(|track| track.id.as_str())
+            .collect();
+        let mut clips: Vec<&Clip> = timeline
+            .clips
+            .iter()
+            .filter(|clip| {
+                (clip.kind.is_visual() || clip.kind == model::ClipKind::Text)
+                    && showing.contains(clip.track_id.as_str())
+                    && clip.start <= playhead
+                    && playhead < clip.start + clip.duration
+            })
+            .collect();
+        // Rows count from the top; the bottom of the stack is the highest.
+        clips.sort_by_key(|clip| std::cmp::Reverse(self.row_of(&clip.track_id)));
+        clips
+    }
+
+    pub fn stage_items(&self) -> Vec<StageItemData> {
+        self.stage_clips()
+            .into_iter()
+            .map(|clip| {
+                let footprint = self.footprint(clip);
+                StageItemData {
+                    id: clip.id.as_str().into(),
+                    kind: kind_of(clip),
+                    selected: self.selection.iter().any(|id| id == &clip.id),
+                    cx: footprint.cx as f32,
+                    cy: footprint.cy as f32,
+                    w: footprint.w as f32,
+                    h: footprint.h as f32,
+                    rotation: footprint.rotation as f32,
+                    scale: clip.scale as f32,
+                }
+            })
+            .collect()
+    }
+
+    /// The topmost picture under a frame point, skipping locked lanes the
+    /// way a press on the lanes does.
+    fn stage_hit(&self, x: f64, y: f64) -> Option<String> {
+        let frame = self.output_size();
+        self.stage_clips()
+            .into_iter()
+            .rev()
+            .filter(|clip| !self.locked(&clip.track_id))
+            .find(|clip| self.footprint(clip).contains(x, y, frame))
+            .map(|clip| clip.id.clone())
+    }
+
+    /// A press on the stage floor: resolve the selection, then arm a move
+    /// of everything selected that is under the playhead. Empty stage
+    /// clears the selection, as an empty lane does.
+    pub fn stage_pressed(&mut self, x: f32, y: f32, additive: bool) {
+        let (x, y) = (f64::from(x), f64::from(y));
+        let Some(id) = self.stage_hit(x, y) else {
+            if !additive {
+                self.selection.clear();
+            }
+            self.gesture = Gesture::None;
+            return;
+        };
+        let already = self.selection.iter().any(|held| held == &id);
+        if additive {
+            if already {
+                self.selection.retain(|held| held != &id);
+            } else {
+                self.selection.push(id.clone());
+            }
+        } else if !already {
+            self.selection = vec![id.clone()];
+        }
+        if !self.selection.iter().any(|held| held == &id) {
+            self.gesture = Gesture::None;
+            return;
+        }
+        let origins: Vec<StageOrigin> = self
+            .stage_clips()
+            .into_iter()
+            .filter(|clip| {
+                self.selection.iter().any(|held| held == &clip.id) && !self.locked(&clip.track_id)
+            })
+            .map(|clip| StageOrigin {
+                clip: clip.id.clone(),
+                offset_x: clip.offset_x,
+                offset_y: clip.offset_y,
+            })
+            .collect();
+        self.begin_echo();
+        self.stage_guides.clear();
+        self.gesture = Gesture::StageMove {
+            primary: id,
+            origins,
+            from: (x, y),
+        };
+    }
+
+    /// Where a picture's bounds pull to on one axis. Every candidate is a
+    /// feature of the moving picture — an edge or the centre — against a
+    /// target — the frame's edges and centre, and every other picture's —
+    /// and the nearest pair inside `pull` wins. Returns the shift that lands
+    /// it and the target's position, for the guide.
+    fn stage_snap(features: [f64; 3], targets: &[f64], pull: f64) -> Option<(f64, f64)> {
+        let mut best: Option<(f64, f64)> = None;
+        for feature in features {
+            for &target in targets {
+                let shift = target - feature;
+                if shift.abs() < pull && best.is_none_or(|(held, _)| shift.abs() < held.abs()) {
+                    best = Some((shift, target));
+                }
+            }
+        }
+        best
+    }
+
+    /// A press on a grip of `id`'s box: a corner scales, the handle above
+    /// turns. Both work about the picture's centre, in frame pixels.
+    pub fn stage_grip_pressed(&mut self, id: &str, grip: i32, x: f32, y: f32) {
+        let Some(clip) = self.clip(id).cloned() else {
+            return;
+        };
+        if self.locked(&clip.track_id) {
+            return;
+        }
+        let footprint = self.footprint(&clip);
+        let (width, height) = self.output_size();
+        let centre = (
+            footprint.cx * f64::from(width),
+            footprint.cy * f64::from(height),
+        );
+        let dx = f64::from(x) * f64::from(width) - centre.0;
+        let dy = f64::from(y) * f64::from(height) - centre.1;
+        self.begin_echo();
+        self.gesture = if grip == 4 {
+            Gesture::StageRotate {
+                clip: id.to_owned(),
+                rotation: clip.rotation,
+                centre,
+                from: dy.atan2(dx),
+            }
+        } else {
+            Gesture::StageScale {
+                clip: id.to_owned(),
+                scale: clip.scale,
+                centre,
+                from: dx.hypot(dy).max(1.0),
+            }
+        };
+    }
+
+    /// The pointer moved with a stage gesture live: the echo follows, and
+    /// the monitor composites it.
+    pub fn stage_dragged(&mut self, x: f32, y: f32, snap: bool) {
+        let (x, y) = (f64::from(x), f64::from(y));
+        let (width, height) = self.output_size();
+        let gesture = std::mem::replace(&mut self.gesture, Gesture::None);
+        match &gesture {
+            Gesture::StageMove {
+                primary,
+                origins,
+                from,
+            } => {
+                let (mut dx, mut dy) = (x - from.0, y - from.1);
+                if snap {
+                    // Shift holds the axis the drag is mostly along, measured
+                    // in pixels so a tall frame does not bias it.
+                    if (dx * f64::from(width)).abs() >= (dy * f64::from(height)).abs() {
+                        dy = 0.0;
+                    } else {
+                        dx = 0.0;
+                    }
+                }
+                self.stage_guides.clear();
+                if self.snap {
+                    // The same pull on both axes, in frame pixels: a
+                    // hundredth of the long side, which is about eight
+                    // pixels on a stage of the size a laptop gives it.
+                    let pull = 0.01 * f64::from(width.max(height));
+                    let frame = (width, height);
+                    let moving = origins
+                        .iter()
+                        .find(|origin| &origin.clip == primary)
+                        .and_then(|origin| self.clip(&origin.clip).map(|clip| (origin, clip)));
+                    if let Some((origin, clip)) = moving {
+                        let (hw, hh) = self.footprint(clip).half_bounds(frame);
+                        let cx = 0.5 + origin.offset_x + dx;
+                        let cy = 0.5 + origin.offset_y + dy;
+                        // The frame's own lines, then every picture that is
+                        // staying put.
+                        let mut xs = vec![0.0, 0.5, 1.0];
+                        let mut ys = vec![0.0, 0.5, 1.0];
+                        for other in self.stage_clips() {
+                            if origins.iter().any(|origin| origin.clip == other.id) {
+                                continue;
+                            }
+                            let footprint = self.footprint(other);
+                            let (ow, oh) = footprint.half_bounds(frame);
+                            xs.extend([footprint.cx - ow, footprint.cx, footprint.cx + ow]);
+                            ys.extend([footprint.cy - oh, footprint.cy, footprint.cy + oh]);
+                        }
+                        if let Some((shift, at)) =
+                            Self::stage_snap([cx - hw, cx, cx + hw], &xs, pull / f64::from(width))
+                        {
+                            dx += shift;
+                            self.stage_guides.push(StageGuideData {
+                                vertical: true,
+                                at: at as f32,
+                            });
+                        }
+                        if let Some((shift, at)) =
+                            Self::stage_snap([cy - hh, cy, cy + hh], &ys, pull / f64::from(height))
+                        {
+                            dy += shift;
+                            self.stage_guides.push(StageGuideData {
+                                vertical: false,
+                                at: at as f32,
+                            });
+                        }
+                    }
+                }
+                for origin in origins {
+                    if let Some(clip) = self.echo_clip_mut(&origin.clip) {
+                        clip.offset_x = (origin.offset_x + dx).clamp(-1.0, 1.0);
+                        clip.offset_y = (origin.offset_y + dy).clamp(-1.0, 1.0);
+                    }
+                }
+            }
+            Gesture::StageScale {
+                clip,
+                scale,
+                centre,
+                from,
+            } => {
+                let dx = x * f64::from(width) - centre.0;
+                let dy = y * f64::from(height) - centre.1;
+                let mut next = scale * dx.hypot(dy) / from;
+                if snap {
+                    next = (next * 20.0).round() / 20.0;
+                }
+                if let Some(clip) = self.echo_clip_mut(clip) {
+                    clip.scale = next.clamp(0.05, 8.0);
+                }
+            }
+            Gesture::StageRotate {
+                clip,
+                rotation,
+                centre,
+                from,
+            } => {
+                let dx = x * f64::from(width) - centre.0;
+                let dy = y * f64::from(height) - centre.1;
+                let swept = (dy.atan2(dx) - from).to_degrees();
+                let mut next = rotation + swept;
+                if snap {
+                    next = (next / 15.0).round() * 15.0;
+                }
+                // Kept in the inspector's range, wrapping rather than
+                // stopping: a turn through the bottom carries on.
+                next = (next + 180.0).rem_euclid(360.0) - 180.0;
+                if let Some(clip) = self.echo_clip_mut(clip) {
+                    clip.rotation = next;
+                }
+            }
+            _ => {
+                self.gesture = gesture;
+                return;
+            }
+        }
+        self.gesture = gesture;
+        self.request_preview();
+    }
+
+    /// The stage gesture is over: whatever the echo moved becomes one
+    /// transform command per picture, batched when there are several.
+    pub fn stage_released(&mut self) {
+        self.stage_guides.clear();
+        let gesture = std::mem::replace(&mut self.gesture, Gesture::None);
+        let touched: Vec<String> = match gesture {
+            Gesture::StageMove { origins, .. } => {
+                origins.into_iter().map(|origin| origin.clip).collect()
+            }
+            Gesture::StageScale { clip, .. } | Gesture::StageRotate { clip, .. } => vec![clip],
+            other => {
+                // Not ours to end; a lane gesture is still live.
+                self.gesture = other;
+                return;
+            }
+        };
+        let Some(echo) = self.echo.take() else {
+            return;
+        };
+        let mut commands = Vec::new();
+        for id in touched {
+            let (Some(after), Some(before)) = (
+                echo.active().clip(&id),
+                self.session
+                    .as_ref()
+                    .and_then(|session| session.project().active().clip(&id)),
+            ) else {
+                continue;
+            };
+            if after.scale != before.scale
+                || after.offset_x != before.offset_x
+                || after.offset_y != before.offset_y
+                || after.rotation != before.rotation
+            {
+                commands.push(Command::SetClipTransform {
+                    clip_id: id,
+                    scale: Some(after.scale),
+                    offset_x: Some(after.offset_x),
+                    offset_y: Some(after.offset_y),
+                    rotation: Some(after.rotation),
+                });
+            }
+        }
+        match commands.len() {
+            0 => {
+                // A click that moved nothing: the echo is gone and the
+                // monitor goes back to the document.
+                self.request_preview();
+            }
             1 => {
                 self.apply(commands.remove(0));
             }
@@ -2291,7 +3279,15 @@ impl Studio {
             crf: EXPORT_CRF[self.export.quality.min(2)],
             preset: "medium".into(),
         };
-        let mut request = export::request(session, &spec, Vec::new());
+        let (frame_w, frame_h) = self.output_size();
+        let titles = self
+            .host
+            .titles
+            .clips(session.project(), frame_w, frame_h)
+            .into_iter()
+            .map(|title| title.clip)
+            .collect();
+        let mut request = export::request(session, &spec, titles);
         let (width, height) = EXPORT_SIZES[self.export.resolution.min(3)];
         let (num, den) = EXPORT_RATES[self.export.rate.min(2)];
         request.width = width;
@@ -2831,7 +3827,7 @@ impl Studio {
             .clips
             .iter()
             .filter(|clip| {
-                clip.kind != model::ClipKind::Audio
+                (clip.kind.is_visual() || clip.kind == model::ClipKind::Text)
                     && clip.start <= playhead
                     && playhead < clip.start + clip.duration
             })
@@ -2846,6 +3842,8 @@ impl Studio {
         editor.set_preview_duration(self.duration());
         editor.set_playing(self.playing);
         editor.set_preview_frame(self.preview.clone());
+        sync(&models.stage, self.stage_items());
+        sync(&models.guides, self.stage_guides.clone());
 
         editor.set_drop(match &self.drop {
             Some(plan) => DropData {
@@ -2860,6 +3858,9 @@ impl Studio {
         });
 
         editor.set_selected_clip(self.selected());
+        editor.set_inspector_jump_token(self.inspector_jump.0);
+        editor.set_inspector_jump_tab(self.inspector_jump.1.into());
+        editor.set_inspector_jump_section(self.inspector_jump.2.into());
         let active = project
             .timelines
             .iter()
@@ -2905,6 +3906,29 @@ impl Studio {
         };
         sync(&models.video_effects, video);
         sync(&models.audio_effects, audio);
+
+        // The same chains as the inspector's stacks see them: a row per
+        // link and a row per knob, from the catalogue's manifests.
+        let (visual, visual_params, sound, sound_params) =
+            match self.sole_selection().and_then(|id| self.clip(&id)) {
+                Some(clip) => {
+                    let (visual, visual_params) = chain_rows(&clip.video_effects);
+                    let (sound, sound_params) = chain_rows(&clip.filters);
+                    (visual, visual_params, sound, sound_params)
+                }
+                None => (Vec::new(), Vec::new(), Vec::new(), Vec::new()),
+            };
+        sync(&models.applied_visual, visual);
+        sync(&models.visual_params, visual_params);
+        sync(&models.applied_audio, sound);
+        sync(&models.audio_params, sound_params);
+        sync(
+            &models.adjust_params,
+            match self.sole_selection().and_then(|id| self.clip(&id)) {
+                Some(clip) if clip.kind.is_visual() => adjust_rows(&clip.video_effects),
+                _ => Vec::new(),
+            },
+        );
     }
 
     /// The selection, flattened for the inspector: exactly one clip or
@@ -2917,62 +3941,56 @@ impl Studio {
         let fill = colour_of(&text.color);
         let stroke = colour_of(&text.stroke_color);
         let plate = colour_of(&text.background);
-        let playhead = f64::from(self.playhead);
-        let local = playhead - clip.start;
-        let visual = clip.transform_at(playhead);
-        let epsilon = 0.5 / f64::from(self.frame_rate().max(1.0));
-        let keyframe_here = clip
-            .transform_keyframes
-            .iter()
-            .any(|keyframe| (keyframe.time - local).abs() <= epsilon);
-        let previous_keyframe = clip
-            .transform_keyframes
-            .iter()
-            .rev()
-            .find(|keyframe| keyframe.time < local - epsilon)
-            .map_or(-1.0, |keyframe| clip.start + keyframe.time);
-        let next_keyframe = clip
-            .transform_keyframes
-            .iter()
-            .find(|keyframe| keyframe.time > local + epsilon)
-            .map_or(-1.0, |keyframe| clip.start + keyframe.time);
-        let curve_index = if clip.transform_keyframes.len() >= 2 {
-            Some(
-                clip.transform_keyframes
-                    .iter()
-                    .rposition(|keyframe| keyframe.time <= local)
-                    .unwrap_or(0)
-                    .min(clip.transform_keyframes.len() - 2),
-            )
-        } else {
-            None
-        };
-        let curve = curve_index
-            .map(|index| clip.transform_keyframes[index].easing)
-            .unwrap_or(CubicBezier::EASE_IN_OUT);
         SelectedClipData {
             present: true,
             id: clip.id.as_str().into(),
             name: clip.name.as_str().into(),
             kind: kind_of(clip),
             duration: clip.duration as f32,
-            scale: visual.scale as f32,
-            offset_x: visual.offset_x as f32,
-            offset_y: visual.offset_y as f32,
-            rotation: visual.rotation as f32,
-            opacity: visual.opacity as f32,
-            transform_keyframe_count: clip.transform_keyframes.len() as i32,
-            transform_keyframe_here: keyframe_here,
-            previous_transform_keyframe: previous_keyframe as f32,
-            next_transform_keyframe: next_keyframe as f32,
-            transform_curve_editable: curve_index.is_some(),
-            transform_curve_x1: curve.x1 as f32,
-            transform_curve_y1: curve.y1 as f32,
-            transform_curve_x2: curve.x2 as f32,
-            transform_curve_y2: curve.y2 as f32,
+            scale: clip.scale as f32,
+            offset_x: clip.offset_x as f32,
+            offset_y: clip.offset_y as f32,
+            rotation: clip.rotation as f32,
+            opacity: clip.opacity as f32,
             volume: clip.volume as f32,
             speed: clip.speed as f32,
             preserve_pitch: clip.preserve_pitch,
+            speed_curve: match &clip.speed_curve {
+                None => -1,
+                Some(points) => concat_project::speed::preset_of(points)
+                    .map(|index| index as i32)
+                    .unwrap_or(concat_project::speed::PRESETS.len() as i32),
+            },
+            reverse: clip.reverse,
+            anim_in: slot_index(concat_project::model::AnimationSlot::In, &clip.animation_in),
+            anim_out: slot_index(
+                concat_project::model::AnimationSlot::Out,
+                &clip.animation_out,
+            ),
+            anim_combo: slot_index(
+                concat_project::model::AnimationSlot::Combo,
+                &clip.animation_combo,
+            ),
+            anim_in_duration: clip
+                .animation_in
+                .as_ref()
+                .map(|set| set.duration as f32)
+                .unwrap_or(0.5),
+            anim_out_duration: clip
+                .animation_out
+                .as_ref()
+                .map(|set| set.duration as f32)
+                .unwrap_or(0.5),
+            flip_h: clip.flip_h,
+            flip_v: clip.flip_v,
+            blend: concat_core::Blend::ALL
+                .iter()
+                .position(|mode| *mode == concat_core::Blend::parse(&clip.blend))
+                .unwrap_or(0) as i32,
+            crop_left: clip.crop.map(|crop| crop.left as f32).unwrap_or(0.0),
+            crop_top: clip.crop.map(|crop| crop.top as f32).unwrap_or(0.0),
+            crop_right: clip.crop.map(|crop| crop.right as f32).unwrap_or(0.0),
+            crop_bottom: clip.crop.map(|crop| crop.bottom as f32).unwrap_or(0.0),
             fade_in: clip.fade_in as f32,
             fade_out: clip.fade_out as f32,
             content: text.content.as_str().into(),
@@ -2999,6 +4017,18 @@ impl Studio {
     /// The menus, the dialogs, the bin and the engine lists.
     pub fn publish_chrome(&self, app: &App, models: &Models) {
         let editor = app.global::<Editor>();
+
+        // The catalogue's shelves. Built in, so they never change after
+        // start; `sync` makes republishing them a no-op.
+        let (groups, entries) = shelves(PackageKind::Effect);
+        sync(&models.effect_groups, groups);
+        sync(&models.catalogue_effects, entries);
+        let (groups, entries) = shelves(PackageKind::Filter);
+        sync(&models.filter_groups, groups);
+        sync(&models.catalogue_filters, entries);
+        let (groups, entries) = shelves(PackageKind::Audio);
+        sync(&models.audio_groups, groups);
+        sync(&models.catalogue_audio, entries);
 
         app.set_on_start(self.on_start);
         app.set_project_name(self.project_name.as_str().into());
@@ -3596,5 +4626,103 @@ impl Studio {
             self.schedule_autosave();
             self.request_preview();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Footprint, Studio};
+
+    const FRAME: (u32, u32) = (1920, 1080);
+
+    /// A quarter turn swaps the bounds' pixel extents, which in fractions
+    /// of a 16:9 frame is not a swap of the numbers.
+    #[test]
+    fn half_bounds_follow_the_turn() {
+        let flat = Footprint {
+            cx: 0.5,
+            cy: 0.5,
+            w: 0.5,
+            h: 0.5,
+            rotation: 0.0,
+        };
+        let (hw, hh) = flat.half_bounds(FRAME);
+        assert!((hw - 0.25).abs() < 1e-9 && (hh - 0.25).abs() < 1e-9);
+        let turned = Footprint {
+            rotation: 90.0,
+            ..flat
+        };
+        let (hw, hh) = turned.half_bounds(FRAME);
+        // 540px tall becomes 540px wide: 270px each side of 1920.
+        assert!((hw - 270.0 / 1920.0).abs() < 1e-9);
+        assert!((hh - 480.0 / 1080.0).abs() < 1e-9);
+    }
+
+    /// The nearest pair inside the pull wins, and nothing outside it pulls.
+    #[test]
+    fn snap_picks_the_nearest_target_inside_the_pull() {
+        // Centre 0.5 sits just off the frame's centre; the left edge at
+        // 0.2 is nearer to another picture's edge at 0.21.
+        let features = [0.2, 0.5, 0.8];
+        let hit = Studio::stage_snap(features, &[0.0, 0.505, 1.0, 0.21], 0.02).unwrap();
+        assert!((hit.0 - 0.005).abs() < 1e-9 && (hit.1 - 0.505).abs() < 1e-9);
+        assert!(Studio::stage_snap(features, &[0.3, 0.6], 0.02).is_none());
+    }
+
+    /// A fitted 16:9 picture at rest covers the frame exactly.
+    #[test]
+    fn footprint_contains_an_unturned_box() {
+        let box_ = Footprint {
+            cx: 0.5,
+            cy: 0.5,
+            w: 0.5,
+            h: 0.5,
+            rotation: 0.0,
+        };
+        assert!(box_.contains(0.5, 0.5, FRAME));
+        assert!(box_.contains(0.26, 0.26, FRAME));
+        assert!(!box_.contains(0.24, 0.5, FRAME));
+        assert!(!box_.contains(0.5, 0.76, FRAME));
+    }
+
+    /// Turned a quarter, a wide box stands tall: a point that was inside
+    /// along the width is outside, and one above the old top edge is inside.
+    /// The test is in pixels, which is where the turn happens — a fraction
+    /// across is not the same distance as a fraction down.
+    #[test]
+    fn footprint_turns_in_pixels() {
+        let box_ = Footprint {
+            cx: 0.5,
+            cy: 0.5,
+            w: 0.5,
+            h: 0.2,
+            rotation: 90.0,
+        };
+        // Half the width is 480px, half the height 108px. After the turn
+        // the box reaches 480px up and down and 108px either side.
+        assert!(box_.contains(0.5, 0.5 + 400.0 / 1080.0, FRAME));
+        assert!(!box_.contains(0.5, 0.5 + 500.0 / 1080.0, FRAME));
+        assert!(box_.contains(0.5 + 100.0 / 1920.0, 0.5, FRAME));
+        assert!(!box_.contains(0.5 + 120.0 / 1920.0, 0.5, FRAME));
+    }
+
+    /// The turn is clockwise, as the compositor's is. The unturned top-right
+    /// corner sits at (480, -270) from the centre; turned thirty degrees
+    /// clockwise in y-down pixels it lands at about (551, +6) - it has swung
+    /// *down* past the centre line. A point just inside that corner is in
+    /// the box, and its mirror above the line is not; turned the other way
+    /// both answers would flip.
+    #[test]
+    fn footprint_turns_clockwise() {
+        let box_ = Footprint {
+            cx: 0.5,
+            cy: 0.5,
+            w: 0.5,
+            h: 0.5,
+            rotation: 30.0,
+        };
+        let x = 0.5 + 540.0 / 1920.0;
+        assert!(box_.contains(x, 0.5 + 6.0 / 1080.0, FRAME));
+        assert!(!box_.contains(x, 0.5 - 6.0 / 1080.0, FRAME));
     }
 }

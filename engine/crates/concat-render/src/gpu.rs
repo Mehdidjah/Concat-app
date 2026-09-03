@@ -29,6 +29,8 @@
 use std::collections::HashMap;
 
 use concat_core::frame::Frame;
+use concat_core::shader::ShaderPass;
+use concat_core::timeline::Blend;
 
 use crate::compositor::{Compositor, CpuCompositor, Layer};
 
@@ -93,6 +95,15 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 }
 "#;
 
+/// One package's shader, compiled once and kept: its pipeline, and the two
+/// uniform buffers every pass through it rewrites.
+struct CompiledShader {
+    pipeline: wgpu::RenderPipeline,
+    frame: wgpu::Buffer,
+    params: wgpu::Buffer,
+    bind_group: wgpu::BindGroup,
+}
+
 /// A cached layer texture and its bind group, reusable for any layer of the
 /// same size.
 struct PooledTexture {
@@ -126,8 +137,13 @@ const PRESENT_RING: usize = 3;
 pub struct WgpuCompositor {
     device: wgpu::Device,
     queue: wgpu::Queue,
-    pipeline: wgpu::RenderPipeline,
+    /// One pipeline per blend mode, indexed as `Blend::ALL` is.
+    pipelines: Vec<wgpu::RenderPipeline>,
     bind_layout: wgpu::BindGroupLayout,
+    /// Group 1 of a shader pass: the frame block and the package's params.
+    uniform_layout: wgpu::BindGroupLayout,
+    /// Compiled passes by their key; see `ShaderPass::key`.
+    shaders: HashMap<String, CompiledShader>,
     sampler: wgpu::Sampler,
     vertices: wgpu::Buffer,
     vertex_capacity: usize,
@@ -191,6 +207,22 @@ impl WgpuCompositor {
             ],
         });
 
+        // What a shader pass binds at group 1: the host's frame block and
+        // the package's own `Params`, both uniforms.
+        let uniform_entry = |binding: u32| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        };
+        let uniform_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("concat pass uniforms"),
+            entries: &[uniform_entry(0), uniform_entry(1)],
+        });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("concat compositor"),
             bind_group_layouts: &[Some(&bind_layout)],
@@ -204,46 +236,79 @@ impl WgpuCompositor {
         };
 
         // ONE / ONE_MINUS_SRC_ALPHA over premultiplied shader output is
-        // source-over. Alpha accumulates the same way; the readback forces the
-        // final frame opaque regardless.
-        let blend = wgpu::BlendState {
-            color: wgpu::BlendComponent {
-                src_factor: wgpu::BlendFactor::One,
-                dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
-                operation: wgpu::BlendOperation::Add,
-            },
-            alpha: wgpu::BlendComponent {
-                src_factor: wgpu::BlendFactor::One,
-                dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
-                operation: wgpu::BlendOperation::Add,
-            },
+        // source-over. The other modes are the fixed-function blends the
+        // CPU reference spells the same way (see `Blend`), one pipeline
+        // each, since a blend state is baked into a pipeline. Alpha always
+        // accumulates as source-over; the readback forces the final frame
+        // opaque regardless.
+        let alpha = wgpu::BlendComponent {
+            src_factor: wgpu::BlendFactor::One,
+            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+            operation: wgpu::BlendOperation::Add,
         };
-
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("concat compositor"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                compilation_options: Default::default(),
-                buffers: &[vertex_layout],
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_main"),
-                compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: wgpu::TextureFormat::Rgba8Unorm,
-                    blend: Some(blend),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
+        let pipelines: Vec<wgpu::RenderPipeline> = Blend::ALL
+            .into_iter()
+            .map(|mode| {
+                use wgpu::{BlendFactor, BlendOperation};
+                let color = match mode {
+                    Blend::Normal => wgpu::BlendComponent {
+                        src_factor: BlendFactor::One,
+                        dst_factor: BlendFactor::OneMinusSrcAlpha,
+                        operation: BlendOperation::Add,
+                    },
+                    Blend::Multiply => wgpu::BlendComponent {
+                        src_factor: BlendFactor::Dst,
+                        dst_factor: BlendFactor::OneMinusSrcAlpha,
+                        operation: BlendOperation::Add,
+                    },
+                    Blend::Screen => wgpu::BlendComponent {
+                        src_factor: BlendFactor::OneMinusDst,
+                        dst_factor: BlendFactor::One,
+                        operation: BlendOperation::Add,
+                    },
+                    Blend::Add => wgpu::BlendComponent {
+                        src_factor: BlendFactor::One,
+                        dst_factor: BlendFactor::One,
+                        operation: BlendOperation::Add,
+                    },
+                    Blend::Lighten => wgpu::BlendComponent {
+                        src_factor: BlendFactor::One,
+                        dst_factor: BlendFactor::One,
+                        operation: BlendOperation::Max,
+                    },
+                    Blend::Darken => wgpu::BlendComponent {
+                        src_factor: BlendFactor::One,
+                        dst_factor: BlendFactor::One,
+                        operation: BlendOperation::Min,
+                    },
+                };
+                device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some("concat compositor"),
+                    layout: Some(&pipeline_layout),
+                    vertex: wgpu::VertexState {
+                        module: &shader,
+                        entry_point: Some("vs_main"),
+                        compilation_options: Default::default(),
+                        buffers: std::slice::from_ref(&vertex_layout),
+                    },
+                    fragment: Some(wgpu::FragmentState {
+                        module: &shader,
+                        entry_point: Some("fs_main"),
+                        compilation_options: Default::default(),
+                        targets: &[Some(wgpu::ColorTargetState {
+                            format: wgpu::TextureFormat::Rgba8Unorm,
+                            blend: Some(wgpu::BlendState { color, alpha }),
+                            write_mask: wgpu::ColorWrites::ALL,
+                        })],
+                    }),
+                    primitive: wgpu::PrimitiveState::default(),
+                    depth_stencil: None,
+                    multisample: wgpu::MultisampleState::default(),
+                    multiview_mask: None,
+                    cache: None,
+                })
+            })
+            .collect();
 
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("concat layer"),
@@ -264,8 +329,10 @@ impl WgpuCompositor {
         Self {
             device,
             queue,
-            pipeline,
+            pipelines,
             bind_layout,
+            uniform_layout,
+            shaders: HashMap::new(),
             sampler,
             vertices,
             vertex_capacity: 6 * 8,
@@ -325,17 +392,36 @@ impl WgpuCompositor {
     }
 
     /// Uploads every visible layer and writes its quad; the draws, in order.
-    fn prepare(&mut self, width: u32, height: u32, layers: &[Layer<'_>]) -> Vec<(u32, u32, usize)> {
+    fn prepare(
+        &mut self,
+        width: u32,
+        height: u32,
+        layers: &[Layer<'_>],
+    ) -> Vec<(u32, u32, usize, Blend)> {
         self.used.values_mut().for_each(|used| *used = 0);
 
-        let mut draws: Vec<(u32, u32, usize)> = Vec::with_capacity(layers.len());
+        let mut draws: Vec<(u32, u32, usize, Blend)> = Vec::with_capacity(layers.len());
         let mut vertices: Vec<Vertex> = Vec::with_capacity(layers.len() * 6);
         for layer in layers {
             if layer.opacity <= 0.0 {
                 continue;
             }
-            let index = self.upload(layer.frame);
-            draws.push((layer.frame.width(), layer.frame.height(), index));
+            let mut index = self.upload(layer.frame);
+            if !layer.passes.is_empty() {
+                index = self.run_passes(
+                    layer.frame.width(),
+                    layer.frame.height(),
+                    index,
+                    layer.passes,
+                    layer.time,
+                );
+            }
+            draws.push((
+                layer.frame.width(),
+                layer.frame.height(),
+                index,
+                layer.blend,
+            ));
             vertices.extend_from_slice(&Self::quad(layer, width, height));
         }
 
@@ -360,7 +446,7 @@ impl WgpuCompositor {
     fn encode(
         &self,
         view: &wgpu::TextureView,
-        draws: &[(u32, u32, usize)],
+        draws: &[(u32, u32, usize, Blend)],
     ) -> wgpu::CommandEncoder {
         let mut encoder = self
             .device
@@ -384,9 +470,13 @@ impl WgpuCompositor {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            pass.set_pipeline(&self.pipeline);
             pass.set_vertex_buffer(0, self.vertices.slice(..));
-            for (draw, (layer_width, layer_height, pooled)) in draws.iter().enumerate() {
+            for (draw, (layer_width, layer_height, pooled, blend)) in draws.iter().enumerate() {
+                let which = Blend::ALL
+                    .iter()
+                    .position(|mode| mode == blend)
+                    .unwrap_or(0);
+                pass.set_pipeline(&self.pipelines[which]);
                 let bind_group = &self.pool[&(*layer_width, *layer_height)][*pooled].bind_group;
                 pass.set_bind_group(0, bind_group, &[]);
                 let first = (draw * 6) as u32;
@@ -482,7 +572,33 @@ impl WgpuCompositor {
 
     /// Claims a pooled texture of the layer's size, uploading its pixels.
     fn upload(&mut self, frame: &Frame) -> usize {
-        let key = (frame.width(), frame.height());
+        let index = self.claim(frame.width(), frame.height());
+        let texture = &self.pool[&(frame.width(), frame.height())][index].texture;
+        self.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            frame.pixels(),
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(frame.width() * 4),
+                rows_per_image: Some(frame.height()),
+            },
+            wgpu::Extent3d {
+                width: frame.width(),
+                height: frame.height(),
+                depth_or_array_layers: 1,
+            },
+        );
+        index
+    }
+
+    /// Claims a pooled texture of this size, blank, for a pass to draw into.
+    fn claim(&mut self, width: u32, height: u32) -> usize {
+        let key = (width, height);
         let used = self.used.entry(key).or_insert(0);
         let pool = self.pool.entry(key).or_default();
 
@@ -490,15 +606,19 @@ impl WgpuCompositor {
             let texture = self.device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("concat layer"),
                 size: wgpu::Extent3d {
-                    width: frame.width(),
-                    height: frame.height(),
+                    width,
+                    height,
                     depth_or_array_layers: 1,
                 },
                 mip_level_count: 1,
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
                 format: wgpu::TextureFormat::Rgba8Unorm,
-                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                // A render attachment too: a shader pass draws one pooled
+                // texture into another of the same size.
+                usage: wgpu::TextureUsages::TEXTURE_BINDING
+                    | wgpu::TextureUsages::COPY_DST
+                    | wgpu::TextureUsages::RENDER_ATTACHMENT,
                 view_formats: &[],
             });
             let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -524,28 +644,155 @@ impl WgpuCompositor {
 
         let index = *used;
         *used += 1;
+        index
+    }
 
-        self.queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: &pool[index].texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            frame.pixels(),
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(frame.width() * 4),
-                rows_per_image: Some(frame.height()),
-            },
-            wgpu::Extent3d {
-                width: frame.width(),
-                height: frame.height(),
-                depth_or_array_layers: 1,
+    /// The compiled pipeline for a pass, built the first time its key is
+    /// seen. The catalogue validated the module at load, so a failure here
+    /// is a driver disagreement; wgpu reports it through its error scope and
+    /// the pass draws nothing rather than the frame being lost.
+    fn shader(&mut self, pass: &ShaderPass) {
+        if self.shaders.contains_key(&pass.key) {
+            return;
+        }
+        let module = self
+            .device
+            .create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some(&pass.key),
+                source: wgpu::ShaderSource::Wgsl(pass.source.as_ref().into()),
+            });
+        let layout = self
+            .device
+            .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some(&pass.key),
+                bind_group_layouts: &[Some(&self.bind_layout), Some(&self.uniform_layout)],
+                immediate_size: 0,
+            });
+        let pipeline = self
+            .device
+            .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(&pass.key),
+                layout: Some(&layout),
+                vertex: wgpu::VertexState {
+                    module: &module,
+                    entry_point: Some("vs_main"),
+                    compilation_options: Default::default(),
+                    buffers: &[],
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &module,
+                    entry_point: Some("fs_main"),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: wgpu::TextureFormat::Rgba8Unorm,
+                        // A pass replaces: mixing by intensity is the
+                        // shader's own last line.
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                primitive: wgpu::PrimitiveState::default(),
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
+            });
+        let frame = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("concat pass frame"),
+            size: 16,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let params = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("concat pass params"),
+            size: pass.params.len().max(ShaderPass::MIN_PARAMS) as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("concat pass uniforms"),
+            layout: &self.uniform_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: frame.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: params.as_entire_binding(),
+                },
+            ],
+        });
+        self.shaders.insert(
+            pass.key.clone(),
+            CompiledShader {
+                pipeline,
+                frame,
+                params,
+                bind_group,
             },
         );
+    }
 
-        index
+    /// Runs `passes` over the pooled texture `source` of `width` × `height`,
+    /// each drawing into a fresh pooled texture of the same size, and
+    /// returns the index of the last one drawn. Each pass is its own
+    /// submission so the uniforms it wrote are the ones it reads.
+    fn run_passes(
+        &mut self,
+        width: u32,
+        height: u32,
+        source: usize,
+        passes: &[ShaderPass],
+        time: f32,
+    ) -> usize {
+        let mut current = source;
+        for pass in passes {
+            let target = self.claim(width, height);
+            self.shader(pass);
+            let shader = &self.shaders[&pass.key];
+            let frame_block: [f32; 4] = [width as f32, height as f32, time, pass.intensity];
+            let frame_bytes: Vec<u8> = frame_block.iter().flat_map(|v| v.to_le_bytes()).collect();
+            self.queue.write_buffer(&shader.frame, 0, &frame_bytes);
+            let mut params = pass.params.clone();
+            params.resize(shader.params.size() as usize, 0);
+            self.queue.write_buffer(&shader.params, 0, &params);
+
+            let pool = &self.pool[&(width, height)];
+            let view = pool[target]
+                .texture
+                .create_view(&wgpu::TextureViewDescriptor::default());
+            let mut encoder = self
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("concat pass"),
+                });
+            {
+                let mut render = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("concat pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &view,
+                        depth_slice: None,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
+                render.set_pipeline(&shader.pipeline);
+                render.set_bind_group(0, &pool[current].bind_group, &[]);
+                render.set_bind_group(1, &shader.bind_group, &[]);
+                render.draw(0..3, 0..1);
+            }
+            self.queue.submit([encoder.finish()]);
+            current = target;
+        }
+        current
     }
 
     /// The six vertices of one layer's quad, transformed the same way the CPU
@@ -680,6 +927,39 @@ mod tests {
     use super::*;
     use crate::CpuCompositor;
     use crate::compositor::Placement;
+
+    /// A pass runs over the layer before it is placed: an invert shader
+    /// over a red frame composites cyan, and at half intensity the mix.
+    #[test]
+    fn a_pass_treats_the_layer_before_it_is_placed() {
+        let Some(mut gpu) = gpu() else { return };
+        let manifest = concat_effects::Manifest::parse(
+            "[effect]\nid = \"test.invert\"\nname = \"Invert\"\nkind = \"filter\"\n[wgsl]\nentry = \"effect.wgsl\"\n",
+        )
+        .expect("a manifest");
+        let shader = concat_effects::Shader::compile(
+            &manifest,
+            "fn effect(uv: vec2<f32>) -> vec4<f32> { let c = sample(uv); return vec4<f32>(vec3<f32>(1.0) - c.rgb, c.a); }",
+        )
+        .expect("compiles");
+        let red = {
+            let mut frame = Frame::black(4, 4);
+            for pixel in frame.pixels_mut().chunks_exact_mut(4) {
+                pixel.copy_from_slice(&[255, 0, 0, 255]);
+            }
+            frame
+        };
+        let full = [shader.pass(&Default::default(), &[], 1.0)];
+        let out = gpu.composite(4, 4, &[Layer::new(&red).with_passes(&full)]);
+        assert_eq!(&out.pixels()[..3], &[0, 255, 255]);
+        let half = [shader.pass(&Default::default(), &[], 0.5)];
+        let out = gpu.composite(4, 4, &[Layer::new(&red).with_passes(&half)]);
+        let p = &out.pixels()[..3];
+        assert!(
+            p[0] > 120 && p[0] < 136 && p[1] > 120 && p[1] < 136,
+            "{p:?}"
+        );
+    }
 
     fn gpu() -> Option<WgpuCompositor> {
         let compositor = WgpuCompositor::new();
