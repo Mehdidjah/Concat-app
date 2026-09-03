@@ -5,8 +5,10 @@ import { Theme } from "../theme/theme.slint";
 import { Fmt } from "../util.slint";
 import { Glyph, Icon } from "../icons.slint";
 import { IconButton } from "../primitives/panel.slint";
+import { FocusRing } from "../primitives/focus-ring.slint";
 import { NumberField } from "../primitives/number-field.slint";
 import { Select } from "../primitives/select.slint";
+import { Tip } from "../primitives/tooltip.slint";
 import { Pane, PaneHeader } from "pane.slint";
 import { PaneKind, PaneSwitcher } from "pane-switcher.slint";
 
@@ -200,6 +202,183 @@ component RatioPicker inherits Rectangle {
     }
 }
 
+// The monitor zoom picker. Its label follows the live zoom rather than only
+// the last preset, because a trackpad gesture moves continuously between the
+// useful stops in the popup.
+component ZoomPicker inherits Rectangle {
+    in-out property <float> zoom: 1.0;
+
+    property <[float]> values: [0.1, 0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 2.0];
+    property <[string]> labels: ["10%", "25%", "50%", "75%", "100%", "125%", "150%", "200%"];
+    property <bool> open: list.is-open;
+    property <bool> ring;
+    property <int> active: 4;
+    property <length> row-h: 26px;
+
+    width: 66px;
+    height: Theme.h;
+    border-radius: Theme.r;
+    background: (root.open || trigger.has-hover) ? Theme.field-hover : Theme.field;
+
+    animate background { duration: 120ms; easing: cubic-bezier(0.4, 0, 0.2, 1); }
+
+    function nearest() {
+        root.active = root.zoom < 0.175 ? 0
+            : root.zoom < 0.375 ? 1
+            : root.zoom < 0.625 ? 2
+            : root.zoom < 0.875 ? 3
+            : root.zoom < 1.125 ? 4
+            : root.zoom < 1.375 ? 5
+            : root.zoom < 1.75 ? 6 : 7;
+    }
+
+    function reveal() {
+        root.nearest();
+        list.show();
+    }
+
+    function commit(index: int) {
+        if (index >= 0 && index < root.values.length) {
+            root.zoom = root.values[index];
+        }
+        list.close();
+        fs.focus();
+    }
+
+    fs := FocusScope {
+        focus-gained(reason) => {
+            root.ring = reason == FocusReason.tab-navigation;
+        }
+        focus-lost(reason) => { root.ring = false; }
+        key-pressed(event) => {
+            if (event.text == Key.DownArrow || event.text == Key.UpArrow
+                || event.text == "\n" || event.text == " ") {
+                root.reveal();
+                return EventResult.accept;
+            }
+            return EventResult.reject;
+        }
+    }
+
+    HorizontalLayout {
+        padding-left: 8px;
+        padding-right: 6px;
+        spacing: 4px;
+
+        Text {
+            horizontal-stretch: 1;
+            text: "\{Math.round(root.zoom * 100)}%";
+            color: Theme.fg;
+            font-family: Theme.font-technical;
+            font-size: Theme.fs;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+
+        VerticalLayout {
+            alignment: center;
+            Icon { glyph: Glyph.chevron-down; size: 11px; tint: Theme.fg-muted; }
+        }
+    }
+
+    trigger := TouchArea {
+        mouse-cursor: pointer;
+        clicked => {
+            fs.focus();
+            root.reveal();
+        }
+    }
+
+    Tip {
+        text: "Preview zoom";
+        active: trigger.has-hover;
+    }
+
+    FocusRing {
+        active: root.ring || root.open;
+        radius: Theme.r;
+    }
+
+    list := PopupWindow {
+        x: root.width - 96px;
+        y: root.height + 4px;
+        width: 96px;
+        height: root.labels.length * root.row-h + 8px;
+        close-policy: close-on-click-outside;
+
+        init => { keys.focus(); }
+
+        Rectangle {
+            background: Theme.raised;
+            border-width: 1px;
+            border-color: Theme.line-strong;
+            border-radius: Theme.r;
+            clip: true;
+
+            keys := FocusScope {
+                key-pressed(event) => {
+                    if (event.text == Key.DownArrow) {
+                        root.active = Math.min(root.active + 1, root.labels.length - 1);
+                        return EventResult.accept;
+                    }
+                    if (event.text == Key.UpArrow) {
+                        root.active = Math.max(root.active - 1, 0);
+                        return EventResult.accept;
+                    }
+                    if (event.text == Key.Home) {
+                        root.active = 0;
+                        return EventResult.accept;
+                    }
+                    if (event.text == Key.End) {
+                        root.active = root.labels.length - 1;
+                        return EventResult.accept;
+                    }
+                    if (event.text == "\n" || event.text == " ") {
+                        root.commit(root.active);
+                        return EventResult.accept;
+                    }
+                    if (event.text == Key.Escape) {
+                        list.close();
+                        fs.focus();
+                        return EventResult.accept;
+                    }
+                    return EventResult.reject;
+                }
+            }
+
+            VerticalLayout {
+                padding: 4px;
+                alignment: start;
+
+                for label[index] in root.labels: Rectangle {
+                    height: root.row-h;
+                    border-radius: Theme.r-sm;
+                    background: index == root.active ? Theme.accent : Colors.transparent;
+
+                    Text {
+                        text: label;
+                        color: index == root.active ? Theme.on-accent : Theme.fg-muted;
+                        font-family: Theme.font-technical;
+                        font-size: Theme.fs;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+
+                    TouchArea {
+                        mouse-cursor: pointer;
+                        changed has-hover => {
+                            if (self.has-hover) {
+                                root.active = index;
+                            }
+                        }
+                        clicked => { root.commit(index); }
+                    }
+                }
+            }
+        }
+    }
+}
+
 export component PreviewPane inherits Rectangle {
     // ── what the output is ───────────────────────────────────────────────
     in property <int> output-width: 1920;
@@ -256,6 +435,10 @@ export component PreviewPane inherits Rectangle {
 
     function set-preview-zoom(value: float) {
         root.preview-zoom = Fmt.clamp(value, 0.1, 2.0);
+    }
+
+    function nudge-preview-zoom(delta: float) {
+        root.set-preview-zoom(Fmt.round-to(root.preview-zoom + delta, 2));
     }
 
     // The NumberField writes to its own `value`, and an assignment in Slint
@@ -389,6 +572,41 @@ export component PreviewPane inherits Rectangle {
                         color: Theme.on-stage-dim;
                         font-size: Theme.fs-sm;
                         overflow: elide;
+                    }
+                }
+            }
+
+            // Kept over the well rather than added to the already dense
+            // transport row. It remains reachable even in a narrow split.
+            Rectangle {
+                x: parent.width - self.width - 12px;
+                y: parent.height - self.height - 12px;
+                width: 130px;
+                height: 36px;
+                border-width: 1px;
+                border-color: Theme.line-strong;
+                border-radius: Theme.r;
+                background: Theme.panel;
+
+                HorizontalLayout {
+                    padding: 4px;
+                    spacing: 2px;
+
+                    IconButton {
+                        glyph: Glyph.minus;
+                        label: "Zoom out";
+                        clicked => { root.nudge-preview-zoom(-0.1); }
+                    }
+
+                    ZoomPicker {
+                        horizontal-stretch: 1;
+                        zoom <=> root.preview-zoom;
+                    }
+
+                    IconButton {
+                        glyph: Glyph.plus;
+                        label: "Zoom in";
+                        clicked => { root.nudge-preview-zoom(0.1); }
                     }
                 }
             }
