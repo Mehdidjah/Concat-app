@@ -66,28 +66,39 @@ function PlatformArtwork() {
   return (
     <div className="platform-art" aria-hidden="true">
       <div className="platform-card platform-mac">
-        <span className="platform-mark">
-          <span />
-        </span>
+        <Image
+          className="platform-logo platform-logo-apple"
+          src="/platforms/apple-logo.svg"
+          alt=""
+          width={44}
+          height={44}
+        />
         <div>
           <strong>macOS</strong>
           <small>Desktop build</small>
         </div>
       </div>
       <div className="platform-card platform-win">
-        <span className="windows-mark">
-          <i />
-          <i />
-          <i />
-          <i />
-        </span>
+        <Image
+          className="platform-logo platform-logo-windows"
+          src="/platforms/windows-logo.svg"
+          alt=""
+          width={44}
+          height={44}
+        />
         <div>
           <strong>Windows</strong>
           <small>Desktop build</small>
         </div>
       </div>
       <div className="platform-card platform-linux">
-        <span className="linux-mark">LNX</span>
+        <Image
+          className="platform-logo platform-logo-linux"
+          src="/platforms/linux-logo.svg"
+          alt=""
+          width={44}
+          height={44}
+        />
         <div>
           <strong>Linux</strong>
           <small>Desktop build</small>

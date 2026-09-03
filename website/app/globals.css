@@ -950,53 +950,20 @@ button {
   transform: translate(4px, -6px);
 }
 
-.platform-mark,
-.windows-mark,
-.linux-mark {
+.platform-logo {
   flex: 0 0 44px;
   width: 44px;
   height: 44px;
+  object-fit: contain;
 }
 
-.platform-mark {
-  position: relative;
-  display: block;
-  border: 2px solid var(--foreground);
-  border-radius: 50% 50% 48% 48%;
+.platform-logo-apple {
+  padding: 3px;
+  filter: invert(1);
 }
 
-.platform-mark::after {
-  position: absolute;
-  top: -7px;
-  left: 24px;
-  width: 12px;
-  height: 16px;
-  border: 2px solid var(--foreground);
-  border-width: 2px 0 0 2px;
-  border-radius: 10px 0;
-  content: '';
-  transform: rotate(28deg);
-}
-
-.windows-mark {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 3px;
-  transform: skewY(-4deg);
-}
-
-.windows-mark i {
-  background: var(--primary);
-}
-.linux-mark {
-  display: grid;
-  place-items: center;
-  border: 1px solid var(--border);
-  border-radius: 50%;
-  color: var(--muted-foreground);
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.08em;
+.platform-logo-windows {
+  padding: 2px;
 }
 
 .editorial-section {
