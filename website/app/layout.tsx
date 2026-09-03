@@ -1,5 +1,6 @@
 import type { Metadata, Viewport } from 'next';
 import { Instrument_Serif, Inter } from 'next/font/google';
+import { SmoothScrollProvider } from '@/components/landing/smooth-scroll-provider';
 import './globals.css';
 
 const editorial = Instrument_Serif({
@@ -56,7 +57,7 @@ export default function RootLayout({
   return (
     <html lang="en" className="dark">
       <body className={`${editorial.variable} ${inter.variable}`}>
-        {children}
+        <SmoothScrollProvider>{children}</SmoothScrollProvider>
       </body>
     </html>
   );
