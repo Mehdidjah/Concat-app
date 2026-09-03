@@ -3,9 +3,9 @@
 import Image from 'next/image';
 import Link from 'next/link';
 import { useEffect, useRef, useState } from 'react';
+import { AUTO_DOWNLOAD_URL, REPOSITORY_URL } from '@/lib/downloads';
 
-const releasesUrl = 'https://github.com/Mehdidjah/Concat-app/releases';
-const repositoryUrl = 'https://github.com/Mehdidjah/Concat-app';
+const repositoryUrl = REPOSITORY_URL;
 
 const navigation = [
   { label: 'Features', href: '#features', external: false },
@@ -197,7 +197,7 @@ export function LandingHeader() {
 
           <a
             className="button button-primary nav-download"
-            href={releasesUrl}
+            href={AUTO_DOWNLOAD_URL}
             aria-label="Download Concat"
           >
             <span>Download</span>

@@ -2,9 +2,9 @@
 
 import Image from 'next/image';
 import { useEffect, useRef } from 'react';
+import { AUTO_DOWNLOAD_URL, REPOSITORY_URL } from '@/lib/downloads';
 
-const releasesUrl = 'https://github.com/Mehdidjah/Concat-app/releases';
-const repositoryUrl = 'https://github.com/Mehdidjah/Concat-app';
+const repositoryUrl = REPOSITORY_URL;
 const headlineLines = ['Your videos.', 'Your rules.'] as const;
 const headlineLabel = headlineLines.join(' ');
 
@@ -182,7 +182,7 @@ export function HeroScrollMotion() {
             cloud uploads. Install Concat and start creating.
           </p>
           <div className="hero-actions">
-            <a className="button button-primary" href={releasesUrl}>
+            <a className="button button-primary" href={AUTO_DOWNLOAD_URL}>
               <span>Download Concat</span>
               <Arrow />
             </a>

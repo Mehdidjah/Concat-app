@@ -2,9 +2,10 @@
 
 import Image from 'next/image';
 import { useEffect, useRef, useState } from 'react';
+import { RELEASES_URL, REPOSITORY_URL } from '@/lib/downloads';
 
-const releasesUrl = 'https://github.com/Mehdidjah/Concat-app/releases';
-const repositoryUrl = 'https://github.com/Mehdidjah/Concat-app';
+const releasesUrl = RELEASES_URL;
+const repositoryUrl = REPOSITORY_URL;
 const rayPhases = [0, Math.PI / 2, Math.PI, (Math.PI * 3) / 2, Math.PI / 4];
 
 export function SiteFooter() {

@@ -8,9 +8,13 @@ import { LandingHeader } from '@/components/landing/landing-header';
 import { Reveal } from '@/components/landing/reveal';
 import { SiteFooter } from '@/components/landing/site-footer';
 import { StickerWall } from '@/components/landing/sticker-wall';
+import {
+  AUTO_DOWNLOAD_URL,
+  DOWNLOAD_ASSETS,
+  REPOSITORY_URL,
+} from '@/lib/downloads';
 
-const releasesUrl = 'https://github.com/Mehdidjah/Concat-app/releases';
-const repositoryUrl = 'https://github.com/Mehdidjah/Concat-app';
+const repositoryUrl = REPOSITORY_URL;
 
 const principles = [
   {
@@ -19,7 +23,7 @@ const principles = [
     subtext: 'Free to download',
     items: ['No subscription', 'No watermark', 'Desktop downloads'],
     cta: 'Download Concat',
-    href: releasesUrl,
+    href: AUTO_DOWNLOAD_URL,
     featured: false,
   },
   {
@@ -64,8 +68,12 @@ function CheckIcon() {
 
 function PlatformArtwork() {
   return (
-    <div className="platform-art" aria-hidden="true">
-      <div className="platform-card platform-mac">
+    <div className="platform-art">
+      <a
+        className="platform-card platform-mac"
+        href={DOWNLOAD_ASSETS.macos}
+        aria-label="Download Concat for macOS as a DMG"
+      >
         <Image
           className="platform-logo platform-logo-apple"
           src="/platforms/apple-logo.svg"
@@ -75,10 +83,14 @@ function PlatformArtwork() {
         />
         <div>
           <strong>macOS</strong>
-          <small>Desktop build</small>
+          <small>Download DMG</small>
         </div>
-      </div>
-      <div className="platform-card platform-win">
+      </a>
+      <a
+        className="platform-card platform-win"
+        href={DOWNLOAD_ASSETS.windows}
+        aria-label="Download Concat for Windows as an EXE installer"
+      >
         <Image
           className="platform-logo platform-logo-windows"
           src="/platforms/windows-logo.svg"
@@ -88,10 +100,14 @@ function PlatformArtwork() {
         />
         <div>
           <strong>Windows</strong>
-          <small>Desktop build</small>
+          <small>Download EXE</small>
         </div>
-      </div>
-      <div className="platform-card platform-linux">
+      </a>
+      <a
+        className="platform-card platform-linux"
+        href={DOWNLOAD_ASSETS.linux}
+        aria-label="Download Concat for Linux as an AppImage"
+      >
         <Image
           className="platform-logo platform-logo-linux"
           src="/platforms/linux-logo.svg"
@@ -101,9 +117,9 @@ function PlatformArtwork() {
         />
         <div>
           <strong>Linux</strong>
-          <small>Desktop build</small>
+          <small>Download AppImage</small>
         </div>
-      </div>
+      </a>
     </div>
   );
 }
@@ -272,7 +288,7 @@ export default function Home() {
             <p>Ready when you are</p>
             <h2>Your videos. Your rules.</h2>
             <span>Download Concat and make the cut on your own terms.</span>
-            <a className="button button-primary" href={releasesUrl}>
+            <a className="button button-primary" href={AUTO_DOWNLOAD_URL}>
               <span>Download Concat</span>
               <Arrow />
             </a>
