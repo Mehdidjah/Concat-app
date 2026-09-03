@@ -148,22 +148,6 @@ button {
   gap: 10px;
 }
 
-.version-badge {
-  display: inline-flex;
-  min-height: 30px;
-  align-items: center;
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  padding: 0 11px;
-  color: var(--muted-foreground);
-  font-size: 12px;
-  font-weight: 600;
-  letter-spacing: 0.04em;
-}
-
-.version-badge-menu {
-  display: none;
-}
 .menu-wrap {
   position: relative;
   align-self: flex-start;
@@ -374,22 +358,6 @@ button {
   will-change: transform, opacity;
 }
 
-.eyebrow {
-  display: inline-flex;
-  min-height: 30px;
-  align-items: center;
-  border: 1px solid #37451a;
-  border-radius: 999px;
-  margin: 0 0 26px;
-  padding: 7px 12px;
-  background: #151911;
-  color: var(--primary);
-  font-size: 12px;
-  font-weight: 600;
-  letter-spacing: 0.12em;
-  line-height: 1;
-  text-transform: uppercase;
-}
 .hero-title {
   max-width: 900px;
   margin: 0;
@@ -1617,9 +1585,6 @@ button {
     min-height: 970px;
     padding: 124px 64px 64px;
   }
-  .hero .eyebrow {
-    margin-bottom: 14px;
-  }
   .hero-description {
     margin-top: 14px;
   }
@@ -1734,14 +1699,6 @@ button {
   .brand-logo {
     width: 36px;
     height: 36px;
-  }
-  .version-badge-nav {
-    display: none;
-  }
-  .version-badge-menu {
-    display: inline-flex;
-    justify-self: start;
-    margin: 4px 4px 6px;
   }
   .menu-wrap {
     width: 110px;

@@ -150,7 +150,6 @@ export function HeroScrollMotion() {
       <div className="hero-atmosphere" aria-hidden="true" />
       <div className="hero-copy-entrance page-width">
         <div ref={copyMotionRef} className="hero-copy-motion">
-          <p className="eyebrow">Free · Open source · Local</p>
           <div className="hero-headline-slot">
             <h1
               ref={headlineRef}
