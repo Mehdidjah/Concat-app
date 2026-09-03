@@ -84,6 +84,9 @@ jobs:
         if: matrix.platform == 'macos'
         run: |
           brew install ffmpeg cmake
+          ffmpeg_dir=$(brew --prefix ffmpeg)
+          echo "FFMPEG_DIR=$ffmpeg_dir" >> "$GITHUB_ENV"
+          echo "PKG_CONFIG_PATH=$ffmpeg_dir/lib/pkgconfig" >> "$GITHUB_ENV"
           echo "MACOSX_DEPLOYMENT_TARGET=15.0" >> "$GITHUB_ENV"
           runtime_dir=$(xcrun clang --print-runtime-dir)
           echo "RUSTFLAGS=-C link-arg=$runtime_dir/libclang_rt.osx.a" >> "$GITHUB_ENV"
