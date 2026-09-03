@@ -17,15 +17,48 @@ const navigation = [
 export function LandingHeader() {
   const [menuOpen, setMenuOpen] = useState(false);
   const [scrolled, setScrolled] = useState(false);
+  const [dotPhase, setDotPhase] = useState<'closed' | 'action' | 'opened'>(
+    'closed',
+  );
   const menuRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
+  const dotInitialRender = useRef(true);
+  const suppressFocusOpen = useRef(false);
 
   useEffect(() => {
-    const onScroll = () => setScrolled(window.scrollY > window.innerHeight / 2);
-    onScroll();
-    window.addEventListener('scroll', onScroll, { passive: true });
-    return () => window.removeEventListener('scroll', onScroll);
+    const product = document.querySelector<HTMLElement>('[data-hero-media]');
+    if (!product) return;
+    let frameId = 0;
+    const update = () => {
+      frameId = 0;
+      const next = product.getBoundingClientRect().top <= 0;
+      setScrolled((current) => (current === next ? current : next));
+    };
+    const schedule = () => {
+      if (!frameId) frameId = requestAnimationFrame(update);
+    };
+    schedule();
+    window.addEventListener('scroll', schedule, { passive: true });
+    window.addEventListener('resize', schedule);
+    return () => {
+      if (frameId) cancelAnimationFrame(frameId);
+      window.removeEventListener('scroll', schedule);
+      window.removeEventListener('resize', schedule);
+    };
   }, []);
+
+  useEffect(() => {
+    if (dotInitialRender.current) {
+      dotInitialRender.current = false;
+      return;
+    }
+    setDotPhase('action');
+    const timer = window.setTimeout(
+      () => setDotPhase(menuOpen ? 'opened' : 'closed'),
+      menuOpen ? 600 : 240,
+    );
+    return () => window.clearTimeout(timer);
+  }, [menuOpen]);
 
   useEffect(() => {
     if (!menuOpen) return;
@@ -33,7 +66,10 @@ export function LandingHeader() {
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
         setMenuOpen(false);
-        triggerRef.current?.focus({ preventScroll: true });
+        if (document.activeElement !== triggerRef.current) {
+          suppressFocusOpen.current = true;
+          triggerRef.current?.focus({ preventScroll: true });
+        }
       }
     };
     const onPointerDown = (event: PointerEvent) => {
@@ -49,13 +85,17 @@ export function LandingHeader() {
   }, [menuOpen]);
 
   const openOnHover = () => {
-    if (window.matchMedia('(hover: hover) and (pointer: fine)').matches) {
+    if (
+      window.innerWidth >= 810 &&
+      window.matchMedia('(hover: hover) and (pointer: fine)').matches
+    ) {
       setMenuOpen(true);
     }
   };
 
   const closeOnHover = () => {
     if (
+      window.innerWidth >= 810 &&
       window.matchMedia('(hover: hover) and (pointer: fine)').matches &&
       !menuRef.current?.contains(document.activeElement)
     ) {
@@ -83,8 +123,19 @@ export function LandingHeader() {
           <div
             className="menu-wrap"
             ref={menuRef}
+            data-open={menuOpen}
+            data-dot-phase={dotPhase}
             onMouseEnter={openOnHover}
             onMouseLeave={closeOnHover}
+            onFocusCapture={() => {
+              if (suppressFocusOpen.current) {
+                suppressFocusOpen.current = false;
+                return;
+              }
+              if (document.activeElement === triggerRef.current) {
+                setMenuOpen(true);
+              }
+            }}
             onBlur={(event) => {
               if (!event.currentTarget.contains(event.relatedTarget)) {
                 setMenuOpen(false);
@@ -97,16 +148,19 @@ export function LandingHeader() {
               type="button"
               aria-expanded={menuOpen}
               aria-controls="landing-menu"
-              onFocus={(event) => {
-                if (
-                  event.currentTarget.matches(':focus-visible') &&
-                  window.matchMedia('(hover: hover) and (pointer: fine)')
-                    .matches
-                ) {
-                  setMenuOpen(true);
-                }
+              onPointerDown={() => {
+                suppressFocusOpen.current = true;
               }}
-              onClick={() => setMenuOpen((open) => !open)}
+              onClick={(event) => {
+                suppressFocusOpen.current = false;
+                const mouseHover =
+                  event.detail > 0 &&
+                  window.innerWidth >= 810 &&
+                  window.matchMedia('(hover: hover) and (pointer: fine)')
+                    .matches;
+                if (mouseHover) setMenuOpen(true);
+                else setMenuOpen((open) => !open);
+              }}
             >
               <span>Menu</span>
               <span className="menu-dots" aria-hidden="true">
@@ -117,7 +171,6 @@ export function LandingHeader() {
             <div
               id="landing-menu"
               className="menu-panel"
-              data-open={menuOpen}
               aria-hidden={!menuOpen}
             >
               <span className="version-badge version-badge-menu">
@@ -131,10 +184,8 @@ export function LandingHeader() {
                   rel={item.external ? 'noopener noreferrer' : undefined}
                   tabIndex={menuOpen ? 0 : -1}
                   onClick={() => {
+                    triggerRef.current?.focus({ preventScroll: true });
                     setMenuOpen(false);
-                    requestAnimationFrame(() =>
-                      triggerRef.current?.focus({ preventScroll: true }),
-                    );
                   }}
                 >
                   <span>{item.label}</span>

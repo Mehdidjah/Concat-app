@@ -37,7 +37,7 @@ const questions = [
 ] as const;
 
 export function FaqSection() {
-  const [openIndex, setOpenIndex] = useState<number | null>(0);
+  const [openIndex, setOpenIndex] = useState<number | null>(null);
 
   return (
     <div className="faq-panel">
@@ -59,21 +59,18 @@ export function FaqSection() {
                 >
                   <span>{item.question}</span>
                   <span className="faq-symbol" aria-hidden="true">
-                    <span />
-                    <span />
+                    {open ? '−' : '+'}
                   </span>
                 </button>
               </h3>
               <section
                 id={panelId}
-                className="faq-answer-grid"
+                className="faq-answer"
                 aria-labelledby={buttonId}
                 aria-hidden={!open}
                 data-open={open}
               >
-                <div>
-                  <p>{item.answer}</p>
-                </div>
+                <p>{item.answer}</p>
               </section>
             </div>
           );

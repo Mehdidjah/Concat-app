@@ -1,7 +1,7 @@
 'use client';
 
 import Image from 'next/image';
-import type { CSSProperties, PointerEvent as ReactPointerEvent } from 'react';
+import type { PointerEvent as ReactPointerEvent } from 'react';
 import { useEffect, useRef } from 'react';
 
 type StickerKind =
@@ -21,7 +21,6 @@ type StickerDefinition = {
   kind: StickerKind;
   left: number;
   top: number;
-  rotate: number;
   tone: 'lime' | 'dark' | 'light' | 'blue';
 };
 
@@ -38,18 +37,36 @@ type PhysicsState = {
 };
 
 const stickers: StickerDefinition[] = [
-  { kind: 'wolf', left: 4, top: 10, rotate: -7, tone: 'light' },
-  { kind: 'scissors', left: 19, top: 86, rotate: 5, tone: 'lime' },
-  { kind: 'playhead', left: 34, top: 10, rotate: -3, tone: 'dark' },
-  { kind: 'film', left: 82, top: 8, rotate: 7, tone: 'light' },
-  { kind: 'waveform', left: 69, top: 86, rotate: -5, tone: 'blue' },
-  { kind: 'timeline', left: 4, top: 82, rotate: 4, tone: 'dark' },
-  { kind: 'local', left: 86, top: 88, rotate: -6, tone: 'lime' },
-  { kind: 'zero', left: 48, top: 84, rotate: 3, tone: 'light' },
-  { kind: 'open', left: 66, top: 12, rotate: -4, tone: 'lime' },
-  { kind: 'platforms', left: 18, top: 14, rotate: 6, tone: 'blue' },
-  { kind: 'cut', left: 80, top: 84, rotate: 2, tone: 'dark' },
+  { kind: 'wolf', left: 4, top: 10, tone: 'light' },
+  { kind: 'scissors', left: 19, top: 86, tone: 'lime' },
+  { kind: 'playhead', left: 34, top: 10, tone: 'dark' },
+  { kind: 'film', left: 82, top: 8, tone: 'light' },
+  { kind: 'waveform', left: 69, top: 86, tone: 'blue' },
+  { kind: 'timeline', left: 4, top: 82, tone: 'dark' },
+  { kind: 'local', left: 86, top: 88, tone: 'lime' },
+  { kind: 'zero', left: 48, top: 84, tone: 'light' },
+  { kind: 'open', left: 66, top: 12, tone: 'lime' },
+  { kind: 'platforms', left: 18, top: 14, tone: 'blue' },
+  { kind: 'cut', left: 80, top: 84, tone: 'dark' },
 ];
+
+const GRAVITY = 1880;
+const BOUNCE = 0.78;
+const FRICTION = 1;
+const THROW_POWER = 1.2;
+const MAX_VELOCITY = 2200;
+const SUBSTEPS = 3;
+const COLLISION_PASSES = 2;
+
+function clampVelocity(value: number) {
+  return Math.max(-MAX_VELOCITY, Math.min(MAX_VELOCITY, value));
+}
+
+function stickerSize(width: number) {
+  if (width < 810) return 62;
+  if (width < 1180) return 78;
+  return 122;
+}
 
 type CollisionBounds = {
   left: number;
@@ -212,14 +229,10 @@ export function StickerWall() {
     const container = containerRef.current;
     if (!container) return;
 
-    const reduceMotion = window.matchMedia(
-      '(prefers-reduced-motion: reduce)',
-    ).matches;
-    if (reduceMotion) return;
-
+    const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
     let frameId = 0;
     let previousTime = performance.now();
-    let visible = true;
+    let visible = false;
 
     const sync = (index: number) => {
       const element = stickerRefs.current[index];
@@ -227,15 +240,26 @@ export function StickerWall() {
       if (!element || !state) return;
       element.style.left = '0px';
       element.style.top = '0px';
-      element.style.transform = `translate3d(${state.x}px, ${state.y}px, 0) rotate(${stickers[index]?.rotate ?? 0}deg)`;
+      element.style.transform = `translate3d(${state.x}px, ${state.y}px, 0)`;
     };
 
     const layout = () => {
       const bounds = container.getBoundingClientRect();
-      const size = bounds.width < 810 ? 62 : 122;
+      const size = stickerSize(bounds.width);
       sizeRef.current = size;
 
-      if (statesRef.current.length === 0) {
+      if (reducedMotion.matches) {
+        statesRef.current = [];
+        stickerRefs.current.forEach((element) => {
+          element?.style.removeProperty('left');
+          element?.style.removeProperty('top');
+          element?.style.removeProperty('transform');
+        });
+        container.dataset.physicsReady = 'true';
+        return;
+      }
+
+      if (statesRef.current.length !== stickers.length) {
         statesRef.current = stickers.map((sticker, index) => ({
           x: ((bounds.width - size) * sticker.left) / 100,
           y: ((bounds.height - size) * sticker.top) / 100,
@@ -271,54 +295,7 @@ export function StickerWall() {
       container.dataset.physicsReady = 'true';
     };
 
-    const resizeObserver = new ResizeObserver(layout);
-    const visibilityObserver = new IntersectionObserver(([entry]) => {
-      visible = Boolean(entry?.isIntersecting);
-      previousTime = performance.now();
-    });
-
-    resizeObserver.observe(container);
-    visibilityObserver.observe(container);
-    layout();
-
-    const animate = (time: number) => {
-      frameId = requestAnimationFrame(animate);
-      if (!visible) return;
-
-      const bounds = container.getBoundingClientRect();
-      const copyBounds = container.parentElement
-        ?.querySelector<HTMLElement>('.download-copy')
-        ?.getBoundingClientRect();
-      const size = sizeRef.current;
-      const delta = Math.min((time - previousTime) / 1000, 0.032);
-      previousTime = time;
-
-      for (const state of statesRef.current) {
-        if (state.dragging) continue;
-        state.vy += 620 * delta;
-        state.vx *= 0.997;
-        state.x += state.vx * delta;
-        state.y += state.vy * delta;
-
-        if (state.x < 0) {
-          state.x = 0;
-          state.vx = Math.abs(state.vx) * 0.62;
-        } else if (state.x > bounds.width - size) {
-          state.x = bounds.width - size;
-          state.vx = -Math.abs(state.vx) * 0.62;
-        }
-
-        if (state.y < 0) {
-          state.y = 0;
-          state.vy = Math.abs(state.vy) * 0.62;
-        } else if (state.y > bounds.height - size) {
-          state.y = bounds.height - size;
-          state.vy = -Math.abs(state.vy) * 0.48;
-          if (Math.abs(state.vy) < 18) state.vy = 0;
-          state.vx *= 0.95;
-        }
-      }
-
+    const resolveCollisions = (size: number) => {
       const collisionSize = size * 0.86;
       for (let first = 0; first < statesRef.current.length; first += 1) {
         for (
@@ -348,34 +325,123 @@ export function StickerWall() {
           }
 
           const relativeVelocity = (b.vx - a.vx) * nx + (b.vy - a.vy) * ny;
-          if (relativeVelocity < 0) {
-            const impulse = relativeVelocity * 0.66;
-            if (!a.dragging) {
-              a.vx += impulse * nx;
-              a.vy += impulse * ny;
-            }
-            if (!b.dragging) {
-              b.vx -= impulse * nx;
-              b.vy -= impulse * ny;
-            }
+          if (relativeVelocity >= 0) continue;
+          const impulse = (-(1 + BOUNCE) * relativeVelocity) / 2;
+          if (!a.dragging) {
+            a.vx = clampVelocity(a.vx - impulse * nx);
+            a.vy = clampVelocity(a.vy - impulse * ny);
+          }
+          if (!b.dragging) {
+            b.vx = clampVelocity(b.vx + impulse * nx);
+            b.vy = clampVelocity(b.vy + impulse * ny);
           }
         }
       }
+    };
 
-      for (const state of statesRef.current) {
-        if (!state.dragging) {
-          keepOutsideCopy(state, size, bounds, copyBounds ?? null);
+    const canAnimate = () =>
+      visible &&
+      !reducedMotion.matches &&
+      document.visibilityState !== 'hidden';
+
+    const stop = () => {
+      if (frameId) cancelAnimationFrame(frameId);
+      frameId = 0;
+    };
+
+    const animate = (time: number) => {
+      if (!canAnimate()) {
+        frameId = 0;
+        return;
+      }
+      const bounds = container.getBoundingClientRect();
+      const copyBounds = container.parentElement
+        ?.querySelector<HTMLElement>('.download-copy')
+        ?.getBoundingClientRect();
+      const size = sizeRef.current;
+      const delta = Math.min((time - previousTime) / 1000, 0.032);
+      previousTime = time;
+
+      const step = delta / SUBSTEPS;
+      for (let substep = 0; substep < SUBSTEPS; substep += 1) {
+        for (const state of statesRef.current) {
+          if (state.dragging) continue;
+          state.vy = clampVelocity(state.vy + GRAVITY * step);
+          state.vx = clampVelocity(state.vx * Math.pow(FRICTION, step));
+          state.x += state.vx * step;
+          state.y += state.vy * step;
+
+          if (state.x < 0) {
+            state.x = 0;
+            state.vx = Math.abs(state.vx) * BOUNCE;
+          } else if (state.x > bounds.width - size) {
+            state.x = bounds.width - size;
+            state.vx = -Math.abs(state.vx) * BOUNCE;
+          }
+          if (state.y < 0) {
+            state.y = 0;
+            state.vy = Math.abs(state.vy) * BOUNCE;
+          } else if (state.y > bounds.height - size) {
+            state.y = bounds.height - size;
+            state.vy = -Math.abs(state.vy) * BOUNCE;
+            if (Math.abs(state.vy) < 18) state.vy = 0;
+          }
+        }
+
+        for (let pass = 0; pass < COLLISION_PASSES; pass += 1) {
+          resolveCollisions(size);
+        }
+        for (const state of statesRef.current) {
+          if (!state.dragging) {
+            keepOutsideCopy(state, size, bounds, copyBounds ?? null);
+          }
+          state.x = Math.max(0, Math.min(bounds.width - size, state.x));
+          state.y = Math.max(0, Math.min(bounds.height - size, state.y));
         }
       }
 
       stickers.forEach((_, index) => sync(index));
+      frameId = requestAnimationFrame(animate);
     };
 
-    frameId = requestAnimationFrame(animate);
+    const start = () => {
+      if (frameId || !canAnimate()) return;
+      previousTime = performance.now();
+      frameId = requestAnimationFrame(animate);
+    };
+    const resizeObserver = new ResizeObserver(layout);
+    const visibilityObserver = new IntersectionObserver(
+      ([entry]) => {
+        visible =
+          Boolean(entry?.isIntersecting) &&
+          (entry?.intersectionRatio ?? 0) >= 0.1;
+        if (visible) start();
+        else stop();
+      },
+      { threshold: [0, 0.1] },
+    );
+    const onDocumentVisibility = () => {
+      if (document.visibilityState === 'hidden') stop();
+      else start();
+    };
+    const onMotionPreference = () => {
+      stop();
+      layout();
+      start();
+    };
+
+    resizeObserver.observe(container);
+    visibilityObserver.observe(container);
+    document.addEventListener('visibilitychange', onDocumentVisibility);
+    reducedMotion.addEventListener('change', onMotionPreference);
+    layout();
+
     return () => {
-      cancelAnimationFrame(frameId);
+      stop();
       resizeObserver.disconnect();
       visibilityObserver.disconnect();
+      document.removeEventListener('visibilitychange', onDocumentVisibility);
+      reducedMotion.removeEventListener('change', onMotionPreference);
     };
   }, []);
 
@@ -399,7 +465,7 @@ export function StickerWall() {
       ?.querySelector<HTMLElement>('.download-copy')
       ?.getBoundingClientRect();
     keepOutsideCopy(state, size, bounds, copyBounds ?? null);
-    element.style.transform = `translate3d(${state.x}px, ${state.y}px, 0) rotate(${stickers[index]?.rotate ?? 0}deg)`;
+    element.style.transform = `translate3d(${state.x}px, ${state.y}px, 0)`;
   };
 
   const onPointerDown = (
@@ -412,6 +478,8 @@ export function StickerWall() {
     event.currentTarget.setPointerCapture(event.pointerId);
     state.dragging = true;
     state.pointerId = event.pointerId;
+    state.vx = 0;
+    state.vy = 0;
     state.lastX = event.clientX;
     state.lastY = event.clientY;
     state.lastTime = event.timeStamp;
@@ -443,6 +511,8 @@ export function StickerWall() {
     if (!state || state.pointerId !== event.pointerId) return;
     state.dragging = false;
     state.pointerId = null;
+    state.vx = clampVelocity(state.vx * THROW_POWER);
+    state.vy = clampVelocity(state.vy * THROW_POWER);
     if (event.currentTarget.hasPointerCapture(event.pointerId)) {
       event.currentTarget.releasePointerCapture(event.pointerId);
     }
@@ -458,13 +528,7 @@ export function StickerWall() {
           ref={(element) => {
             stickerRefs.current[index] = element;
           }}
-          style={
-            {
-              left: `${sticker.left}%`,
-              top: `${sticker.top}%`,
-              transform: `rotate(${sticker.rotate}deg)`,
-            } as CSSProperties
-          }
+          style={{ left: `${sticker.left}%`, top: `${sticker.top}%` }}
           onPointerDown={(event) => onPointerDown(index, event)}
           onPointerMove={(event) => onPointerMove(index, event)}
           onPointerUp={(event) => onPointerUp(index, event)}
