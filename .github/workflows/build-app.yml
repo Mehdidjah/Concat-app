@@ -109,7 +109,17 @@ jobs:
 
       # The shipping profile: fat LTO, panic=abort, stripped. See the
       # workspace Cargo.toml for what each knob costs.
-      - run: cargo build --profile app -p concat
+      - name: Build app
+        if: matrix.platform != 'windows'
+        run: cargo build --profile app -p concat
+        working-directory: engine
+
+      # sherpa-onnx's DLL staging currently assumes Cargo's built-in profile
+      # directory name. Use the optimized release profile on Windows so its
+      # runtime DLLs are staged correctly.
+      - name: Build app (Windows)
+        if: matrix.platform == 'windows'
+        run: cargo build --release -p concat
         working-directory: engine
 
       # The binary, plus the FFmpeg runtime libraries it loads where those
@@ -129,8 +139,8 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force stage | Out-Null
-          Copy-Item engine/target/app/concat.exe stage/
-          Copy-Item engine/target/app/*.dll stage/
+          Copy-Item engine/target/release/concat.exe stage/
+          Copy-Item engine/target/release/*.dll stage/
           Copy-Item "$env:FFMPEG_DIR\bin\*.dll" stage/
 
       - name: Package macOS DMG
