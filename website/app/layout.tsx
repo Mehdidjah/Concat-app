@@ -1,43 +1,51 @@
-import type { Metadata } from 'next';
-import { Geist, Geist_Mono } from 'next/font/google';
+import type { Metadata, Viewport } from 'next';
+import { Instrument_Serif, Inter } from 'next/font/google';
 import './globals.css';
 
-const geistSans = Geist({
-  variable: '--font-geist-sans',
+const editorial = Instrument_Serif({
+  variable: '--font-editorial',
+  weight: '400',
   subsets: ['latin'],
 });
 
-const geistMono = Geist_Mono({
-  variable: '--font-geist-mono',
+const inter = Inter({
+  variable: '--font-inter',
   subsets: ['latin'],
 });
 
 export const metadata: Metadata = {
-  title: 'WolfCut — Free, local video editor',
+  title: 'Wolf-Cut | Free, local video editor',
   description:
-    'Download WolfCut for macOS, Windows, and Linux. Edit videos locally without watermarks or subscriptions.',
+    'A fast, private video editor without watermarks, subscriptions, or cloud uploads. Download Wolf-Cut for macOS, Windows, and Linux.',
   openGraph: {
-    title: 'WolfCut — Your videos. Your rules.',
-    description: 'Free, local video editor for macOS, Windows, and Linux.',
+    title: 'Wolf-Cut | Your videos. Your rules.',
+    description:
+      'A free, open-source video editor that keeps your creative process local.',
     type: 'website',
     images: [
       {
         url: '/og.png',
         width: 1200,
         height: 630,
-        alt: 'WolfCut — Your videos. Your rules.',
+        alt: 'Wolf-Cut — Your videos. Your rules.',
       },
     ],
   },
   twitter: {
     card: 'summary_large_image',
-    title: 'WolfCut — Your videos. Your rules.',
-    description: 'Free, local video editor for macOS, Windows, and Linux.',
+    title: 'Wolf-Cut | Your videos. Your rules.',
+    description:
+      'A free, open-source video editor that keeps your creative process local.',
     images: ['/og.png'],
   },
   icons: {
     icon: '/wolfcut-logo.png',
   },
+};
+
+export const viewport: Viewport = {
+  colorScheme: 'dark',
+  themeColor: '#07080c',
 };
 
 export default function RootLayout({
@@ -47,9 +55,7 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en" className="dark">
-      <body
-        className={`${geistSans.variable} ${geistMono.variable} antialiased`}
-      >
+      <body className={`${editorial.variable} ${inter.variable}`}>
         {children}
       </body>
     </html>
