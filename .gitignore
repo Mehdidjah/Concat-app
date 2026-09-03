@@ -7,6 +7,10 @@ target/
 **/target/
 *.pdb
 
+# JavaScript dependencies and generated build output
+node_modules/
+dist/
+
 # Nix build output
 /result
 /result-*
@@ -53,3 +57,5 @@ desktop.ini
 # machine-specific.
 /vendor/
 /ffmpeg-dev/
+.vercel
+.env*.local
