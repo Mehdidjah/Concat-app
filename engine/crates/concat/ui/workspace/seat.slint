@@ -171,6 +171,11 @@ export component Seat inherits Rectangle {
             clip-set-text(field, value) => { Editor.clip-set-text(field, value); }
             clip-set-colour(field, value) => { Editor.clip-set-colour(field, value); }
             clip-commit => { Editor.clip-commit(); }
+            transform-keyframe-toggle => { Editor.transform-keyframe-toggle(); }
+            transform-keyframe-seek(direction) => { Editor.transform-keyframe-seek(direction); }
+            transform-keyframe-easing(x1, y1, x2, y2) => {
+                Editor.transform-keyframe-easing(x1, y1, x2, y2);
+            }
         }
 
     // Declared before the views, so anything inside one of them that takes

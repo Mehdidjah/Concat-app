@@ -182,6 +182,16 @@ export struct SelectedClipData {
     offset-y: float,
     rotation: float,
     opacity: float,
+    /// One diamond captures all five visual values as a pose.
+    transform-keyframe-count: int,
+    transform-keyframe-here: bool,
+    previous-transform-keyframe: float,
+    next-transform-keyframe: float,
+    transform-curve-editable: bool,
+    transform-curve-x1: float,
+    transform-curve-y1: float,
+    transform-curve-x2: float,
+    transform-curve-y2: float,
 
     // sound — everything but a still
     /// linear gain; the fader works in decibels and converts

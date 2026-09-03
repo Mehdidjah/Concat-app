@@ -17,6 +17,9 @@ export component BezierEditor inherits Rectangle {
     in property <bool> enabled: true;
 
     callback changed();
+    /// A pointer drag or keyboard nudge finished, so the owner can create one
+    /// undo step rather than one for every intermediate handle position.
+    callback committed();
 
     property <length> pad: 16px;
     property <length> inner-w: Math.max(root.width - 2 * root.pad, 1px);
@@ -168,18 +171,22 @@ export component BezierEditor inherits Rectangle {
     function key-nudge(index: int, event: KeyEvent) -> EventResult {
         if (event.text == Key.LeftArrow) {
             root.nudge(index, event.modifiers.shift ? -0.1 : -0.01, 0);
+            root.committed();
             return EventResult.accept;
         }
         if (event.text == Key.RightArrow) {
             root.nudge(index, event.modifiers.shift ? 0.1 : 0.01, 0);
+            root.committed();
             return EventResult.accept;
         }
         if (event.text == Key.UpArrow) {
             root.nudge(index, 0, event.modifiers.shift ? 0.1 : 0.01);
+            root.committed();
             return EventResult.accept;
         }
         if (event.text == Key.DownArrow) {
             root.nudge(index, 0, event.modifiers.shift ? -0.1 : -0.01);
+            root.committed();
             return EventResult.accept;
         }
         return EventResult.reject;
@@ -240,6 +247,9 @@ export component BezierEditor inherits Rectangle {
                 // Only a release ends the drag. Slint also delivers `move`
                 // events here, so a plain `else` would drop the handle the
                 // instant the pointer travelled — grab, move, nothing happens.
+                if (root.grabbed >= 0 && event.kind == PointerEventKind.up) {
+                    root.committed();
+                }
                 root.grabbed = -1;
             }
         }

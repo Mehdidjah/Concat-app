@@ -30,7 +30,8 @@ use concat_host::{ProjectInfo, Session, media, projects, templates};
 use concat_media::Peaks;
 use concat_project::commands::{ClipMove, ClipPatch, TrackFlag, TrimEdge};
 use concat_project::model::{
-    self, AppliedFilter, Clip, Project, TextAlign, TextStyle, Timeline, Track, Transition,
+    self, AppliedFilter, Clip, CubicBezier, Project, TextAlign, TextStyle, Timeline, Track,
+    TransformKeyframe, Transition,
 };
 use concat_project::{Command, why_not_merge};
 use slint::{Model, SharedString, VecModel};
@@ -1651,11 +1652,57 @@ impl Studio {
         let Some(id) = self.sole_selection() else {
             return;
         };
+        let playhead = f64::from(self.playhead);
+        let epsilon = 0.5 / f64::from(self.frame_rate().max(1.0));
         self.begin_echo();
         let value = f64::from(value);
         let Some(clip) = self.echo_clip_mut(&id) else {
             return;
         };
+        let transform_field = matches!(
+            field,
+            ClipField::Scale
+                | ClipField::OffsetX
+                | ClipField::OffsetY
+                | ClipField::Rotation
+                | ClipField::Opacity
+        );
+        if transform_field && !clip.transform_keyframes.is_empty() {
+            let local = (playhead - clip.start).clamp(0.0, clip.duration);
+            let visual = clip.transform_at(playhead);
+            let index = clip
+                .transform_keyframes
+                .iter()
+                .position(|keyframe| (keyframe.time - local).abs() <= epsilon);
+            let mut keyframe = index
+                .map(|index| clip.transform_keyframes[index].clone())
+                .unwrap_or(TransformKeyframe {
+                    time: local,
+                    scale: visual.scale,
+                    offset_x: visual.offset_x,
+                    offset_y: visual.offset_y,
+                    rotation: visual.rotation,
+                    opacity: visual.opacity,
+                    easing: CubicBezier::EASE_IN_OUT,
+                });
+            match field {
+                ClipField::Scale => keyframe.scale = value.clamp(0.05, 8.0),
+                ClipField::OffsetX => keyframe.offset_x = value.clamp(-1.0, 1.0),
+                ClipField::OffsetY => keyframe.offset_y = value.clamp(-1.0, 1.0),
+                ClipField::Rotation => keyframe.rotation = value.clamp(-180.0, 180.0),
+                ClipField::Opacity => keyframe.opacity = value.clamp(0.0, 1.0),
+                _ => unreachable!("guarded by transform_field"),
+            }
+            match index {
+                Some(index) => clip.transform_keyframes[index] = keyframe,
+                None => {
+                    clip.transform_keyframes.push(keyframe);
+                    clip.transform_keyframes
+                        .sort_by(|left, right| left.time.total_cmp(&right.time));
+                }
+            }
+            return;
+        }
         let text = clip.text.get_or_insert_with(TextStyle::default);
         match field {
             ClipField::Scale => clip.scale = value.clamp(0.05, 8.0),
@@ -1692,6 +1739,127 @@ impl Studio {
         if clip.kind != model::ClipKind::Text {
             clip.text = None;
         }
+    }
+
+    /// Adds or removes the complete visual pose at the playhead.
+    pub fn toggle_transform_keyframe(&mut self) {
+        let Some(id) = self.sole_selection() else {
+            return;
+        };
+        let playhead = f64::from(self.playhead);
+        let epsilon = 0.5 / f64::from(self.frame_rate().max(1.0));
+        let Some(clip) = self.clip(&id).cloned() else {
+            return;
+        };
+        if !clip.kind.is_visual() {
+            return;
+        }
+        let local = (playhead - clip.start).clamp(0.0, clip.duration);
+        let mut keyframes = clip.transform_keyframes.clone();
+        if let Some(index) = keyframes
+            .iter()
+            .position(|keyframe| (keyframe.time - local).abs() <= epsilon)
+        {
+            let removed = keyframes.remove(index);
+            if keyframes.is_empty() {
+                self.apply(Command::Batch {
+                    commands: vec![
+                        Command::SetClipTransform {
+                            clip_id: id.clone(),
+                            scale: Some(removed.scale),
+                            offset_x: Some(removed.offset_x),
+                            offset_y: Some(removed.offset_y),
+                            rotation: Some(removed.rotation),
+                        },
+                        Command::UpdateClip {
+                            clip_id: id.clone(),
+                            patch: ClipPatch {
+                                opacity: Some(removed.opacity),
+                                ..ClipPatch::default()
+                            },
+                        },
+                        Command::SetTransformKeyframes {
+                            clip_id: id,
+                            keyframes,
+                        },
+                    ],
+                });
+            } else {
+                self.apply(Command::SetTransformKeyframes {
+                    clip_id: id,
+                    keyframes,
+                });
+            }
+            return;
+        }
+
+        let visual = clip.transform_at(playhead);
+        keyframes.push(TransformKeyframe {
+            time: local,
+            scale: visual.scale,
+            offset_x: visual.offset_x,
+            offset_y: visual.offset_y,
+            rotation: visual.rotation,
+            opacity: visual.opacity,
+            easing: CubicBezier::EASE_IN_OUT,
+        });
+        self.apply(Command::SetTransformKeyframes {
+            clip_id: id,
+            keyframes,
+        });
+    }
+
+    /// Moves the playhead to the previous or next transform keyframe.
+    pub fn seek_transform_keyframe(&mut self, direction: i32) {
+        let Some(clip) = self.sole_selection().and_then(|id| self.clip(&id)).cloned() else {
+            return;
+        };
+        let local = f64::from(self.playhead) - clip.start;
+        let epsilon = 0.5 / f64::from(self.frame_rate().max(1.0));
+        let target = if direction < 0 {
+            clip.transform_keyframes
+                .iter()
+                .rev()
+                .find(|keyframe| keyframe.time < local - epsilon)
+        } else {
+            clip.transform_keyframes
+                .iter()
+                .find(|keyframe| keyframe.time > local + epsilon)
+        };
+        if let Some(target) = target {
+            self.pause();
+            self.seek((clip.start + target.time) as f32);
+        }
+    }
+
+    /// Updates the outgoing curve of the keyframe at, or immediately before,
+    /// the playhead. `clip_commit` turns a drag into one undo entry.
+    pub fn set_transform_keyframe_easing(&mut self, x1: f32, y1: f32, x2: f32, y2: f32) {
+        let Some(id) = self.sole_selection() else {
+            return;
+        };
+        let playhead = f64::from(self.playhead);
+        self.begin_echo();
+        let Some(clip) = self.echo_clip_mut(&id) else {
+            return;
+        };
+        if clip.transform_keyframes.len() < 2 {
+            return;
+        }
+        let local = playhead - clip.start;
+        let index = clip
+            .transform_keyframes
+            .iter()
+            .rposition(|keyframe| keyframe.time <= local)
+            .unwrap_or(0)
+            .min(clip.transform_keyframes.len() - 2);
+        clip.transform_keyframes[index].easing = CubicBezier {
+            x1: f64::from(x1),
+            y1: f64::from(y1),
+            x2: f64::from(x2),
+            y2: f64::from(y2),
+        }
+        .sanitised();
     }
 
     pub fn clip_set_text(&mut self, field: ClipTextField, value: &str) {
@@ -1762,6 +1930,12 @@ impl Studio {
             return;
         };
         let mut commands = Vec::new();
+        if after.transform_keyframes != before.transform_keyframes {
+            commands.push(Command::SetTransformKeyframes {
+                clip_id: id.clone(),
+                keyframes: after.transform_keyframes.clone(),
+            });
+        }
         if after.scale != before.scale
             || after.offset_x != before.offset_x
             || after.offset_y != before.offset_y
@@ -2743,17 +2917,59 @@ impl Studio {
         let fill = colour_of(&text.color);
         let stroke = colour_of(&text.stroke_color);
         let plate = colour_of(&text.background);
+        let playhead = f64::from(self.playhead);
+        let local = playhead - clip.start;
+        let visual = clip.transform_at(playhead);
+        let epsilon = 0.5 / f64::from(self.frame_rate().max(1.0));
+        let keyframe_here = clip
+            .transform_keyframes
+            .iter()
+            .any(|keyframe| (keyframe.time - local).abs() <= epsilon);
+        let previous_keyframe = clip
+            .transform_keyframes
+            .iter()
+            .rev()
+            .find(|keyframe| keyframe.time < local - epsilon)
+            .map_or(-1.0, |keyframe| clip.start + keyframe.time);
+        let next_keyframe = clip
+            .transform_keyframes
+            .iter()
+            .find(|keyframe| keyframe.time > local + epsilon)
+            .map_or(-1.0, |keyframe| clip.start + keyframe.time);
+        let curve_index = if clip.transform_keyframes.len() >= 2 {
+            Some(
+                clip.transform_keyframes
+                    .iter()
+                    .rposition(|keyframe| keyframe.time <= local)
+                    .unwrap_or(0)
+                    .min(clip.transform_keyframes.len() - 2),
+            )
+        } else {
+            None
+        };
+        let curve = curve_index
+            .map(|index| clip.transform_keyframes[index].easing)
+            .unwrap_or(CubicBezier::EASE_IN_OUT);
         SelectedClipData {
             present: true,
             id: clip.id.as_str().into(),
             name: clip.name.as_str().into(),
             kind: kind_of(clip),
             duration: clip.duration as f32,
-            scale: clip.scale as f32,
-            offset_x: clip.offset_x as f32,
-            offset_y: clip.offset_y as f32,
-            rotation: clip.rotation as f32,
-            opacity: clip.opacity as f32,
+            scale: visual.scale as f32,
+            offset_x: visual.offset_x as f32,
+            offset_y: visual.offset_y as f32,
+            rotation: visual.rotation as f32,
+            opacity: visual.opacity as f32,
+            transform_keyframe_count: clip.transform_keyframes.len() as i32,
+            transform_keyframe_here: keyframe_here,
+            previous_transform_keyframe: previous_keyframe as f32,
+            next_transform_keyframe: next_keyframe as f32,
+            transform_curve_editable: curve_index.is_some(),
+            transform_curve_x1: curve.x1 as f32,
+            transform_curve_y1: curve.y1 as f32,
+            transform_curve_x2: curve.x2 as f32,
+            transform_curve_y2: curve.y2 as f32,
             volume: clip.volume as f32,
             speed: clip.speed as f32,
             preserve_pitch: clip.preserve_pitch,

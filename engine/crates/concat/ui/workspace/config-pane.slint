@@ -133,6 +133,9 @@ export component ConfigPane inherits Rectangle {
     callback clip-set-text(field: ClipTextField, value: string);
     callback clip-set-colour(field: ClipTextField, value: color);
     callback clip-commit();
+    callback transform-keyframe-toggle();
+    callback transform-keyframe-seek(direction: int);
+    callback transform-keyframe-easing(x1: float, y1: float, x2: float, y2: float);
 
     callback effects-add(preset: AppliedPresetData);
     callback effects-toggle(index: int);
@@ -373,6 +376,11 @@ export component ConfigPane inherits Rectangle {
                     selected: root.selected;
                     set(field, value) => { root.clip-set(field, value); }
                     commit => { root.clip-commit(); }
+                    keyframe-toggle => { root.transform-keyframe-toggle(); }
+                    keyframe-seek(direction) => { root.transform-keyframe-seek(direction); }
+                    keyframe-easing(x1, y1, x2, y2) => {
+                        root.transform-keyframe-easing(x1, y1, x2, y2);
+                    }
                 }
 
                 if root.showing == "Filter": FilterPanel {

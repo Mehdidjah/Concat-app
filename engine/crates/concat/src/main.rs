@@ -639,6 +639,15 @@ fn main() -> Result<(), slint::PlatformError> {
     editor.on_clip_commit(on_window!(|state| {
         state.clip_commit();
     }));
+    editor.on_transform_keyframe_toggle(on_window!(|state| {
+        state.toggle_transform_keyframe();
+    }));
+    editor.on_transform_keyframe_seek(on_lanes!(|state, direction: i32| {
+        state.seek_transform_keyframe(direction);
+    }));
+    editor.on_transform_keyframe_easing(on_lanes!(|state, x1: f32, y1: f32, x2: f32, y2: f32| {
+        state.set_transform_keyframe_easing(x1, y1, x2, y2);
+    }));
 
     // ── the monitor ──
     editor.on_seek(on_lanes!(|state, seconds: f32| {

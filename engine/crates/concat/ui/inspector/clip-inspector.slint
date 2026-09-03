@@ -4,7 +4,9 @@
 import { Theme } from "../theme/theme.slint";
 import { Glyph, Icon } from "../icons.slint";
 import { IconButton, Row, Section, SectionHeader } from "../primitives/panel.slint";
+import { BezierEditor } from "../primitives/bezier-editor.slint";
 import { SegmentedControl } from "../primitives/segmented-control.slint";
+import { Select } from "../primitives/select.slint";
 import {
     Fader, HelpButton, InspectorFmt, InspectorSearch, Note, Param, ParamFormat,
     SearchField, Switch, SwitchRow,
@@ -296,6 +298,9 @@ export component AdjustPanel inherits VerticalLayout {
     callback set(field: ClipField, value: float);
     /// A control gesture finished: the accumulated change becomes one command.
     callback commit();
+    callback keyframe-toggle();
+    callback keyframe-seek(direction: int);
+    callback keyframe-easing(x1: float, y1: float, x2: float, y2: float);
 
     property <bool> has-picture: root.selected.kind == ClipKind.video
         || root.selected.kind == ClipKind.image;
@@ -320,6 +325,31 @@ export component AdjustPanel inherits VerticalLayout {
     property <float> speed;
     property <float> fade-in;
     property <float> fade-out;
+    property <bool> curve-open;
+    property <float> curve-x1;
+    property <float> curve-y1;
+    property <float> curve-x2;
+    property <float> curve-y2;
+
+    pure function curve-is(x1: float, y1: float, x2: float, y2: float) -> bool {
+        return Math.abs(root.curve-x1 - x1) < 0.005
+            && Math.abs(root.curve-y1 - y1) < 0.005
+            && Math.abs(root.curve-x2 - x2) < 0.005
+            && Math.abs(root.curve-y2 - y2) < 0.005;
+    }
+
+    property <int> curve-preset: root.curve-is(0, 0, 1, 1) ? 0
+        : root.curve-is(0.42, 0, 1, 1) ? 1
+        : root.curve-is(0, 0, 0.58, 1) ? 2
+        : root.curve-is(0.42, 0, 0.58, 1) ? 3 : 4;
+
+    function set-curve(x1: float, y1: float, x2: float, y2: float) {
+        root.curve-x1 = x1;
+        root.curve-y1 = y1;
+        root.curve-x2 = x2;
+        root.curve-y2 = y2;
+        root.keyframe-easing(x1, y1, x2, y2);
+    }
 
     function seed() {
         root.scale = root.selected.scale;
@@ -331,6 +361,10 @@ export component AdjustPanel inherits VerticalLayout {
         root.speed = root.selected.speed;
         root.fade-in = root.selected.fade-in;
         root.fade-out = root.selected.fade-out;
+        root.curve-x1 = root.selected.transform-curve-x1;
+        root.curve-y1 = root.selected.transform-curve-y1;
+        root.curve-x2 = root.selected.transform-curve-x2;
+        root.curve-y2 = root.selected.transform-curve-y2;
     }
 
     init => { root.seed(); }
@@ -348,6 +382,32 @@ export component AdjustPanel inherits VerticalLayout {
             HelpButton {
                 open: root.transform-help;
                 toggled => { root.transform-help = self.open; }
+            }
+            IconButton {
+                glyph: Glyph.step-back;
+                label: "Previous transform keyframe";
+                enabled: root.selected.previous-transform-keyframe >= 0;
+                clicked => { root.keyframe-seek(-1); }
+            }
+            IconButton {
+                glyph: Glyph.keyframe;
+                label: root.selected.transform-keyframe-here
+                    ? "Remove transform keyframe" : "Add transform keyframe";
+                checked: root.selected.transform-keyframe-here;
+                clicked => { root.keyframe-toggle(); }
+            }
+            IconButton {
+                glyph: Glyph.step-forward;
+                label: "Next transform keyframe";
+                enabled: root.selected.next-transform-keyframe >= 0;
+                clicked => { root.keyframe-seek(1); }
+            }
+            IconButton {
+                glyph: Glyph.waveform;
+                label: root.curve-open ? "Hide animation graph" : "Show animation graph";
+                enabled: root.selected.transform-keyframe-count > 0;
+                checked: root.curve-open;
+                clicked => { root.curve-open = !root.curve-open; }
             }
         }
 
@@ -407,6 +467,64 @@ export component AdjustPanel inherits VerticalLayout {
             default-value: 1;
             fmt: ParamFormat.fraction;
             changed(v) => { root.set(ClipField.opacity, v); root.commit(); }
+        }
+
+        if root.curve-open: VerticalLayout {
+            padding-left: Theme.pad;
+            padding-right: Theme.pad;
+            padding-top: 6px;
+            spacing: 8px;
+
+            Rectangle { height: 1px; background: Theme.line; }
+
+            HorizontalLayout {
+                spacing: 8px;
+
+                Text {
+                    text: "Interpolation";
+                    color: Theme.fg-muted;
+                    font-size: Theme.fs;
+                    vertical-alignment: center;
+                }
+
+                Select {
+                    options: ["Linear", "Ease In", "Ease Out", "Ease In & Out", "Custom"];
+                    current: root.curve-preset;
+                    enabled: root.selected.transform-curve-editable;
+                    changed(index) => {
+                        if (index == 0) { root.set-curve(0, 0, 1, 1); }
+                        if (index == 1) { root.set-curve(0.42, 0, 1, 1); }
+                        if (index == 2) { root.set-curve(0, 0, 0.58, 1); }
+                        if (index == 3) { root.set-curve(0.42, 0, 0.58, 1); }
+                        if (index < 4) { root.commit(); }
+                    }
+                }
+            }
+
+            if !root.selected.transform-curve-editable: Text {
+                text: "Add a second keyframe to edit the motion between poses.";
+                color: Theme.fg-dim;
+                font-size: Theme.fs-sm;
+                wrap: word-wrap;
+            }
+
+            if root.selected.transform-curve-editable: BezierEditor {
+                x1 <=> root.curve-x1;
+                y1 <=> root.curve-y1;
+                x2 <=> root.curve-x2;
+                y2 <=> root.curve-y2;
+                changed => {
+                    root.keyframe-easing(self.x1, self.y1, self.x2, self.y2);
+                }
+                committed => { root.commit(); }
+            }
+
+            if root.selected.transform-curve-editable: Text {
+                text: "The curve shapes the motion from this pose to the next keyframe.";
+                color: Theme.fg-dim;
+                font-size: Theme.fs-sm;
+                wrap: word-wrap;
+            }
         }
 
         }

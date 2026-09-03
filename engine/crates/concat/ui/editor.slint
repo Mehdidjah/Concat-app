@@ -94,6 +94,9 @@ export global Editor {
     callback clip-set-text(field: ClipTextField, value: string);
     callback clip-set-colour(field: ClipTextField, value: color);
     callback clip-commit();
+    callback transform-keyframe-toggle();
+    callback transform-keyframe-seek(direction: int);
+    callback transform-keyframe-easing(x1: float, y1: float, x2: float, y2: float);
 
     in-out property <[EffectData]> video-effects;
     in-out property <[EffectData]> audio-effects;
