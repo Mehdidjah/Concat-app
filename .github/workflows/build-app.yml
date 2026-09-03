@@ -130,6 +130,7 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force stage | Out-Null
           Copy-Item engine/target/app/concat.exe stage/
+          Copy-Item engine/target/app/*.dll stage/
           Copy-Item "$env:FFMPEG_DIR\bin\*.dll" stage/
 
       - name: Package macOS DMG
