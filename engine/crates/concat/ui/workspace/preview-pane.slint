@@ -249,6 +249,14 @@ export component PreviewPane inherits Rectangle {
     property <float> frames: Math.round(root.playhead * root.frame-rate);
     property <bool> at-start: root.frames <= 0;
     property <bool> at-end: root.frames >= root.total-frames;
+    /// A view-only scale relative to the fitted frame. It deliberately stays
+    /// out of Editor: two preview panes may be inspected at different zooms,
+    /// and neither zoom belongs in the project or export settings.
+    in-out property <float> preview-zoom: 1.0;
+
+    function set-preview-zoom(value: float) {
+        root.preview-zoom = Fmt.clamp(value, 0.1, 2.0);
+    }
 
     // The NumberField writes to its own `value`, and an assignment in Slint
     // replaces whatever binding the parent declared — so this is seeded, not
@@ -302,73 +310,86 @@ export component PreviewPane inherits Rectangle {
             property <length> pad: 16px;
             property <length> room-w: Math.max(1px, self.width - 2 * self.pad);
             property <length> room-h: Math.max(1px, self.height - 2 * self.pad);
-            /// Always fitted, on whichever axis runs out first. The picker in
-            /// the tray sets how much of the frame the engine composites, not
-            /// how large it is drawn — the monitor shows the whole frame
-            /// either way, which is the point of a monitor.
-            property <length> stage-w: Math.min(self.room-w / root.output-width,
+            /// The fitted size is 100%. Lower percentages pull the frame away
+            /// from the well; higher ones inspect the centre and let the
+            /// viewport clip the rest.
+            property <length> fitted-stage-w: Math.min(self.room-w / root.output-width,
                 self.room-h / root.output-height) * root.output-width;
+            property <length> stage-w: self.fitted-stage-w * root.preview-zoom;
 
-            stage := Rectangle {
-                x: (parent.width - self.width) / 2;
-                y: (parent.height - self.height) / 2;
-                width: viewport.stage-w;
-                height: self.width / root.aspect;
-                background: Theme.stage;
-                // A 1px ring lifts the stage off the well. Slint has no
-                // box-shadow, so the ring does the work alone — which is why
-                // it is `line-strong` and not the hairline every other edge
-                // uses.
-                border-width: 1px;
-                border-color: Theme.line-strong;
-                clip: true;
+            zoom-wheel := TouchArea {
+                scroll-event(event) => {
+                    if (event.delta-y != 0px) {
+                        // Slint reports a positive delta for a two-finger move
+                        // upwards. Up inspects more closely; down pulls out.
+                        root.set-preview-zoom(root.preview-zoom
+                            * Math.pow(1.0025, event.delta-y / 1px));
+                        return EventResult.accept;
+                    }
+                    return EventResult.reject;
+                }
 
-                // Where a decoded frame will be drawn. Until then the stage
-                // reports what is actually under the playhead.
-                if !root.has-picture: VerticalLayout {
-                    alignment: center;
-                    spacing: 10px;
+                stage := Rectangle {
+                    x: (parent.width - self.width) / 2;
+                    y: (parent.height - self.height) / 2;
+                    width: viewport.stage-w;
+                    height: self.width / root.aspect;
+                    background: Theme.stage;
+                    // A 1px ring lifts the stage off the well. Slint has no
+                    // box-shadow, so the ring does the work alone — which is
+                    // why it is `line-strong` and not the hairline every other
+                    // edge uses.
+                    border-width: 1px;
+                    border-color: Theme.line-strong;
+                    clip: true;
 
-                    HorizontalLayout {
+                    // Where a decoded frame will be drawn. Until then the stage
+                    // reports what is actually under the playhead.
+                    if !root.has-picture: VerticalLayout {
                         alignment: center;
-                        Icon {
-                            glyph: Glyph.film;
-                            size: 22px;
-                            tint: Theme.fg-dim;
+                        spacing: 10px;
+
+                        HorizontalLayout {
+                            alignment: center;
+                            Icon {
+                                glyph: Glyph.film;
+                                size: 22px;
+                                tint: Theme.fg-dim;
+                            }
+                        }
+
+                        Text {
+                            text: "Nothing under the playhead";
+                            color: Theme.fg-dim;
+                            font-size: Theme.fs;
+                            horizontal-alignment: center;
                         }
                     }
 
-                    Text {
-                        text: "Nothing under the playhead";
-                        color: Theme.fg-dim;
-                        font-size: Theme.fs;
-                        horizontal-alignment: center;
+                    // The engine's frame, when one has arrived. It is already
+                    // the stage's shape, so `contain` only absorbs a rounding
+                    // pixel either way.
+                    if root.has-picture && root.frame.width > 0: Image {
+                        x: 0;
+                        y: 0;
+                        width: parent.width;
+                        height: parent.height;
+                        source: root.frame;
+                        image-fit: contain;
                     }
-                }
 
-                // The engine's frame, when one has arrived. It is already
-                // the stage's shape, so `contain` only absorbs a rounding
-                // pixel either way.
-                if root.has-picture && root.frame.width > 0: Image {
-                    x: 0;
-                    y: 0;
-                    width: parent.width;
-                    height: parent.height;
-                    source: root.frame;
-                    image-fit: contain;
-                }
-
-                // The clip under the playhead, named in the corner. Without a
-                // decoded frame, the name is the only thing that says the
-                // monitor is live.
-                if root.has-picture: Text {
-                    x: 8px;
-                    y: parent.height - self.height - 8px;
-                    width: parent.width - 16px;
-                    text: root.clip-name;
-                    color: Theme.on-stage-dim;
-                    font-size: Theme.fs-sm;
-                    overflow: elide;
+                    // The clip under the playhead, named in the corner. Without
+                    // a decoded frame, the name is the only thing that says the
+                    // monitor is live.
+                    if root.has-picture: Text {
+                        x: 8px;
+                        y: parent.height - self.height - 8px;
+                        width: parent.width - 16px;
+                        text: root.clip-name;
+                        color: Theme.on-stage-dim;
+                        font-size: Theme.fs-sm;
+                        overflow: elide;
+                    }
                 }
             }
         }
