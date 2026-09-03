@@ -38,7 +38,7 @@ mod tests {
     use crate::commands::{ClipMove, ClipPatch, Command, TrackFlag, TrimEdge};
     use crate::doc::DocumentSettings;
     use crate::editor::Editor;
-    use crate::model::{ClipKind, MediaKind, TextStyle};
+    use crate::model::{ClipKind, CubicBezier, MediaKind, TextStyle, TransformKeyframe};
 
     fn media(path: &str, duration: f64, has_audio: bool) -> Command {
         Command::AddMedia {
@@ -1391,6 +1391,18 @@ mod tests {
                 offset_y: Some(-0.25),
                 rotation: Some(90.0),
             },
+            Command::SetTransformKeyframes {
+                clip_id: "c1".to_owned(),
+                keyframes: vec![TransformKeyframe {
+                    time: 1.0,
+                    scale: 1.5,
+                    offset_x: 0.1,
+                    offset_y: -0.2,
+                    rotation: 45.0,
+                    opacity: 0.8,
+                    easing: CubicBezier::LINEAR,
+                }],
+            },
             Command::DetachAudio {
                 clip_id: "c1".to_owned(),
             },
@@ -1511,5 +1523,110 @@ mod tests {
             "lines cannot collapse onto each other"
         );
         assert_eq!(text.opacity, 1.0);
+    }
+
+    #[test]
+    fn transform_keyframes_are_sorted_persisted_and_interpolated() {
+        let (mut editor, _, clip_id) = fixture();
+        let pose = |time, scale, opacity| TransformKeyframe {
+            time,
+            scale,
+            offset_x: time / 10.0,
+            offset_y: 0.0,
+            rotation: time * 10.0,
+            opacity,
+            easing: CubicBezier::LINEAR,
+        };
+        editor
+            .apply(Command::SetTransformKeyframes {
+                clip_id: clip_id.clone(),
+                keyframes: vec![pose(6.0, 2.0, 0.5), pose(2.0, 1.0, 1.0)],
+            })
+            .expect("sets keyframes");
+
+        let clip = editor.project().active().clip(&clip_id).expect("clip");
+        assert_eq!(clip.transform_keyframes[0].time, 2.0);
+        assert_eq!(clip.transform_keyframes[1].time, 6.0);
+        let halfway = clip.transform_at(4.0);
+        assert!((halfway.scale - 1.5).abs() < 1e-6);
+        assert!((halfway.opacity - 0.75).abs() < 1e-6);
+
+        let document = editor.to_document(&settings());
+        let restored = Editor::from_document(&document).expect("reloads");
+        assert_eq!(
+            restored
+                .project()
+                .active()
+                .clip(&clip_id)
+                .expect("clip")
+                .transform_keyframes,
+            clip.transform_keyframes
+        );
+    }
+
+    #[test]
+    fn timeline_edits_preserve_transform_animation_boundaries() {
+        let (mut editor, _, clip_id) = fixture();
+        let pose = |time, scale| TransformKeyframe {
+            time,
+            scale,
+            offset_x: 0.0,
+            offset_y: 0.0,
+            rotation: 0.0,
+            opacity: 1.0,
+            easing: CubicBezier::LINEAR,
+        };
+        editor
+            .apply(Command::SetTransformKeyframes {
+                clip_id: clip_id.clone(),
+                keyframes: vec![pose(0.0, 1.0), pose(4.0, 2.0), pose(8.0, 3.0)],
+            })
+            .expect("sets animation");
+
+        editor
+            .apply(Command::SplitClips {
+                clip_ids: vec![clip_id.clone()],
+                time: 5.0,
+            })
+            .expect("splits through animation");
+        let clips = &editor.project().active().clips;
+        let tail_id = clips[1].id.clone();
+        assert!((clips[0].transform_at(5.0).scale - 2.25).abs() < 1e-6);
+        assert!((clips[1].transform_at(5.0).scale - 2.25).abs() < 1e-6);
+        assert_eq!(
+            clips[0].transform_keyframes.last().expect("boundary").time,
+            5.0
+        );
+        assert_eq!(
+            clips[1].transform_keyframes.first().expect("boundary").time,
+            0.0
+        );
+
+        editor
+            .apply(Command::SetClipSpeed {
+                clip_id: tail_id.clone(),
+                speed: 2.0,
+            })
+            .expect("changes speed");
+        let tail = editor.project().active().clip(&tail_id).expect("tail");
+        assert_eq!(tail.duration, 2.5);
+        assert_eq!(
+            tail.transform_keyframes.last().expect("last pose").time,
+            1.5
+        );
+
+        editor
+            .apply(Command::TrimClip {
+                clip_id: tail_id.clone(),
+                edge: TrimEdge::Start,
+                delta: 0.5,
+            })
+            .expect("trims through animation");
+        let tail = editor.project().active().clip(&tail_id).expect("tail");
+        assert_eq!(
+            tail.transform_keyframes.first().expect("new boundary").time,
+            0.0
+        );
+        assert!((tail.transform_at(tail.start).scale - 2.5).abs() < 1e-6);
     }
 }

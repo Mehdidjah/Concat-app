@@ -12,8 +12,8 @@ use std::collections::HashSet;
 use serde::{Deserialize, Serialize};
 
 use crate::model::{
-    AppliedFilter, Clip, ClipKind, CustomFont, MediaItem, MediaKind, Project, TextStyle, Timeline,
-    Track, Transition,
+    AppliedFilter, Clip, ClipKind, CubicBezier, CustomFont, MediaItem, MediaKind, Project,
+    TextStyle, Timeline, Track, TransformKeyframe, Transition,
 };
 
 /// Fallback length for media whose container reports no duration.
@@ -322,6 +322,15 @@ pub enum Command {
         /// never accumulates turns.
         rotation: Option<f64>,
     },
+    /// Replaces a clip's transform animation as one undoable edit. Keyframes
+    /// are clamped to the clip, sorted, and de-duplicated by time.
+    SetTransformKeyframes {
+        /// The visual clip to animate. An unknown id is a no-op.
+        clip_id: String,
+        /// Complete transform poses at clip-local times. Empty disables the
+        /// animation and returns the clip to its static transform.
+        keyframes: Vec<TransformKeyframe>,
+    },
     /// Pulls a video clip's sound out into its own audio clip on a free
     /// lane (minting one if none is free), muting the video and moving its
     /// audio filters to the sound. A no-op unless the clip is an unmuted
@@ -538,6 +547,7 @@ fn default_clip(id: String, track_id: String, media: &MediaItem, start: f64) -> 
         offset_y: 0.0,
         rotation: 0.0,
         opacity: 1.0,
+        transform_keyframes: Vec::new(),
         speed: 1.0,
         preserve_pitch: true,
         filters: Vec::new(),
@@ -640,6 +650,87 @@ fn assign<T: PartialEq>(slot: &mut T, value: T) -> bool {
         *slot = value;
         true
     }
+}
+
+/// The outgoing curve at `local_time`, including the curve that was active
+/// when a trim or split lands between two existing poses.
+fn transform_easing_at(clip: &Clip, local_time: f64) -> CubicBezier {
+    let keyframes = &clip.transform_keyframes;
+    let Some(first) = keyframes.first() else {
+        return CubicBezier::default();
+    };
+    keyframes
+        .iter()
+        .rposition(|keyframe| keyframe.time <= local_time + JOIN_EPSILON)
+        .map(|index| keyframes[index.min(keyframes.len().saturating_sub(2))].easing)
+        .unwrap_or(first.easing)
+}
+
+/// Captures the exact visual value at a clip-local instant. This is used to
+/// create invisible boundary poses when an edit cuts through an animation.
+fn transform_keyframe_at(clip: &Clip, local_time: f64) -> TransformKeyframe {
+    let value = clip.transform_at(clip.start + local_time);
+    TransformKeyframe {
+        time: local_time,
+        scale: value.scale,
+        offset_x: value.offset_x,
+        offset_y: value.offset_y,
+        rotation: value.rotation,
+        opacity: value.opacity,
+        easing: transform_easing_at(clip, local_time),
+    }
+}
+
+/// Keeps the animation over `[from, to]`, rebased so `from` becomes zero.
+/// Boundary poses preserve the rendered value when the edit lands between
+/// two keyframes rather than exactly on a diamond.
+fn sliced_transform_keyframes(
+    clip: &Clip,
+    from: f64,
+    to: f64,
+    anchor_start: bool,
+    anchor_end: bool,
+) -> Vec<TransformKeyframe> {
+    if clip.transform_keyframes.is_empty() {
+        return Vec::new();
+    }
+
+    let span = (to - from).max(0.0);
+    let mut keyframes: Vec<_> = clip
+        .transform_keyframes
+        .iter()
+        .filter(|keyframe| {
+            keyframe.time >= from - JOIN_EPSILON && keyframe.time <= to + JOIN_EPSILON
+        })
+        .cloned()
+        .map(|mut keyframe| {
+            keyframe.time = (keyframe.time - from).clamp(0.0, span);
+            keyframe
+        })
+        .collect();
+
+    if anchor_start
+        && !keyframes
+            .iter()
+            .any(|keyframe| keyframe.time.abs() <= JOIN_EPSILON)
+    {
+        let mut boundary = transform_keyframe_at(clip, from);
+        boundary.time = 0.0;
+        keyframes.push(boundary);
+    }
+    if anchor_end
+        && !keyframes
+            .iter()
+            .any(|keyframe| (keyframe.time - span).abs() <= JOIN_EPSILON)
+    {
+        let mut boundary = transform_keyframe_at(clip, to);
+        boundary.time = span;
+        keyframes.push(boundary);
+    }
+
+    keyframes.sort_by(|left, right| left.time.total_cmp(&right.time));
+    keyframes.dedup_by(|left, right| (left.time - right.time).abs() <= JOIN_EPSILON);
+    keyframes
 }
 
 /// Applies one command. Errors are [`CommandError`]s, each rendering as a
@@ -870,6 +961,7 @@ pub fn apply(
                 offset_y: offset_y.unwrap_or(0.0).clamp(-MAX_OFFSET, MAX_OFFSET),
                 rotation: 0.0,
                 opacity: 1.0,
+                transform_keyframes: Vec::new(),
                 speed: 1.0,
                 preserve_pitch: true,
                 filters: Vec::new(),
@@ -919,7 +1011,15 @@ pub fn apply(
             let applied = match edge {
                 TrimEdge::End => {
                     let duration = (clip.duration + delta).max(MIN_CLIP_DURATION);
+                    let keyframes = sliced_transform_keyframes(
+                        clip,
+                        0.0,
+                        duration,
+                        false,
+                        duration < clip.duration,
+                    );
                     assign(&mut clip.duration, duration)
+                        | assign(&mut clip.transform_keyframes, keyframes)
                 }
                 TrimEdge::Start => {
                     // Dragging the head moves the in-point too, so the pixels
@@ -929,10 +1029,18 @@ pub fn apply(
                     let moved = start - clip.start;
                     let duration = clip.duration - moved;
                     let source_start = (clip.source_start + moved * clip.speed).max(0.0);
+                    let keyframes = sliced_transform_keyframes(
+                        clip,
+                        moved,
+                        clip.duration,
+                        moved.abs() > JOIN_EPSILON,
+                        false,
+                    );
                     // Bitwise so no assignment is short-circuited away.
                     assign(&mut clip.start, start)
                         | assign(&mut clip.duration, duration)
                         | assign(&mut clip.source_start, source_start)
+                        | assign(&mut clip.transform_keyframes, keyframes)
                 }
             };
             Ok(Outcome {
@@ -948,7 +1056,7 @@ pub fn apply(
                 let Some(index) = timeline.clips.iter().position(|clip| clip.id == clip_id) else {
                     continue;
                 };
-                let clip = &timeline.clips[index];
+                let clip = timeline.clips[index].clone();
                 let offset = time - clip.start;
                 if offset <= MIN_CLIP_DURATION || offset >= clip.duration - MIN_CLIP_DURATION {
                     continue;
@@ -961,8 +1069,12 @@ pub fn apply(
                 // The transition belongs to the cut at the original clip's
                 // start, which the head keeps.
                 tail.transition_in = None;
+                tail.transform_keyframes =
+                    sliced_transform_keyframes(&clip, offset, clip.duration, true, false);
                 created = Some(tail.id.clone());
                 timeline.clips[index].duration = offset;
+                timeline.clips[index].transform_keyframes =
+                    sliced_transform_keyframes(&clip, 0.0, offset, false, true);
                 timeline.clips.insert(index + 1, tail);
             }
             // A split always mints the tail, so "minted anything" and
@@ -1073,12 +1185,18 @@ pub fn apply(
             // makes this a speed change rather than a trim.
             let next = speed.clamp(MIN_SPEED, MAX_SPEED);
             let source_covered = clip.duration * clip.speed;
+            let old_duration = clip.duration;
+            let duration = (source_covered / next).max(MIN_CLIP_DURATION);
+            let mut keyframes = clip.transform_keyframes.clone();
+            if old_duration > f64::EPSILON {
+                for keyframe in &mut keyframes {
+                    keyframe.time *= duration / old_duration;
+                }
+            }
             // Bitwise so no assignment is short-circuited away.
             let applied = assign(&mut clip.speed, next)
-                | assign(
-                    &mut clip.duration,
-                    (source_covered / next).max(MIN_CLIP_DURATION),
-                );
+                | assign(&mut clip.duration, duration)
+                | assign(&mut clip.transform_keyframes, keyframes);
             Ok(Outcome {
                 created_id: None,
                 applied,
@@ -1112,6 +1230,32 @@ pub fn apply(
                 let next = if wrapped == -180.0 { 180.0 } else { wrapped };
                 applied |= assign(&mut clip.rotation, next);
             }
+            Ok(Outcome {
+                created_id: None,
+                applied,
+            })
+        }
+
+        Command::SetTransformKeyframes {
+            clip_id,
+            mut keyframes,
+        } => {
+            let timeline = project.active_mut();
+            let Some(clip) = timeline.clip_mut(&clip_id) else {
+                return Ok(Outcome::default());
+            };
+            for keyframe in &mut keyframes {
+                keyframe.time = keyframe.time.clamp(0.0, clip.duration);
+                keyframe.scale = keyframe.scale.clamp(MIN_SCALE, MAX_SCALE);
+                keyframe.offset_x = keyframe.offset_x.clamp(-MAX_OFFSET, MAX_OFFSET);
+                keyframe.offset_y = keyframe.offset_y.clamp(-MAX_OFFSET, MAX_OFFSET);
+                keyframe.rotation = ((keyframe.rotation % 360.0) + 540.0) % 360.0 - 180.0;
+                keyframe.opacity = keyframe.opacity.clamp(0.0, 1.0);
+                keyframe.easing = keyframe.easing.sanitised();
+            }
+            keyframes.sort_by(|left, right| left.time.total_cmp(&right.time));
+            keyframes.dedup_by(|left, right| (left.time - right.time).abs() < 1e-6);
+            let applied = assign(&mut clip.transform_keyframes, keyframes);
             Ok(Outcome {
                 created_id: None,
                 applied,

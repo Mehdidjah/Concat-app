@@ -16,7 +16,7 @@
 use concat_project::model::{ClipKind as ModelClipKind, Project, Timeline};
 
 use crate::chains::{audio_filter_chain, video_effect_chain};
-use crate::{ClipKind, ExportClip, TransitionSpec};
+use crate::{ClipKind, ExportClip, TransformKeyframeSpec, TransitionSpec};
 
 /// Flattens one timeline of `project` for the exporter - the active one
 /// when `timeline_id` is `None`. Text clips are excluded (they rasterise
@@ -68,6 +68,22 @@ pub fn flatten_timeline(project: &Project, timeline_id: Option<&str>) -> Vec<Exp
                 offset_y: clip.offset_y,
                 rotation: clip.rotation,
                 opacity: clip.opacity,
+                transform_keyframes: clip
+                    .transform_keyframes
+                    .iter()
+                    .map(|keyframe| TransformKeyframeSpec {
+                        time: keyframe.time,
+                        scale: keyframe.scale,
+                        offset_x: keyframe.offset_x,
+                        offset_y: keyframe.offset_y,
+                        rotation: keyframe.rotation,
+                        opacity: keyframe.opacity,
+                        x1: keyframe.easing.x1,
+                        y1: keyframe.easing.y1,
+                        x2: keyframe.easing.x2,
+                        y2: keyframe.easing.y2,
+                    })
+                    .collect(),
                 video_filter_chain: video_effect_chain(&clip.video_effects),
                 // Passed through unconditionally: `resolve_transitions` is
                 // the one adjacency judge (frame/2 tolerance). A fixed

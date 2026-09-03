@@ -29,7 +29,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use concat_core::frame::Frame;
 use concat_core::time::{FrameRate, Rational};
-use concat_core::timeline::{Clip, ClipId, MediaRef, Timeline, Track, TrackKind, Transform};
+use concat_core::timeline::{
+    Clip, ClipId, CubicBezier as CoreBezier, MediaRef, Timeline, Track, TrackKind, Transform,
+    TransformKeyframe as CoreTransformKeyframe,
+};
 use concat_media::audio::{self, AudioClip};
 use concat_media::{DecodeOptions, Decoder, EncodeOptions, Encoder, FrameSink, FrameSource};
 use concat_render::{Compositor, CpuCompositor, Layer, Placement, plan_frame};
@@ -109,6 +112,9 @@ pub struct ExportClip {
     /// requests from a UI that predates it.
     #[serde(default = "unity")]
     pub opacity: f64,
+    /// Animated transform poses at clip-local times.
+    #[serde(default)]
+    pub transform_keyframes: Vec<TransformKeyframeSpec>,
     /// FFmpeg *video* filter chain from the Effects tab, or empty. Applied at
     /// decode, after scaling - see `DecodeOptions::filter_chain`.
     #[serde(default)]
@@ -135,6 +141,33 @@ pub struct ExportClip {
     /// older caller still exports correctly - just slower to start.
     #[serde(default)]
     pub has_audio: Option<bool>,
+}
+
+/// A serialisable transform pose carried from the project document into the
+/// shared preview/export renderer.
+#[derive(Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct TransformKeyframeSpec {
+    /// Seconds from the clip's start.
+    pub time: f64,
+    /// Multiplier over the fitted size.
+    pub scale: f64,
+    /// Horizontal frame-fraction offset.
+    pub offset_x: f64,
+    /// Vertical frame-fraction offset.
+    pub offset_y: f64,
+    /// Clockwise rotation in degrees.
+    pub rotation: f64,
+    /// Blend strength in 0..=1.
+    pub opacity: f64,
+    /// First Bézier control point's horizontal coordinate.
+    pub x1: f64,
+    /// First Bézier control point's vertical coordinate.
+    pub y1: f64,
+    /// Second Bézier control point's horizontal coordinate.
+    pub x2: f64,
+    /// Second Bézier control point's vertical coordinate.
+    pub y2: f64,
 }
 
 /// A transition on the cut into a clip.
@@ -667,6 +700,26 @@ fn build_timeline(
             rotation: clip.rotation,
         };
         engine_clip.opacity = clip.opacity.clamp(0.0, 1.0) as f32;
+        engine_clip.transform_keyframes = clip
+            .transform_keyframes
+            .iter()
+            .map(|keyframe| CoreTransformKeyframe {
+                time: quantise(keyframe.time.clamp(0.0, clip.duration), rate),
+                transform: Transform {
+                    scale: keyframe.scale.clamp(0.05, 8.0),
+                    offset_x: keyframe.offset_x.clamp(-3.0, 3.0),
+                    offset_y: keyframe.offset_y.clamp(-3.0, 3.0),
+                    rotation: keyframe.rotation,
+                },
+                opacity: keyframe.opacity.clamp(0.0, 1.0) as f32,
+                easing: CoreBezier {
+                    x1: keyframe.x1.clamp(0.0, 1.0),
+                    y1: keyframe.y1.clamp(-2.0, 3.0),
+                    x2: keyframe.x2.clamp(0.0, 1.0),
+                    y2: keyframe.y2.clamp(-2.0, 3.0),
+                },
+            })
+            .collect();
         // Quantised like every other time: the ramp must land on the same
         // frame grid the overlap does, or the dissolve ends a frame early.
         engine_clip.video_fade_in = quantise(clip.video_fade_in, rate);
@@ -939,6 +992,7 @@ mod tests {
             offset_y: 0.0,
             rotation: 0.0,
             opacity: 1.0,
+            transform_keyframes: Vec::new(),
             video_filter_chain: String::new(),
             transition: None,
             video_fade_in: 0.0,

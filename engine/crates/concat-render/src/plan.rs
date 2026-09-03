@@ -76,6 +76,7 @@ pub fn plan_frame(timeline: &Timeline, time: Rational) -> FramePlan {
         let Some(source_time) = clip.source_time_at(time) else {
             continue;
         };
+        let (transform, animated_opacity) = clip.visual_at(time);
 
         layers.push(PlannedLayer {
             clip: clip_id,
@@ -84,8 +85,8 @@ pub fn plan_frame(timeline: &Timeline, time: Rational) -> FramePlan {
             speed: clip.speed,
             // The fade ramp multiplies in here, so the compositor only ever
             // sees a per-frame opacity - it has no idea fades exist.
-            opacity: (clip.opacity * clip.video_fade_factor(time)).clamp(0.0, 1.0),
-            transform: clip.transform,
+            opacity: (animated_opacity * clip.video_fade_factor(time)).clamp(0.0, 1.0),
+            transform,
         });
     }
 
@@ -100,7 +101,7 @@ pub fn plan_frame(timeline: &Timeline, time: Rational) -> FramePlan {
 #[cfg(test)]
 mod tests {
     use concat_core::time::FrameRate;
-    use concat_core::timeline::{Clip, MediaRef, Track};
+    use concat_core::timeline::{Clip, CubicBezier, MediaRef, Track, TransformKeyframe};
 
     use super::*;
 
@@ -216,6 +217,39 @@ mod tests {
         assert_eq!(plan_frame(&timeline, seconds(0)).layers[0].opacity, 0.0);
         assert_eq!(plan_frame(&timeline, seconds(1)).layers[0].opacity, 0.5);
         assert_eq!(plan_frame(&timeline, seconds(3)).layers[0].opacity, 1.0);
+    }
+
+    #[test]
+    fn transform_keyframes_drive_each_planned_frame() {
+        let mut timeline = Timeline::new(640, 360, FrameRate::THIRTY);
+        let track = timeline.add_track(Track::new("V1", TrackKind::Video));
+        let mut clip = Clip::new(MediaRef::new("a.mp4"), seconds(0), seconds(4));
+        clip.transform_keyframes = vec![
+            TransformKeyframe {
+                time: seconds(0),
+                transform: Transform::IDENTITY,
+                opacity: 1.0,
+                easing: CubicBezier::LINEAR,
+            },
+            TransformKeyframe {
+                time: seconds(2),
+                transform: Transform {
+                    scale: 3.0,
+                    offset_x: 0.4,
+                    offset_y: -0.2,
+                    rotation: 90.0,
+                },
+                opacity: 0.5,
+                easing: CubicBezier::LINEAR,
+            },
+        ];
+        timeline.add_clip(track, clip).expect("track exists");
+
+        let layer = &plan_frame(&timeline, seconds(1)).layers[0];
+        assert!((layer.transform.scale - 2.0).abs() < 1e-6);
+        assert!((layer.transform.offset_x - 0.2).abs() < 1e-6);
+        assert!((layer.transform.rotation - 45.0).abs() < 1e-6);
+        assert!((layer.opacity - 0.75).abs() < 1e-6);
     }
 
     #[test]

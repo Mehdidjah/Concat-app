@@ -83,6 +83,9 @@ pub struct Clip {
     pub video_fade_out: Rational,
     /// How the picture sits in the frame. Identity is fitted and centred.
     pub transform: Transform,
+    /// Animated poses ordered by clip-local time. Empty means `transform` and
+    /// `opacity` remain constant.
+    pub transform_keyframes: Vec<TransformKeyframe>,
 }
 
 /// A clip's placement in the output frame.
@@ -101,6 +104,79 @@ pub struct Transform {
     pub offset_y: f64,
     /// Clockwise rotation about the picture's centre, in degrees.
     pub rotation: f64,
+}
+
+/// A cubic timing curve between two transform poses.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct CubicBezier {
+    /// First control point's horizontal coordinate.
+    pub x1: f64,
+    /// First control point's vertical coordinate.
+    pub y1: f64,
+    /// Second control point's horizontal coordinate.
+    pub x2: f64,
+    /// Second control point's vertical coordinate.
+    pub y2: f64,
+}
+
+impl CubicBezier {
+    /// No acceleration.
+    pub const LINEAR: Self = Self {
+        x1: 0.0,
+        y1: 0.0,
+        x2: 1.0,
+        y2: 1.0,
+    };
+
+    /// Solves the curve for y at a given x.
+    pub fn sample(self, x: f64) -> f64 {
+        fn axis(p1: f64, p2: f64, t: f64) -> f64 {
+            let u = 1.0 - t;
+            3.0 * u * u * t * p1 + 3.0 * u * t * t * p2 + t * t * t
+        }
+        fn slope(p1: f64, p2: f64, t: f64) -> f64 {
+            3.0 * (1.0 - t).powi(2) * p1
+                + 6.0 * (1.0 - t) * t * (p2 - p1)
+                + 3.0 * t * t * (1.0 - p2)
+        }
+
+        let x = x.clamp(0.0, 1.0);
+        let mut t = x;
+        for _ in 0..8 {
+            let error = axis(self.x1, self.x2, t) - x;
+            if error.abs() < 1e-7 {
+                return axis(self.y1, self.y2, t);
+            }
+            let derivative = slope(self.x1, self.x2, t);
+            if derivative.abs() < 1e-7 {
+                break;
+            }
+            t = (t - error / derivative).clamp(0.0, 1.0);
+        }
+        let (mut low, mut high) = (0.0, 1.0);
+        for _ in 0..16 {
+            t = (low + high) / 2.0;
+            if axis(self.x1, self.x2, t) < x {
+                low = t;
+            } else {
+                high = t;
+            }
+        }
+        axis(self.y1, self.y2, t)
+    }
+}
+
+/// A complete visual pose at a clip-local instant.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct TransformKeyframe {
+    /// Time from the clip's start.
+    pub time: Rational,
+    /// Placement at this instant.
+    pub transform: Transform,
+    /// Blend strength at this instant.
+    pub opacity: f32,
+    /// Curve from this pose to the next.
+    pub easing: CubicBezier,
 }
 
 impl Transform {
@@ -137,7 +213,51 @@ impl Clip {
             video_fade_in: Rational::ZERO,
             video_fade_out: Rational::ZERO,
             transform: Transform::IDENTITY,
+            transform_keyframes: Vec::new(),
         }
+    }
+
+    /// Placement and opacity at a timeline instant. The first and last poses
+    /// hold outside the animated span.
+    pub fn visual_at(&self, time: Rational) -> (Transform, f32) {
+        let Some(first) = self.transform_keyframes.first() else {
+            return (self.transform, self.opacity);
+        };
+        let local = time - self.start;
+        if local <= first.time || self.transform_keyframes.len() == 1 {
+            return (first.transform, first.opacity);
+        }
+        let last = self
+            .transform_keyframes
+            .last()
+            .expect("a first keyframe exists");
+        if local >= last.time {
+            return (last.transform, last.opacity);
+        }
+        for pair in self.transform_keyframes.windows(2) {
+            let (left, right) = (pair[0], pair[1]);
+            if local <= right.time {
+                let span = right.time - left.time;
+                if span.is_zero() {
+                    return (right.transform, right.opacity);
+                }
+                let amount = left.easing.sample(((local - left.time) / span).as_f64());
+                let lerp = |a: f64, b: f64| a + (b - a) * amount;
+                let rotation_delta =
+                    ((right.transform.rotation - left.transform.rotation + 540.0) % 360.0) - 180.0;
+                return (
+                    Transform {
+                        scale: lerp(left.transform.scale, right.transform.scale),
+                        offset_x: lerp(left.transform.offset_x, right.transform.offset_x),
+                        offset_y: lerp(left.transform.offset_y, right.transform.offset_y),
+                        rotation: left.transform.rotation + rotation_delta * amount,
+                    },
+                    (f64::from(left.opacity) + f64::from(right.opacity - left.opacity) * amount)
+                        .clamp(0.0, 1.0) as f32,
+                );
+            }
+        }
+        (self.transform, self.opacity)
     }
 
     /// The opacity ramp factor at `time`, in `0.0..=1.0`.
