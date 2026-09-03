@@ -204,7 +204,9 @@ jobs:
           $stage = (Resolve-Path stage).Path
           $output = Join-Path $PWD "release\Concat-Windows-Setup.exe"
           $version = (Select-String -Path engine/Cargo.toml -Pattern '^version = "([^"]+)"').Matches[0].Groups[1].Value
-          & makensis.exe "/DSTAGE_DIR=$stage" "/DOUT_FILE=$output" "/DAPP_VERSION=$version" scripts/release/windows/installer.nsi
+          $makensis = Join-Path ${env:ProgramFiles(x86)} "NSIS\makensis.exe"
+          if (-not (Test-Path $makensis)) { throw "NSIS compiler not found at $makensis" }
+          & $makensis "/DSTAGE_DIR=$stage" "/DOUT_FILE=$output" "/DAPP_VERSION=$version" scripts/release/windows/installer.nsi
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Package Linux AppImage
