@@ -3,8 +3,8 @@
 import Image from 'next/image';
 import { useEffect, useRef, useState } from 'react';
 
-const releasesUrl = 'https://github.com/Mehdidjah/wolfcut-App/releases';
-const repositoryUrl = 'https://github.com/Mehdidjah/wolfcut-App';
+const releasesUrl = 'https://github.com/Mehdidjah/Concat-app/releases';
+const repositoryUrl = 'https://github.com/Mehdidjah/Concat-app';
 const rayPhases = [0, Math.PI / 2, Math.PI, (Math.PI * 3) / 2, Math.PI / 4];
 
 export function SiteFooter() {
@@ -106,8 +106,8 @@ export function SiteFooter() {
         </div>
         <div className="footer-content page-width">
           <div className="footer-brand">
-            <Image src="/wolfcut-logo.png" alt="" width={52} height={52} />
-            <h2>Wolf-Cut</h2>
+            <Image src="/concat-logo.png" alt="" width={52} height={52} />
+            <h2>Concat</h2>
             <p>Cut locally. Create freely.</p>
           </div>
           <div className="footer-links">
@@ -130,10 +130,10 @@ export function SiteFooter() {
           </div>
         </div>
         <div className="footer-wordmark" aria-hidden="true">
-          WOLF-CUT
+          CONCAT
         </div>
         <div className="footer-bottom page-width">
-          <span>© 2026 Wolf-Cut</span>
+          <span>© 2026 Concat</span>
           <span>Free · Open source · Local</span>
         </div>
       </div>

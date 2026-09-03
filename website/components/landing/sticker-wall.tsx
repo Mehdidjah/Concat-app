@@ -131,7 +131,7 @@ function StickerGraphic({ kind }: { kind: StickerKind }) {
   if (kind === 'wolf') {
     return (
       <Image
-        src="/wolfcut-logo.png"
+        src="/concat-logo.png"
         alt=""
         width={82}
         height={82}

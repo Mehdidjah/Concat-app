@@ -4,8 +4,8 @@ import Image from 'next/image';
 import Link from 'next/link';
 import { useEffect, useRef, useState } from 'react';
 
-const releasesUrl = 'https://github.com/Mehdidjah/wolfcut-App/releases';
-const repositoryUrl = 'https://github.com/Mehdidjah/wolfcut-App';
+const releasesUrl = 'https://github.com/Mehdidjah/Concat-app/releases';
+const repositoryUrl = 'https://github.com/Mehdidjah/Concat-app';
 
 const navigation = [
   { label: 'Features', href: '#features', external: false },
@@ -106,16 +106,16 @@ export function LandingHeader() {
   return (
     <header className="landing-header" data-scrolled={scrolled}>
       <nav className="nav-frame" aria-label="Primary navigation">
-        <Link className="brand-link" href="/" aria-label="Wolf-Cut home">
+        <Link className="brand-link" href="/" aria-label="Concat home">
           <Image
-            src="/wolfcut-logo.png"
+            src="/concat-logo.png"
             alt=""
             width={40}
             height={40}
             className="brand-logo"
             priority
           />
-          <span>Wolf-Cut</span>
+          <span>Concat</span>
         </Link>
 
         <div className="nav-actions">
@@ -198,7 +198,7 @@ export function LandingHeader() {
           <a
             className="button button-primary nav-download"
             href={releasesUrl}
-            aria-label="Download Wolf-Cut"
+            aria-label="Download Concat"
           >
             <span>Download</span>
             <span className="button-arrow" aria-hidden="true">

@@ -3,8 +3,8 @@
 import Image from 'next/image';
 import { useEffect, useRef } from 'react';
 
-const releasesUrl = 'https://github.com/Mehdidjah/wolfcut-App/releases';
-const repositoryUrl = 'https://github.com/Mehdidjah/wolfcut-App';
+const releasesUrl = 'https://github.com/Mehdidjah/Concat-app/releases';
+const repositoryUrl = 'https://github.com/Mehdidjah/Concat-app';
 const headlineLines = ['Your videos.', 'Your rules.'] as const;
 const headlineLabel = headlineLines.join(' ');
 
@@ -179,11 +179,11 @@ export function HeroScrollMotion() {
           </div>
           <p className="hero-description">
             A fast, private video editor without watermarks, subscriptions, or
-            cloud uploads. Install Wolf-Cut and start creating.
+            cloud uploads. Install Concat and start creating.
           </p>
           <div className="hero-actions">
             <a className="button button-primary" href={releasesUrl}>
-              <span>Download Wolf-Cut</span>
+              <span>Download Concat</span>
               <Arrow />
             </a>
             <a
@@ -209,11 +209,11 @@ export function HeroScrollMotion() {
               <span className="window-dot" />
               <span className="window-dot" />
               <span className="window-dot" />
-              <span className="window-title">Wolf-Cut · Untitled project</span>
+              <span className="window-title">Concat · Untitled project</span>
             </div>
             <Image
               src="/editor-preview.webp"
-              alt="Wolf-Cut desktop editor with media browser, preview, inspector, and multi-track timeline"
+              alt="Concat desktop editor with media browser, preview, inspector, and multi-track timeline"
               width={1920}
               height={1175}
               priority

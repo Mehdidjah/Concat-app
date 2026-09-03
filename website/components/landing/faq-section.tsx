@@ -5,34 +5,34 @@ import { useState } from 'react';
 
 const questions = [
   {
-    question: 'What is Wolf-Cut?',
+    question: 'What is Concat?',
     answer:
-      'Wolf-Cut is a free, open-source desktop video editor built around a native Rust engine and a focused editing interface.',
+      'Concat is a free, open-source desktop video editor built around a native Rust engine and a focused editing interface.',
   },
   {
-    question: 'Is Wolf-Cut really free?',
+    question: 'Is Concat really free?',
     answer:
       'Yes. The application is free software, with no subscription, account, or paid feature tier required to edit your videos.',
   },
   {
-    question: 'Does Wolf-Cut upload my videos?',
+    question: 'Does Concat upload my videos?',
     answer:
       'No required cloud upload is part of the editing workflow. Your source media and creative process stay on your machine.',
   },
   {
     question: 'Does it add a watermark?',
     answer:
-      'No. Wolf-Cut does not add branded watermarks to your exported videos.',
+      'No. Concat does not add branded watermarks to your exported videos.',
   },
   {
     question: 'Which operating systems are supported?',
     answer:
-      'Desktop builds are available for macOS, Windows, and Linux. Wolf-Cut is currently an alpha release, so platform testing is still evolving.',
+      'Desktop builds are available for macOS, Windows, and Linux. Concat is currently an alpha release, so platform testing is still evolving.',
   },
   {
     question: 'Where can I view the source code?',
     answer:
-      'The complete source is public in the Wolf-Cut GitHub repository, where you can inspect the code, report issues, and contribute.',
+      'The complete source is public in the Concat GitHub repository, where you can inspect the code, report issues, and contribute.',
   },
 ] as const;
 
@@ -80,7 +80,7 @@ export function FaqSection() {
       <div className="faq-visual">
         <Image
           src="/editor-preview.webp"
-          alt="Wolf-Cut editor showing the preview canvas and editing timeline"
+          alt="Concat editor showing the preview canvas and editing timeline"
           width={1920}
           height={1175}
           sizes="(max-width: 1179px) 90vw, 560px"

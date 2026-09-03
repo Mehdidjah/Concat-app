@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from 'react';
 
 const statement =
-  'Wolf-Cut is built around a simple idea: your footage belongs to you. Edit locally, skip subscriptions and watermarks, and keep the creative process on your machine.';
+  'Concat is built around a simple idea: your footage belongs to you. Edit locally, skip subscriptions and watermarks, and keep the creative process on your machine.';
 
 const words = statement.split(' ');
 

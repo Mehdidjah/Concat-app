@@ -9,8 +9,8 @@ import { Reveal } from '@/components/landing/reveal';
 import { SiteFooter } from '@/components/landing/site-footer';
 import { StickerWall } from '@/components/landing/sticker-wall';
 
-const releasesUrl = 'https://github.com/Mehdidjah/wolfcut-App/releases';
-const repositoryUrl = 'https://github.com/Mehdidjah/wolfcut-App';
+const releasesUrl = 'https://github.com/Mehdidjah/Concat-app/releases';
+const repositoryUrl = 'https://github.com/Mehdidjah/Concat-app';
 
 const principles = [
   {
@@ -18,7 +18,7 @@ const principles = [
     value: '$0',
     subtext: 'Free to download',
     items: ['No subscription', 'No watermark', 'Desktop downloads'],
-    cta: 'Download Wolf-Cut',
+    cta: 'Download Concat',
     href: releasesUrl,
     featured: false,
   },
@@ -179,7 +179,7 @@ export default function Home() {
                     <div className="feature-copy">
                       <span className="feature-index">04</span>
                       <h3>Built for your desktop.</h3>
-                      <p>Download Wolf-Cut for macOS, Windows, and Linux.</p>
+                      <p>Download Concat for macOS, Windows, and Linux.</p>
                     </div>
                     <PlatformArtwork />
                   </article>
@@ -189,7 +189,7 @@ export default function Home() {
           </div>
         </section>
 
-        <section className="editorial-section" aria-label="Wolf-Cut philosophy">
+        <section className="editorial-section" aria-label="Concat philosophy">
           <div className="page-width editorial-inner">
             <EditorialReveal />
           </div>
@@ -258,7 +258,7 @@ export default function Home() {
           <div className="page-width">
             <AnimatedSectionHeading
               title="Questions, cut short."
-              copy="What to know before installing Wolf-Cut."
+              copy="What to know before installing Concat."
             />
             <Reveal threshold={0.2}>
               <FaqSection />
@@ -271,9 +271,9 @@ export default function Home() {
           <Reveal className="download-copy" threshold={0.5}>
             <p>Ready when you are</p>
             <h2>Your videos. Your rules.</h2>
-            <span>Download Wolf-Cut and make the cut on your own terms.</span>
+            <span>Download Concat and make the cut on your own terms.</span>
             <a className="button button-primary" href={releasesUrl}>
-              <span>Download Wolf-Cut</span>
+              <span>Download Concat</span>
               <Arrow />
             </a>
           </Reveal>

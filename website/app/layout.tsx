@@ -15,32 +15,36 @@ const inter = Inter({
 });
 
 export const metadata: Metadata = {
-  title: 'Wolf-Cut | Free, local video editor',
+  metadataBase: new URL('https://concat-app.vercel.app'),
+  applicationName: 'Concat',
+  title: 'Concat | Free, local video editor',
   description:
-    'A fast, private video editor without watermarks, subscriptions, or cloud uploads. Download Wolf-Cut for macOS, Windows, and Linux.',
+    'A fast, private video editor without watermarks, subscriptions, or cloud uploads. Download Concat for macOS, Windows, and Linux.',
   openGraph: {
-    title: 'Wolf-Cut | Your videos. Your rules.',
+    title: 'Concat | Your videos. Your rules.',
     description:
       'A free, open-source video editor that keeps your creative process local.',
+    siteName: 'Concat',
+    url: '/',
     type: 'website',
     images: [
       {
         url: '/og.png',
         width: 1200,
         height: 630,
-        alt: 'Wolf-Cut — Your videos. Your rules.',
+        alt: 'Concat — Your videos. Your rules.',
       },
     ],
   },
   twitter: {
     card: 'summary_large_image',
-    title: 'Wolf-Cut | Your videos. Your rules.',
+    title: 'Concat | Your videos. Your rules.',
     description:
       'A free, open-source video editor that keeps your creative process local.',
     images: ['/og.png'],
   },
   icons: {
-    icon: '/wolfcut-logo.png',
+    icon: '/favicon.svg',
   },
 };
 
