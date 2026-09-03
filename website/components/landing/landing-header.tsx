@@ -108,7 +108,7 @@ export function LandingHeader() {
       <nav className="nav-frame" aria-label="Primary navigation">
         <Link className="brand-link" href="/" aria-label="Concat home">
           <Image
-            src="/concat-logo.png"
+            src="/concat-logo-green.png"
             alt=""
             width={40}
             height={40}

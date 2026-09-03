@@ -44,7 +44,7 @@ export const metadata: Metadata = {
     images: ['/og.png'],
   },
   icons: {
-    icon: '/concat-logo.png',
+    icon: '/concat-logo-green.png',
   },
 };
 

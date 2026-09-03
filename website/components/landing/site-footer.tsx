@@ -107,7 +107,7 @@ export function SiteFooter() {
         </div>
         <div className="footer-content page-width">
           <div className="footer-brand">
-            <Image src="/concat-logo.png" alt="" width={52} height={52} />
+            <Image src="/concat-logo-green.png" alt="" width={52} height={52} />
             <h2>Concat</h2>
             <p>Cut locally. Create freely.</p>
           </div>
