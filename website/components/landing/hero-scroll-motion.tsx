@@ -2,16 +2,15 @@
 
 import Image from 'next/image';
 import { useEffect, useRef } from 'react';
-import { AUTO_DOWNLOAD_URL, REPOSITORY_URL } from '@/lib/downloads';
+import { AUTO_DOWNLOAD_URL } from '@/lib/downloads';
 
-const repositoryUrl = REPOSITORY_URL;
 const headlineLines = ['Your videos.', 'Your rules.'] as const;
 const headlineLabel = headlineLines.join(' ');
 
-function Arrow({ direction = 'down' }: { direction?: 'down' | 'out' }) {
+function Arrow() {
   return (
     <span className="button-arrow" aria-hidden="true">
-      {direction === 'out' ? '↗' : '↓'}
+      ↓
     </span>
   );
 }
@@ -184,15 +183,6 @@ export function HeroScrollMotion() {
             <a className="button button-primary" href={AUTO_DOWNLOAD_URL}>
               <span>Download Concat</span>
               <Arrow />
-            </a>
-            <a
-              className="button button-secondary"
-              href={repositoryUrl}
-              target="_blank"
-              rel="noopener noreferrer"
-            >
-              <span>View source</span>
-              <Arrow direction="out" />
             </a>
           </div>
           <p className="platform-note">

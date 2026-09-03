@@ -288,11 +288,6 @@ button {
     0 6px 10px rgb(0 0 0 / 42%),
     0 12px 40px rgb(198 244 50 / 18%);
 }
-.button-secondary {
-  background: var(--surface-1);
-  color: var(--foreground);
-  box-shadow: 0 6px 18px rgb(0 0 0 / 24%);
-}
 .button-arrow {
   position: absolute;
   top: 50%;
