@@ -110,6 +110,13 @@ jobs:
           "LIBCLANG_PATH=C:\Program Files\LLVM\bin" | Out-File -FilePath $env:GITHUB_ENV -Append
           "$dir\bin" | Out-File -FilePath $env:GITHUB_PATH -Append
 
+      # rust-cache restores sherpa's build-script output but intentionally
+      # omits its downloaded native archive. Re-run that script so its link
+      # path always points at libraries present on this runner.
+      - name: Refresh speech native libraries
+        run: cargo clean -p sherpa-onnx-sys
+        working-directory: engine
+
       # The shipping profile: fat LTO, panic=abort, stripped. See the
       # workspace Cargo.toml for what each knob costs.
       - name: Build app
