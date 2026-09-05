@@ -15,7 +15,7 @@
 
 use std::path::Path;
 
-use concat_project::model::{ClipKind as ModelClipKind, Project, Timeline};
+use concat_project::model::{ClipKind as ModelClipKind, KeyframeProperty, Project, Timeline};
 
 use crate::chains::{audio_filter_chain, video_effect_chain};
 use crate::{ClipKind, ExportClip, ExportKey, TransitionSpec};
@@ -57,6 +57,7 @@ pub fn flatten_timeline_in(
             // its opacity the strength and its fades the ramps.
             if clip.kind == ModelClipKind::Layer {
                 return Some(ExportClip {
+                    source_id: clip.id.clone(),
                     path: String::new(),
                     kind: ClipKind::Layer,
                     start: clip.start,
@@ -83,10 +84,16 @@ pub fn flatten_timeline_in(
                     scale: 1.0,
                     offset_x: 0.0,
                     offset_y: 0.0,
+                    anchor_x: 0.0,
+                    anchor_y: 0.0,
                     rotation: 0.0,
+                    rotation_x: 0.0,
+                    rotation_y: 0.0,
+                    position_z: 0.0,
                     stretch_x: 1.0,
                     stretch_y: 1.0,
                     opacity: clip.opacity,
+                    layer_order: clip.layer_order,
                     video_filter_chain: video_effect_chain(&clip.video_effects),
                     transition: None,
                     video_fade_in: 0.0,
@@ -95,12 +102,15 @@ pub fn flatten_timeline_in(
                     has_audio: Some(false),
                     cutout: None,
                     mask_dir: String::new(),
+                    masks: Vec::new(),
+                    masks_enabled: false,
                 });
             }
 
             let media = project.media.iter().find(|item| item.id == clip.media_id)?;
 
             Some(ExportClip {
+                source_id: clip.id.clone(),
                 path: media.path.clone(),
                 kind: match clip.kind {
                     ModelClipKind::Video => ClipKind::Video,
@@ -122,13 +132,24 @@ pub fn flatten_timeline_in(
                 filter_chain: audio_filter_chain(&clip.filters),
                 speed: clip.speed,
                 preserve_pitch: clip.preserve_pitch,
-                speed_curve: clip
-                    .speed_curve
-                    .as_deref()
-                    .unwrap_or(&[])
-                    .iter()
-                    .map(|point| (point.at, point.speed))
-                    .collect(),
+                speed_curve: if clip.keyframes.track(KeyframeProperty::TimeRemap).is_empty() {
+                    clip.speed_curve
+                        .as_deref()
+                        .unwrap_or(&[])
+                        .iter()
+                        .map(|point| (point.at, point.speed))
+                        .collect()
+                } else {
+                    // SpeedCurve is piecewise linear. Sampling through the
+                    // document's canonical evaluator preserves custom cubic
+                    // easing and post-key behavior for preview and export.
+                    let segments = ((clip.duration * 60.0).ceil() as usize).clamp(64, 512);
+                    clip.keyframes.sampled_named_values(
+                        KeyframeProperty::TimeRemap.id(),
+                        clip.speed,
+                        segments,
+                    )
+                },
                 reverse: clip.reverse,
                 animation: export_keys(clip),
                 flip_h: clip.flip_h,
@@ -143,10 +164,16 @@ pub fn flatten_timeline_in(
                 scale: clip.scale,
                 offset_x: clip.offset_x,
                 offset_y: clip.offset_y,
+                anchor_x: clip.anchor_x,
+                anchor_y: clip.anchor_y,
                 rotation: clip.rotation,
+                rotation_x: clip.rotation_x,
+                rotation_y: clip.rotation_y,
+                position_z: clip.position_z,
                 stretch_x: clip.stretch_x,
                 stretch_y: clip.stretch_y,
                 opacity: clip.opacity,
+                layer_order: clip.layer_order,
                 video_filter_chain: video_effect_chain(&clip.video_effects),
                 // Passed through unconditionally: `resolve_transitions` is
                 // the one adjacency judge (frame/2 tolerance). A fixed
@@ -171,6 +198,8 @@ pub fn flatten_timeline_in(
                         .into_owned(),
                     _ => String::new(),
                 },
+                masks: clip.masks.clone(),
+                masks_enabled: clip.masks_enabled,
             })
         })
         .collect()
@@ -190,7 +219,7 @@ fn pick_timeline<'a>(project: &'a Project, timeline_id: Option<&str>) -> Option<
 /// The clip's animation presets, materialised for its current length as
 /// the keys the engine plays. See `concat_project::animation`.
 pub fn export_keys(clip: &concat_project::model::Clip) -> Vec<ExportKey> {
-    use concat_core::animate::Ease;
+    use concat_core::animate::{Ease, PostBehavior};
     let Some(animation) = concat_project::animation::animation_of(clip) else {
         return Vec::new();
     };
@@ -199,8 +228,16 @@ pub fn export_keys(clip: &concat_project::model::Clip) -> Vec<ExportKey> {
         ("scale", &animation.scale),
         ("offsetX", &animation.offset_x),
         ("offsetY", &animation.offset_y),
+        ("anchorX", &animation.anchor_x),
+        ("anchorY", &animation.anchor_y),
         ("rotation", &animation.rotation),
+        ("rotationX", &animation.rotation_x),
+        ("rotationY", &animation.rotation_y),
+        ("positionZ", &animation.position_z),
+        ("stretchX", &animation.stretch_x),
+        ("stretchY", &animation.stretch_y),
         ("opacity", &animation.opacity),
+        ("layerOrder", &animation.layer_order),
     ] {
         for key in track.keys() {
             out.push(ExportKey {
@@ -212,6 +249,46 @@ pub fn export_keys(clip: &concat_project::model::Clip) -> Vec<ExportKey> {
                     Ease::In => "in",
                     Ease::Out => "out",
                     Ease::InOut => "inOut",
+                }
+                .to_owned(),
+                curve: key
+                    .curve
+                    .map(|curve| [curve.x1, curve.y1, curve.x2, curve.y2]),
+                spatial_in: key.spatial_in,
+                spatial_out: key.spatial_out,
+                post: match track.post_behavior() {
+                    PostBehavior::Hold => "hold",
+                    PostBehavior::Reset => "reset",
+                    PostBehavior::Loop => "loop",
+                    PostBehavior::Extrapolate => "extrapolate",
+                }
+                .to_owned(),
+            });
+        }
+    }
+    for (property, track) in &animation.parameters {
+        for key in track.keys() {
+            out.push(ExportKey {
+                property: property.clone(),
+                at: key.at,
+                value: key.value,
+                ease: match key.ease {
+                    Ease::Linear => "linear",
+                    Ease::In => "in",
+                    Ease::Out => "out",
+                    Ease::InOut => "inOut",
+                }
+                .to_owned(),
+                curve: key
+                    .curve
+                    .map(|curve| [curve.x1, curve.y1, curve.x2, curve.y2]),
+                spatial_in: key.spatial_in,
+                spatial_out: key.spatial_out,
+                post: match track.post_behavior() {
+                    PostBehavior::Hold => "hold",
+                    PostBehavior::Reset => "reset",
+                    PostBehavior::Loop => "loop",
+                    PostBehavior::Extrapolate => "extrapolate",
                 }
                 .to_owned(),
             });

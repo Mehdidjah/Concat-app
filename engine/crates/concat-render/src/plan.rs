@@ -38,6 +38,8 @@ pub struct PlannedLayer {
     pub paced: bool,
     /// How the layer's colour meets what is beneath it.
     pub blend: concat_core::timeline::Blend,
+    /// Effective stacking key: lane order plus the animated Layer order.
+    pub stacking_order: i32,
 }
 
 /// Everything needed to draw one output frame.
@@ -68,7 +70,7 @@ impl FramePlan {
 pub fn plan_frame(timeline: &Timeline, time: Rational) -> FramePlan {
     let mut layers = Vec::new();
 
-    for (track_id, track) in timeline.tracks() {
+    for (lane, (track_id, track)) in timeline.tracks().enumerate() {
         if !track.enabled || track.kind != TrackKind::Video {
             continue;
         }
@@ -93,8 +95,13 @@ pub fn plan_frame(timeline: &Timeline, time: Rational) -> FramePlan {
             transform: clip.transform_at(time),
             paced: clip.is_paced(),
             blend: clip.blend,
+            stacking_order: (lane as i32).saturating_mul(256) + clip.layer_order_at(time),
         });
     }
+
+    // Stable sorting keeps document/lane order deterministic when two
+    // animated stacking keys meet.
+    layers.sort_by_key(|layer| layer.stacking_order);
 
     FramePlan {
         time,

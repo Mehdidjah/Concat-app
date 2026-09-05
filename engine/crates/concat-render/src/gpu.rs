@@ -808,8 +808,8 @@ impl WgpuCompositor {
         let width = layer.frame.width() as f32;
         let height = layer.frame.height() as f32;
 
-        let centre_x = layer.x as f32 + width / 2.0 + placement.translate_x;
-        let centre_y = layer.y as f32 + height / 2.0 + placement.translate_y;
+        let centre_x = layer.x as f32 + width / 2.0 + placement.translate_x + placement.anchor_x;
+        let centre_y = layer.y as f32 + height / 2.0 + placement.translate_y + placement.anchor_y;
         let (sin, cos) = placement.rotation.sin_cos();
         let scale_x = (placement.scale * placement.stretch_x).max(1e-6);
         let scale_y = (placement.scale * placement.stretch_y).max(1e-6);
@@ -818,8 +818,8 @@ impl WgpuCompositor {
             // Source-space offset from centre, scaled per axis, then rotated
             // clockwise in y-down coordinates - the forward form of the CPU
             // inverse map.
-            let dx = sx * width / 2.0 * scale_x;
-            let dy = sy * height / 2.0 * scale_y;
+            let dx = (sx * width / 2.0 - placement.anchor_x) * scale_x;
+            let dy = (sy * height / 2.0 - placement.anchor_y) * scale_y;
             let px = centre_x + dx * cos - dy * sin;
             let py = centre_y + dx * sin + dy * cos;
             Vertex {

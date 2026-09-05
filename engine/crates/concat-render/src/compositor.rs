@@ -28,6 +28,9 @@ pub struct Placement {
     pub translate_x: f32,
     /// Vertical offset of the layer's centre from its base position, pixels.
     pub translate_y: f32,
+    /// Pivot offset from the layer centre, in output pixels.
+    pub anchor_x: f32,
+    pub anchor_y: f32,
     /// A multiplier on the width beyond `scale`; 1 keeps the aspect.
     pub stretch_x: f32,
     /// The same for the height.
@@ -41,6 +44,8 @@ impl Placement {
         rotation: 0.0,
         translate_x: 0.0,
         translate_y: 0.0,
+        anchor_x: 0.0,
+        anchor_y: 0.0,
         stretch_x: 1.0,
         stretch_y: 1.0,
     };
@@ -219,19 +224,47 @@ fn blend_transformed(output: &mut Frame, layer: &Layer<'_>, opacity: f32) {
     let src_w = source.width() as f32;
     let src_h = source.height() as f32;
     // The layer's centre in output space, after translation.
-    let centre_x = layer.x as f32 + src_w / 2.0 + placement.translate_x;
-    let centre_y = layer.y as f32 + src_h / 2.0 + placement.translate_y;
+    let base_x = layer.x as f32 + src_w / 2.0 + placement.translate_x;
+    let base_y = layer.y as f32 + src_h / 2.0 + placement.translate_y;
+    let centre_x = base_x + placement.anchor_x;
+    let centre_y = base_y + placement.anchor_y;
 
     // Bounding box of the transformed rectangle, clamped to the output.
-    let half_w = src_w * scale_x / 2.0;
-    let half_h = src_h * scale_y / 2.0;
-    let reach_x = (half_w * cos.abs()) + (half_h * sin.abs());
-    let reach_y = (half_w * sin.abs()) + (half_h * cos.abs());
+    let transformed = |qx: f32, qy: f32| {
+        let dx = (qx - placement.anchor_x) * scale_x;
+        let dy = (qy - placement.anchor_y) * scale_y;
+        (
+            centre_x + dx * cos - dy * sin,
+            centre_y + dx * sin + dy * cos,
+        )
+    };
+    let corners = [
+        transformed(-src_w / 2.0, -src_h / 2.0),
+        transformed(src_w / 2.0, -src_h / 2.0),
+        transformed(-src_w / 2.0, src_h / 2.0),
+        transformed(src_w / 2.0, src_h / 2.0),
+    ];
+    let min_x = corners
+        .iter()
+        .map(|point| point.0)
+        .fold(f32::INFINITY, f32::min);
+    let max_x = corners
+        .iter()
+        .map(|point| point.0)
+        .fold(f32::NEG_INFINITY, f32::max);
+    let min_y = corners
+        .iter()
+        .map(|point| point.1)
+        .fold(f32::INFINITY, f32::min);
+    let max_y = corners
+        .iter()
+        .map(|point| point.1)
+        .fold(f32::NEG_INFINITY, f32::max);
 
-    let x_from = ((centre_x - reach_x).floor().max(0.0)) as u32;
-    let y_from = ((centre_y - reach_y).floor().max(0.0)) as u32;
-    let x_to = ((centre_x + reach_x).ceil().min(output.width() as f32)) as u32;
-    let y_to = ((centre_y + reach_y).ceil().min(output.height() as f32)) as u32;
+    let x_from = (min_x.floor().max(0.0)) as u32;
+    let y_from = (min_y.floor().max(0.0)) as u32;
+    let x_to = (max_x.ceil().min(output.width() as f32)) as u32;
+    let y_to = (max_y.ceil().min(output.height() as f32)) as u32;
     if x_from >= x_to || y_from >= y_to {
         return;
     }
@@ -247,8 +280,8 @@ fn blend_transformed(output: &mut Frame, layer: &Layer<'_>, opacity: f32) {
             // untranslate, unrotate, unscale, then re-origin at the corner.
             let dx = (x as f32 + 0.5) - centre_x;
             let dy = (y as f32 + 0.5) - centre_y;
-            let sx = (dx * cos + dy * sin) / scale_x + src_w / 2.0 - 0.5;
-            let sy = (-dx * sin + dy * cos) / scale_y + src_h / 2.0 - 0.5;
+            let sx = (dx * cos + dy * sin) / scale_x + placement.anchor_x + src_w / 2.0 - 0.5;
+            let sy = (-dx * sin + dy * cos) / scale_y + placement.anchor_y + src_h / 2.0 - 0.5;
 
             if sx < -0.5 || sy < -0.5 || sx > src_w - 0.5 || sy > src_h - 0.5 {
                 continue;
