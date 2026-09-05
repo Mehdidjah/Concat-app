@@ -105,6 +105,10 @@ fn is_unity(value: &f64) -> bool {
     *value == 1.0
 }
 
+fn is_zero(value: &f64) -> bool {
+    *value == 0.0
+}
+
 fn is_false(value: &bool) -> bool {
     !value
 }
@@ -199,6 +203,273 @@ pub enum BrushTool {
     SmartEraser,
     /// Removes everything under the stroke.
     Eraser,
+}
+
+/// A geometric or hand-authored alpha mask attached to a picture clip.
+///
+/// Coordinates are relative to the decoded picture rather than the output
+/// frame, so the mask follows crop, flip, placement and animation exactly as
+/// if it had been painted on the source itself.
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClipMask {
+    /// Stable identity used by the inspector and namespaced keyframe tracks.
+    pub id: String,
+    /// The analytic or authored geometry this mask uses.
+    pub shape: MaskShape,
+    /// Whether this mask participates while the clip-level switch is on.
+    #[serde(default = "yes")]
+    pub enabled: bool,
+    /// Keeps everything outside the shape instead of everything inside it.
+    #[serde(default)]
+    pub inverted: bool,
+    /// Centre offset: -1 is the leading/top edge, 0 is centred, 1 the
+    /// trailing/bottom edge.
+    #[serde(default)]
+    pub position_x: f64,
+    /// Vertical centre offset on the same terms as `position_x`.
+    #[serde(default)]
+    pub position_y: f64,
+    /// Fractions of the decoded picture's width and height.
+    #[serde(default = "default_mask_size")]
+    pub width: f64,
+    /// Fraction of the decoded picture's height.
+    #[serde(default = "default_mask_size")]
+    pub height: f64,
+    /// Clockwise degrees about the mask's centre.
+    #[serde(default)]
+    pub rotation: f64,
+    /// Edge softness as a fraction of the shorter picture edge.
+    #[serde(default)]
+    pub feather: f64,
+    /// Rectangle/filmstrip corner radius, 0 square through 1 pill-shaped.
+    #[serde(default)]
+    pub roundness: f64,
+    /// Whether the inspector edits width and height together.
+    #[serde(default = "yes")]
+    pub linked: bool,
+    /// Words cut through a Text mask. Other shapes ignore this.
+    #[serde(default = "default_mask_text")]
+    pub text: String,
+    /// Brush path or Pen polygon in source-picture fractions.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub points: Vec<[f64; 2]>,
+    /// Brush diameter as a fraction of picture width.
+    #[serde(default = "default_mask_brush")]
+    pub brush_size: f64,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+/// Built-in geometric and authored mask kinds.
+pub enum MaskShape {
+    /// One side of a rotatable dividing line.
+    Split,
+    /// Three parallel rounded bands.
+    Filmstrip,
+    /// An ellipse inside the configured bounds.
+    Circle,
+    #[default]
+    /// A rectangle with optional rounded corners.
+    Rectangle,
+    /// A five-point star.
+    Star,
+    /// A heart silhouette.
+    Heart,
+    /// The alpha of a rendered text string.
+    Text,
+    /// A freehand round brush path.
+    Brush,
+    /// A closed user-authored polygon.
+    Pen,
+}
+
+impl MaskShape {
+    /// Inspector order, kept stable because Slint transports the ordinal.
+    pub const ALL: [Self; 9] = [
+        Self::Split,
+        Self::Filmstrip,
+        Self::Circle,
+        Self::Rectangle,
+        Self::Star,
+        Self::Heart,
+        Self::Text,
+        Self::Brush,
+        Self::Pen,
+    ];
+
+    /// Human-facing English name used as a translation key.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Split => "Split",
+            Self::Filmstrip => "Filmstrip",
+            Self::Circle => "Circle",
+            Self::Rectangle => "Rectangle",
+            Self::Star => "Stars",
+            Self::Heart => "Heart",
+            Self::Text => "Text",
+            Self::Brush => "Brush",
+            Self::Pen => "Pen",
+        }
+    }
+}
+
+/// A mask setting that may use the same namespaced keyframe model as an
+/// effect parameter or clip transform.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum MaskProperty {
+    /// Horizontal centre offset.
+    PositionX,
+    /// Vertical centre offset.
+    PositionY,
+    /// Clockwise degrees.
+    Rotation,
+    /// Fraction of source width.
+    Width,
+    /// Fraction of source height.
+    Height,
+    /// Soft edge radius.
+    Feather,
+    /// Rectangle corner radius.
+    Roundness,
+}
+
+impl MaskProperty {
+    /// Inspector order, kept stable because Slint transports the ordinal.
+    pub const ALL: [Self; 7] = [
+        Self::PositionX,
+        Self::PositionY,
+        Self::Rotation,
+        Self::Width,
+        Self::Height,
+        Self::Feather,
+        Self::Roundness,
+    ];
+
+    /// The suffix used by this property's namespaced keyframe track.
+    pub const fn suffix(self) -> &'static str {
+        match self {
+            Self::PositionX => "positionX",
+            Self::PositionY => "positionY",
+            Self::Rotation => "rotation",
+            Self::Width => "width",
+            Self::Height => "height",
+            Self::Feather => "feather",
+            Self::Roundness => "roundness",
+        }
+    }
+
+    /// Stable keyframe track id for one mask's property.
+    pub fn id(self, mask_id: &str) -> String {
+        format!("mask:{mask_id}:{}", self.suffix())
+    }
+}
+
+fn default_mask_size() -> f64 {
+    0.65
+}
+
+fn default_mask_text() -> String {
+    "TEXT".to_owned()
+}
+
+fn default_mask_brush() -> f64 {
+    0.08
+}
+
+impl ClipMask {
+    /// Makes one mask in its shape-appropriate useful default size.
+    pub fn new(id: String, shape: MaskShape) -> Self {
+        let (width, height, roundness) = match shape {
+            MaskShape::Split => (2.0, 1.0, 0.0),
+            MaskShape::Filmstrip => (1.2, 0.35, 0.08),
+            MaskShape::Circle => (0.65, 0.65, 1.0),
+            MaskShape::Rectangle => (0.7, 0.55, 0.08),
+            MaskShape::Star => (0.65, 0.65, 0.0),
+            MaskShape::Heart => (0.68, 0.62, 0.0),
+            MaskShape::Text => (0.85, 0.35, 0.0),
+            MaskShape::Brush => (1.0, 1.0, 0.0),
+            MaskShape::Pen => (1.0, 1.0, 0.0),
+        };
+        Self {
+            id,
+            shape,
+            enabled: true,
+            inverted: false,
+            position_x: 0.0,
+            position_y: 0.0,
+            width,
+            height,
+            rotation: 0.0,
+            feather: 0.0,
+            roundness,
+            linked: true,
+            text: default_mask_text(),
+            points: Vec::new(),
+            brush_size: default_mask_brush(),
+        }
+    }
+
+    /// Reads an animatable property.
+    pub fn value(&self, property: MaskProperty) -> f64 {
+        match property {
+            MaskProperty::PositionX => self.position_x,
+            MaskProperty::PositionY => self.position_y,
+            MaskProperty::Rotation => self.rotation,
+            MaskProperty::Width => self.width,
+            MaskProperty::Height => self.height,
+            MaskProperty::Feather => self.feather,
+            MaskProperty::Roundness => self.roundness,
+        }
+    }
+
+    /// Writes and clamps an animatable property.
+    pub fn set_value(&mut self, property: MaskProperty, value: f64) {
+        let value = match property {
+            MaskProperty::PositionX | MaskProperty::PositionY => value.clamp(-2.0, 2.0),
+            MaskProperty::Rotation => value.clamp(-3600.0, 3600.0),
+            MaskProperty::Width | MaskProperty::Height => value.clamp(0.01, 4.0),
+            MaskProperty::Feather => value.clamp(0.0, 0.5),
+            MaskProperty::Roundness => value.clamp(0.0, 1.0),
+        };
+        match property {
+            MaskProperty::PositionX => self.position_x = value,
+            MaskProperty::PositionY => self.position_y = value,
+            MaskProperty::Rotation => self.rotation = value,
+            MaskProperty::Width => self.width = value,
+            MaskProperty::Height => self.height = value,
+            MaskProperty::Feather => self.feather = value,
+            MaskProperty::Roundness => self.roundness = value,
+        }
+    }
+
+    /// Normalises values read from a document or received in a command.
+    pub fn tidy(mut self) -> Self {
+        self.position_x = finite_or(self.position_x, 0.0).clamp(-2.0, 2.0);
+        self.position_y = finite_or(self.position_y, 0.0).clamp(-2.0, 2.0);
+        self.width = finite_or(self.width, default_mask_size()).clamp(0.01, 4.0);
+        self.height = finite_or(self.height, default_mask_size()).clamp(0.01, 4.0);
+        self.rotation = finite_or(self.rotation, 0.0).clamp(-3600.0, 3600.0);
+        self.feather = finite_or(self.feather, 0.0).clamp(0.0, 0.5);
+        self.roundness = finite_or(self.roundness, 0.0).clamp(0.0, 1.0);
+        self.brush_size = finite_or(self.brush_size, default_mask_brush()).clamp(0.002, 1.0);
+        self.text = self.text.trim().chars().take(120).collect();
+        if self.text.is_empty() {
+            self.text = default_mask_text();
+        }
+        self.points
+            .retain(|point| point.iter().all(|value| value.is_finite()));
+        for [x, y] in &mut self.points {
+            if *x < 0.0 && *y < 0.0 {
+                *x = -1.0;
+                *y = -1.0;
+                continue;
+            }
+            *x = x.clamp(0.0, 1.0);
+            *y = y.clamp(0.0, 1.0);
+        }
+        self
+    }
 }
 
 /// The edge softness a cutout starts with.
@@ -316,6 +587,580 @@ pub struct ClipAnimation {
     pub preset: String,
     /// Seconds the shape takes, for In and Out; ignored by a Combo.
     pub duration: f64,
+}
+
+/// How a custom keyframe is approached from the preceding key.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum KeyframeEase {
+    /// Straight line between points.
+    #[default]
+    Linear,
+    /// Starts slowly and arrives quickly.
+    In,
+    /// Starts quickly and eases into the point.
+    Out,
+    /// Eases at both ends of the segment.
+    InOut,
+}
+
+/// A custom temporal cubic Bezier. X is time and Y is interpolation progress;
+/// both handles stay normalised so the same curve works at every clip length.
+#[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TemporalCurve {
+    pub x1: f64,
+    pub y1: f64,
+    pub x2: f64,
+    pub y2: f64,
+}
+
+impl Default for TemporalCurve {
+    fn default() -> Self {
+        Self {
+            x1: 0.25,
+            y1: 0.1,
+            x2: 0.25,
+            y2: 1.0,
+        }
+    }
+}
+
+impl TemporalCurve {
+    pub fn tidy(mut self) -> Self {
+        self.x1 = finite_or(self.x1, 0.25).clamp(0.0, 1.0);
+        self.y1 = finite_or(self.y1, 0.1).clamp(-2.0, 3.0);
+        self.x2 = finite_or(self.x2, 0.25).clamp(0.0, 1.0);
+        self.y2 = finite_or(self.y2, 1.0).clamp(-2.0, 3.0);
+        self
+    }
+}
+
+fn finite_or(value: f64, fallback: f64) -> f64 {
+    value.is_finite().then_some(value).unwrap_or(fallback)
+}
+
+/// What an animation track does after its final key.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum PostKeyBehavior {
+    /// Keep the final keyed value.
+    #[default]
+    Hold,
+    /// Return to the property's unkeyed value.
+    Reset,
+    /// Repeat the keyed time span.
+    Loop,
+    /// Continue with the final segment's slope.
+    Extrapolate,
+}
+
+impl KeyframeEase {
+    /// Map a linear segment fraction through this easing shape.
+    pub fn apply(self, t: f64) -> f64 {
+        let t = t.clamp(0.0, 1.0);
+        match self {
+            Self::Linear => t,
+            Self::In => t * t,
+            Self::Out => 1.0 - (1.0 - t) * (1.0 - t),
+            Self::InOut => {
+                if t < 0.5 {
+                    2.0 * t * t
+                } else {
+                    1.0 - (-2.0 * t + 2.0).powi(2) / 2.0
+                }
+            }
+        }
+    }
+}
+
+/// One editable animation point on one clip property.
+///
+/// Unlike preset animation keys, these values are absolute: a scale key of
+/// `1.5` means 150%, and an X key of `0.1` means one tenth of the frame to
+/// the right. That is also what the inspector displays and saves.
+#[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClipKeyframe {
+    /// Where in the clip, `0..=1`.
+    pub at: f64,
+    /// The property's value at that point.
+    pub value: f64,
+    /// How this point is approached from the preceding point.
+    #[serde(default)]
+    pub ease: KeyframeEase,
+    /// An optional temporal curve, independent from Position's spatial path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub temporal_curve: Option<TemporalCurve>,
+    /// Incoming Position tangent in frame-relative X/Y units. Non-position
+    /// tracks ignore it, but keeping it on the generic point makes selection,
+    /// persistence and undo identical for every property.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spatial_in: Option<[f64; 2]>,
+    /// Outgoing Position tangent, separate from temporal easing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spatial_out: Option<[f64; 2]>,
+}
+
+impl ClipKeyframe {
+    pub fn linear(at: f64, value: f64) -> Self {
+        Self {
+            at,
+            value,
+            ease: KeyframeEase::Linear,
+            temporal_curve: None,
+            spatial_in: None,
+            spatial_out: None,
+        }
+    }
+}
+
+/// The one storage format used for every animatable property. Dynamic ids
+/// such as `effect:blur:radius`, `expression:slider`, `element:title:x`, and
+/// `mesh:face:vertex:12:y` use exactly the same representation as transform
+/// properties.
+#[derive(Clone, PartialEq, Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClipKeyframeTrack {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub keys: Vec<ClipKeyframe>,
+    #[serde(default, skip_serializing_if = "is_hold")]
+    pub post: PostKeyBehavior,
+}
+
+fn is_hold(value: &PostKeyBehavior) -> bool {
+    *value == PostKeyBehavior::Hold
+}
+
+impl<'de> Deserialize<'de> for ClipKeyframeTrack {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Wire {
+            // Projects created by the first keyframe implementation stored a
+            // bare array. Accept it forever as a Hold track.
+            Legacy(Vec<ClipKeyframe>),
+            Current {
+                #[serde(default)]
+                keys: Vec<ClipKeyframe>,
+                #[serde(default)]
+                post: PostKeyBehavior,
+            },
+        }
+        Ok(match Wire::deserialize(deserializer)? {
+            Wire::Legacy(keys) => Self {
+                keys,
+                post: PostKeyBehavior::Hold,
+            },
+            Wire::Current { keys, post } => Self { keys, post },
+        })
+    }
+}
+
+/// The independently editable keyframe track for every animatable clip
+/// property. Empty tracks cost nothing in a project document.
+#[derive(Clone, PartialEq, Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClipKeyframes {
+    /// Property id to track. Built-ins use stable camelCase ids; namespaced
+    /// ids carry effect, expression, element and mesh animation without a
+    /// document schema change.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub tracks: BTreeMap<String, ClipKeyframeTrack>,
+}
+
+impl<'de> Deserialize<'de> for ClipKeyframes {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Default, Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Wire {
+            #[serde(default)]
+            tracks: BTreeMap<String, ClipKeyframeTrack>,
+            #[serde(default)]
+            scale: Vec<ClipKeyframe>,
+            #[serde(default)]
+            offset_x: Vec<ClipKeyframe>,
+            #[serde(default)]
+            offset_y: Vec<ClipKeyframe>,
+            #[serde(default)]
+            rotation: Vec<ClipKeyframe>,
+            #[serde(default)]
+            opacity: Vec<ClipKeyframe>,
+        }
+        let mut wire = Wire::deserialize(deserializer)?;
+        for (id, keys) in [
+            ("scale", wire.scale),
+            ("offsetX", wire.offset_x),
+            ("offsetY", wire.offset_y),
+            ("rotation", wire.rotation),
+            ("opacity", wire.opacity),
+        ] {
+            if !keys.is_empty() {
+                wire.tracks
+                    .entry(id.to_owned())
+                    .or_insert(ClipKeyframeTrack {
+                        keys,
+                        post: PostKeyBehavior::Hold,
+                    });
+            }
+        }
+        Ok(Self {
+            tracks: wire.tracks,
+        })
+    }
+}
+
+/// One of the properties represented by [`ClipKeyframes`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum KeyframeProperty {
+    /// Fitted-size multiplier.
+    Scale,
+    /// Horizontal frame offset.
+    OffsetX,
+    /// Vertical frame offset.
+    OffsetY,
+    /// Horizontal anchor/pivot relative to the picture centre.
+    AnchorX,
+    /// Vertical anchor/pivot relative to the picture centre.
+    AnchorY,
+    /// Clockwise angle.
+    Rotation,
+    /// Rotation around the horizontal axis.
+    RotationX,
+    /// Rotation around the vertical axis.
+    RotationY,
+    /// Position toward/away from the camera.
+    PositionZ,
+    /// Independent horizontal scale.
+    StretchX,
+    /// Independent vertical scale.
+    StretchY,
+    /// Blend strength.
+    Opacity,
+    /// Relative stacking offset from the clip's lane.
+    LayerOrder,
+    /// Playback rate over the clip.
+    TimeRemap,
+}
+
+impl KeyframeProperty {
+    pub const ALL: [Self; 14] = [
+        Self::Scale,
+        Self::OffsetX,
+        Self::OffsetY,
+        Self::AnchorX,
+        Self::AnchorY,
+        Self::Rotation,
+        Self::RotationX,
+        Self::RotationY,
+        Self::PositionZ,
+        Self::StretchX,
+        Self::StretchY,
+        Self::Opacity,
+        Self::LayerOrder,
+        Self::TimeRemap,
+    ];
+
+    pub const fn id(self) -> &'static str {
+        match self {
+            Self::Scale => "scale",
+            Self::OffsetX => "offsetX",
+            Self::OffsetY => "offsetY",
+            Self::AnchorX => "anchorX",
+            Self::AnchorY => "anchorY",
+            Self::Rotation => "rotation",
+            Self::RotationX => "rotationX",
+            Self::RotationY => "rotationY",
+            Self::PositionZ => "positionZ",
+            Self::StretchX => "stretchX",
+            Self::StretchY => "stretchY",
+            Self::Opacity => "opacity",
+            Self::LayerOrder => "layerOrder",
+            Self::TimeRemap => "timeRemap",
+        }
+    }
+}
+
+impl ClipKeyframes {
+    /// Construct a set from built-in property tracks. This is also convenient
+    /// for importers while the on-disk representation remains generic.
+    pub fn from_tracks(
+        tracks: impl IntoIterator<Item = (KeyframeProperty, Vec<ClipKeyframe>)>,
+    ) -> Self {
+        let mut out = Self::default();
+        for (property, keys) in tracks {
+            out.named_track_mut(property.id()).keys = keys;
+        }
+        out.tidy()
+    }
+
+    /// True when no property has a key.
+    pub fn is_empty(&self) -> bool {
+        self.tracks.values().all(|track| track.keys.is_empty())
+    }
+
+    /// The selected property's sorted keys.
+    pub fn track(&self, property: KeyframeProperty) -> &[ClipKeyframe] {
+        self.named_track(property.id())
+    }
+
+    /// The selected property's mutable keys.
+    pub fn track_mut(&mut self, property: KeyframeProperty) -> &mut Vec<ClipKeyframe> {
+        &mut self.named_track_mut(property.id()).keys
+    }
+
+    pub fn named_track(&self, id: &str) -> &[ClipKeyframe] {
+        self.tracks
+            .get(id)
+            .map_or(&[], |track| track.keys.as_slice())
+    }
+
+    pub fn named_track_mut(&mut self, id: &str) -> &mut ClipKeyframeTrack {
+        self.tracks.entry(id.to_owned()).or_default()
+    }
+
+    pub fn post_behavior(&self, property: KeyframeProperty) -> PostKeyBehavior {
+        self.named_post_behavior(property.id())
+    }
+
+    pub fn set_post_behavior(&mut self, property: KeyframeProperty, post: PostKeyBehavior) {
+        self.named_track_mut(property.id()).post = post;
+    }
+
+    /// The end behavior of a built-in or namespaced property.
+    pub fn named_post_behavior(&self, id: &str) -> PostKeyBehavior {
+        self.tracks
+            .get(id)
+            .map_or(PostKeyBehavior::Hold, |track| track.post)
+    }
+
+    /// The track's interpolated absolute value at `at`, or `rest` when it is
+    /// empty.
+    pub fn value_at(&self, property: KeyframeProperty, at: f64, rest: f64) -> f64 {
+        self.named_value_at(property.id(), at, rest)
+    }
+
+    /// Evaluate any property id with the same binary-search path used by the
+    /// built-ins.
+    pub fn named_value_at(&self, id: &str, at: f64, rest: f64) -> f64 {
+        let keys = self.named_track(id);
+        let Some(first) = keys.first() else {
+            return rest;
+        };
+        if at <= first.at {
+            return first.value;
+        }
+        let right_index = keys.partition_point(|key| key.at < at);
+        if right_index >= keys.len() {
+            let last = keys[keys.len() - 1];
+            return match self.named_post_behavior(id) {
+                PostKeyBehavior::Hold => last.value,
+                PostKeyBehavior::Reset => rest,
+                PostKeyBehavior::Loop if keys.len() > 1 => {
+                    let span = last.at - first.at;
+                    if span <= f64::EPSILON {
+                        last.value
+                    } else {
+                        let wrapped = first.at + (at - first.at).rem_euclid(span);
+                        return self.named_value_at(id, wrapped, rest);
+                    }
+                }
+                PostKeyBehavior::Extrapolate if keys.len() > 1 => {
+                    let before = keys[keys.len() - 2];
+                    let span = last.at - before.at;
+                    if span <= f64::EPSILON {
+                        last.value
+                    } else {
+                        last.value + (last.value - before.value) * (at - last.at) / span
+                    }
+                }
+                PostKeyBehavior::Loop | PostKeyBehavior::Extrapolate => last.value,
+            };
+        }
+        let (left, right) = (keys[right_index - 1], keys[right_index]);
+        let span = right.at - left.at;
+        if span <= f64::EPSILON {
+            return right.value;
+        }
+        let linear = (at - left.at) / span;
+        let t = right.temporal_curve.map_or_else(
+            || right.ease.apply(linear),
+            |curve| {
+                concat_core::animate::CubicBezier {
+                    x1: curve.x1,
+                    y1: curve.y1,
+                    x2: curve.x2,
+                    y2: curve.y2,
+                }
+                .solve(linear)
+            },
+        );
+        left.value + (right.value - left.value) * t
+    }
+
+    /// Sample one generic track through the canonical evaluator. Consumers
+    /// which need a piecewise-linear representation (notably media retiming)
+    /// use this rather than reimplementing key lookup or easing.
+    pub fn sampled_named_values(&self, id: &str, rest: f64, segments: usize) -> Vec<(f64, f64)> {
+        let segments = segments.max(1);
+        (0..=segments)
+            .map(|index| {
+                let at = index as f64 / segments as f64;
+                (at, self.named_value_at(id, at, rest))
+            })
+            .collect()
+    }
+
+    /// Mean value of a sampled generic track. Trapezoidal integration keeps
+    /// this identical to the `SpeedCurve` consumed by preview and export.
+    pub fn named_mean(&self, id: &str, rest: f64, segments: usize) -> f64 {
+        self.sampled_named_values(id, rest, segments)
+            .windows(2)
+            .map(|pair| (pair[1].0 - pair[0].0) * (pair[0].1 + pair[1].1) / 2.0)
+            .sum()
+    }
+
+    /// Whether this property has a key close enough to the playhead to be
+    /// considered the current frame.
+    pub fn has_at(&self, property: KeyframeProperty, at: f64, tolerance: f64) -> bool {
+        self.named_has_at(property.id(), at, tolerance)
+    }
+
+    /// Whether any namespaced track has a key on the current frame.
+    pub fn named_has_at(&self, id: &str, at: f64, tolerance: f64) -> bool {
+        let keys = self.named_track(id);
+        let index = keys.partition_point(|key| key.at < at);
+        keys.get(index)
+            .is_some_and(|key| (key.at - at).abs() <= tolerance)
+            || index
+                .checked_sub(1)
+                .and_then(|before| keys.get(before))
+                .is_some_and(|key| (key.at - at).abs() <= tolerance)
+    }
+
+    /// Insert or replace a key at the playhead.
+    pub fn set_at(&mut self, property: KeyframeProperty, at: f64, value: f64, tolerance: f64) {
+        self.set_named_at(property.id(), at, value, tolerance);
+    }
+
+    /// Insert or replace a key on a namespaced property.
+    pub fn set_named_at(&mut self, id: &str, at: f64, value: f64, tolerance: f64) {
+        let at = at.clamp(0.0, 1.0);
+        let keys = &mut self.named_track_mut(id).keys;
+        if let Some(key) = keys.iter_mut().find(|key| (key.at - at).abs() <= tolerance) {
+            key.at = at;
+            key.value = value;
+        } else {
+            keys.push(ClipKeyframe::linear(at, value));
+        }
+        keys.sort_by(|left, right| left.at.total_cmp(&right.at));
+    }
+
+    /// Remove the key on the current frame, leaving neighbouring keys alone.
+    pub fn remove_at(&mut self, property: KeyframeProperty, at: f64, tolerance: f64) -> bool {
+        self.remove_named_at(property.id(), at, tolerance)
+    }
+
+    /// Remove the key on the current frame from a namespaced property.
+    pub fn remove_named_at(&mut self, id: &str, at: f64, tolerance: f64) -> bool {
+        let keys = &mut self.named_track_mut(id).keys;
+        let before = keys.len();
+        keys.retain(|key| (key.at - at).abs() > tolerance);
+        keys.len() != before
+    }
+
+    /// Drop invalid values, clamp times and property values, sort tracks and
+    /// collapse duplicate times. This is used for hand-edited documents too.
+    pub fn tidy(mut self) -> Self {
+        for (id, track) in &mut self.tracks {
+            let property = KeyframeProperty::ALL
+                .into_iter()
+                .find(|property| property.id() == id);
+            let keys = &mut track.keys;
+            keys.retain(|key| key.at.is_finite() && key.value.is_finite());
+            for key in keys.iter_mut() {
+                key.at = key.at.clamp(0.0, 1.0);
+                key.value = match property {
+                    Some(KeyframeProperty::Scale) => key.value.clamp(0.05, 8.0),
+                    Some(KeyframeProperty::OffsetX)
+                    | Some(KeyframeProperty::OffsetY)
+                    | Some(KeyframeProperty::AnchorX)
+                    | Some(KeyframeProperty::AnchorY) => key.value.clamp(-3.0, 3.0),
+                    Some(KeyframeProperty::Rotation)
+                    | Some(KeyframeProperty::RotationX)
+                    | Some(KeyframeProperty::RotationY) => key.value.clamp(-3600.0, 3600.0),
+                    Some(KeyframeProperty::PositionZ) => key.value.clamp(-10.0, 10.0),
+                    Some(KeyframeProperty::StretchX) | Some(KeyframeProperty::StretchY) => {
+                        key.value.clamp(0.01, 16.0)
+                    }
+                    Some(KeyframeProperty::Opacity) => key.value.clamp(0.0, 1.0),
+                    Some(KeyframeProperty::LayerOrder) => key.value.clamp(-128.0, 128.0),
+                    Some(KeyframeProperty::TimeRemap) => key.value.clamp(0.0625, 16.0),
+                    None => key.value,
+                };
+                key.temporal_curve = key.temporal_curve.map(TemporalCurve::tidy);
+                for handle in [&mut key.spatial_in, &mut key.spatial_out] {
+                    if let Some([x, y]) = handle {
+                        if !x.is_finite() || !y.is_finite() {
+                            *handle = None;
+                        } else {
+                            *x = x.clamp(-3.0, 3.0);
+                            *y = y.clamp(-3.0, 3.0);
+                        }
+                    }
+                }
+            }
+            keys.sort_by(|left, right| left.at.total_cmp(&right.at));
+            keys.dedup_by(|left, right| (left.at - right.at).abs() <= 1e-9);
+        }
+        self.tracks.retain(|_, track| !track.keys.is_empty());
+        self
+    }
+
+    /// Re-map every track after a trim or split. `start_shift` is how many
+    /// seconds the new clip begins after the old one; it may be negative when
+    /// the head is extended. Boundary keys preserve the held/interpolated
+    /// value where the new clip begins and ends.
+    pub fn retimed(&self, old_duration: f64, start_shift: f64, new_duration: f64) -> Self {
+        if old_duration <= 0.0 || new_duration <= 0.0 {
+            return Self::default();
+        }
+        let mut out = Self::default();
+        for (id, track) in &self.tracks {
+            let source = &track.keys;
+            if source.is_empty() {
+                continue;
+            }
+            let from = start_shift / old_duration;
+            let to = (start_shift + new_duration) / old_duration;
+            out.named_track_mut(id).post = track.post;
+            let from_value = self.named_value_at(id, from, source[0].value);
+            let to_value = self.named_value_at(id, to, source[source.len() - 1].value);
+            let keys = &mut out.named_track_mut(id).keys;
+            keys.push(ClipKeyframe::linear(0.0, from_value));
+            for key in source {
+                let seconds = key.at * old_duration - start_shift;
+                if seconds > 0.0 && seconds < new_duration {
+                    keys.push(ClipKeyframe {
+                        at: seconds / new_duration,
+                        value: key.value,
+                        ease: key.ease,
+                        temporal_curve: key.temporal_curve,
+                        spatial_in: key.spatial_in,
+                        spatial_out: key.spatial_out,
+                    });
+                }
+            }
+            keys.push(ClipKeyframe::linear(1.0, to_value));
+        }
+        out.tidy()
+    }
 }
 
 /// One point of a speed curve.
@@ -454,8 +1299,21 @@ pub struct Clip {
     pub offset_x: f64,
     /// The vertical half of `offset_x`'s pair; positive moves down.
     pub offset_y: f64,
+    /// Pivot offset from the picture centre, in frame-relative units.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub anchor_x: f64,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub anchor_y: f64,
     /// Clockwise rotation in degrees, about the picture's centre.
     pub rotation: f64,
+    /// Rotation around the horizontal and vertical axes, in degrees.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub rotation_x: f64,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub rotation_y: f64,
+    /// Depth used by the renderer's bounded perspective projection.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub position_z: f64,
     /// A multiplier on the fitted width beyond `scale`, for a picture
     /// pulled wider or narrower than its aspect; 1 keeps the aspect.
     #[serde(default = "unity", skip_serializing_if = "is_unity")]
@@ -465,6 +1323,9 @@ pub struct Clip {
     pub stretch_y: f64,
     /// Blend strength over whatever is beneath, in 0..1.
     pub opacity: f64,
+    /// Base stacking offset. Animated Layer order is added to it.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub layer_order: f64,
     /// Playback rate. 1 is normal. With a curve set this is the curve's
     /// mean, kept in step by the commands that set either.
     pub speed: f64,
@@ -484,6 +1345,9 @@ pub struct Clip {
     /// A shape over its whole length.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub animation_combo: Option<ClipAnimation>,
+    /// User-authored per-property animation points, independent of presets.
+    #[serde(default, skip_serializing_if = "ClipKeyframes::is_empty")]
+    pub keyframes: ClipKeyframes,
     /// Mirrored left to right.
     #[serde(default, skip_serializing_if = "is_false")]
     pub flip_h: bool,
@@ -502,6 +1366,13 @@ pub struct Clip {
     /// [`Cutout`]. Keying by colour is a package on `video_effects`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cutout: Option<Cutout>,
+    /// Geometric/painted masks, combined as one alpha matte before the clip
+    /// is transformed. Disabled masks stay in the project for later reuse.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub masks: Vec<ClipMask>,
+    /// The clip-level bypass for every geometric mask.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub masks_enabled: bool,
     /// Keep voices at their natural pitch when `speed` is not 1. On by
     /// default; off gives the tape-machine chipmunk/slow-motion sound.
     pub preserve_pitch: bool,
@@ -650,5 +1521,44 @@ impl Timeline {
             .iter()
             .map(|clip| clip.start + clip.duration)
             .fold(0.0, f64::max)
+    }
+}
+
+#[cfg(test)]
+mod keyframe_tests {
+    use super::{ClipKeyframe, ClipKeyframes, KeyframeEase, KeyframeProperty};
+
+    #[test]
+    fn custom_keyframes_use_the_destination_keys_easing() {
+        let keys = ClipKeyframes::from_tracks([(
+            KeyframeProperty::Opacity,
+            vec![
+                ClipKeyframe::linear(0.0, 0.0),
+                ClipKeyframe {
+                    ease: KeyframeEase::Out,
+                    ..ClipKeyframe::linear(0.4, 1.0)
+                },
+            ],
+        )]);
+        assert!((keys.value_at(KeyframeProperty::Opacity, 0.2, 7.0) - 0.75).abs() < 1e-9);
+        assert_eq!(keys.value_at(KeyframeProperty::Opacity, 0.8, 7.0), 1.0);
+    }
+
+    #[test]
+    fn legacy_arrays_migrate_to_generic_hold_tracks() {
+        let keys: ClipKeyframes = serde_json::from_value(serde_json::json!({
+            "scale": [
+                { "at": 0.0, "value": 1.0 },
+                { "at": 0.5, "value": 2.0 }
+            ]
+        }))
+        .expect("legacy keyframes remain readable");
+        assert_eq!(keys.track(KeyframeProperty::Scale).len(), 2);
+        assert_eq!(
+            keys.post_behavior(KeyframeProperty::Scale),
+            super::PostKeyBehavior::Hold
+        );
+        let saved = serde_json::to_value(keys).expect("generic tracks serialize");
+        assert!(saved.get("tracks").is_some());
     }
 }
