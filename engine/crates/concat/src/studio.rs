@@ -25,6 +25,7 @@ use std::sync::Arc;
 
 use concat_effects::Catalogue;
 use concat_effects::manifest::Kind as PackageKind;
+use concat_export::ExportClip;
 use concat_host::export::{self, ExportSpec};
 use concat_host::playback::ClipSpec;
 use concat_host::preview::FrameSpec;
@@ -32,7 +33,8 @@ use concat_host::{AnalyseRequest, Cutouts, ProjectInfo, Session, media, projects
 use concat_media::Peaks;
 use concat_project::commands::{ClipMove, ClipPatch, TrackFlag, TrimEdge};
 use concat_project::model::{
-    self, AppliedFilter, Clip, Project, TextAlign, TextStyle, Timeline, Track, Transition,
+    self, AppliedFilter, Clip, KeyframeEase, KeyframeProperty, PostKeyBehavior, Project,
+    TemporalCurve, TextAlign, TextStyle, Timeline, Track, Transition,
 };
 use concat_project::{Command, why_not_merge};
 use slint::{Model, SharedString, VecModel};
@@ -43,7 +45,7 @@ use crate::dock::{
 use crate::format::{
     bytes, colour_of, eta, frames_timecode, hex_of, hex_with_alpha, wave_path, when_phrase,
 };
-use crate::host::{Host, MediaArt, image_at, image_of, media_art, on_ui, spawn};
+use crate::host::{Host, MediaArt, image_at, image_of, media_art, on_ui, spawn, spawn_unpublished};
 use crate::i18n::{self, t, tf};
 use crate::prefs::Preferences;
 use crate::presets::{self, TextPreset};
@@ -71,6 +73,8 @@ pub const MIN_DURATION: f32 = 1.0 / 60.0;
 const LANE_LARGE: f32 = 80.0;
 const LANE_MEDIUM: f32 = 60.0;
 const LANE_SMALL: f32 = 40.0;
+/// Space added above a clip while its keyframe graph is expanded.
+const KEYFRAME_GRAPH_HEIGHT: f32 = 184.0;
 
 /// How long a title runs when it is placed: long enough to read, short
 /// enough that trimming it is a nudge rather than a fight.
@@ -305,6 +309,91 @@ pub struct LaneView {
     pub size: TrackSize,
 }
 
+/// The property currently shown in the one expanded timeline graph.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum GraphProperty {
+    Scale,
+    OffsetX,
+    OffsetY,
+    Rotation,
+    AnchorX,
+    AnchorY,
+    RotationX,
+    RotationY,
+    PositionZ,
+    StretchX,
+    StretchY,
+    Opacity,
+    LayerOrder,
+    Speed,
+}
+
+impl GraphProperty {
+    fn from_index(index: i32) -> Self {
+        match index {
+            1 => Self::OffsetX,
+            2 => Self::OffsetY,
+            3 => Self::Rotation,
+            4 => Self::AnchorX,
+            5 => Self::AnchorY,
+            6 => Self::RotationX,
+            7 => Self::RotationY,
+            8 => Self::PositionZ,
+            9 => Self::StretchX,
+            10 => Self::StretchY,
+            11 => Self::Opacity,
+            12 => Self::LayerOrder,
+            13 => Self::Speed,
+            _ => Self::Scale,
+        }
+    }
+
+    fn index(self) -> i32 {
+        match self {
+            Self::Scale => 0,
+            Self::OffsetX => 1,
+            Self::OffsetY => 2,
+            Self::Rotation => 3,
+            Self::AnchorX => 4,
+            Self::AnchorY => 5,
+            Self::RotationX => 6,
+            Self::RotationY => 7,
+            Self::PositionZ => 8,
+            Self::StretchX => 9,
+            Self::StretchY => 10,
+            Self::Opacity => 11,
+            Self::LayerOrder => 12,
+            Self::Speed => 13,
+        }
+    }
+
+    fn keyframe(self) -> Option<KeyframeProperty> {
+        match self {
+            Self::Scale => Some(KeyframeProperty::Scale),
+            Self::OffsetX => Some(KeyframeProperty::OffsetX),
+            Self::OffsetY => Some(KeyframeProperty::OffsetY),
+            Self::Rotation => Some(KeyframeProperty::Rotation),
+            Self::AnchorX => Some(KeyframeProperty::AnchorX),
+            Self::AnchorY => Some(KeyframeProperty::AnchorY),
+            Self::RotationX => Some(KeyframeProperty::RotationX),
+            Self::RotationY => Some(KeyframeProperty::RotationY),
+            Self::PositionZ => Some(KeyframeProperty::PositionZ),
+            Self::StretchX => Some(KeyframeProperty::StretchX),
+            Self::StretchY => Some(KeyframeProperty::StretchY),
+            Self::Opacity => Some(KeyframeProperty::Opacity),
+            Self::LayerOrder => Some(KeyframeProperty::LayerOrder),
+            Self::Speed => Some(KeyframeProperty::TimeRemap),
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct KeyframeGraphState {
+    pub clip: String,
+    pub property: GraphProperty,
+    pub selected: Option<usize>,
+}
+
 impl Default for LaneView {
     fn default() -> Self {
         Self {
@@ -403,6 +492,14 @@ pub enum Gesture {
         points: Vec<[f64; 2]>,
         screen: Vec<(f32, f32)>,
     },
+    /// A source-space Brush or Pen mask being authored on the monitor.
+    MaskPaint {
+        clip: String,
+        mask: String,
+        size: f64,
+        points: Vec<[f64; 2]>,
+        screen: Vec<(f32, f32)>,
+    },
 }
 
 /// The custom cutout's brushes, in the inspector's order.
@@ -485,6 +582,9 @@ pub struct Models {
     pub tabs: Rc<VecModel<TimelineTabData>>,
     pub tracks: Rc<VecModel<TrackData>>,
     pub clips: Rc<VecModel<ClipData>>,
+    pub keyframes: Rc<VecModel<KeyframeMarkerData>>,
+    pub masks: Rc<VecModel<MaskChipData>>,
+    pub graph_points: Rc<VecModel<KeyframeGraphPointData>>,
     pub stage: Rc<VecModel<StageItemData>>,
     pub guides: Rc<VecModel<StageGuideData>>,
     pub media: Rc<VecModel<MediaItemData>>,
@@ -526,6 +626,9 @@ impl Models {
             tabs: Rc::new(VecModel::default()),
             tracks: Rc::new(VecModel::default()),
             clips: Rc::new(VecModel::default()),
+            keyframes: Rc::new(VecModel::default()),
+            masks: Rc::new(VecModel::default()),
+            graph_points: Rc::new(VecModel::default()),
             stage: Rc::new(VecModel::default()),
             guides: Rc::new(VecModel::default()),
             media: Rc::new(VecModel::default()),
@@ -615,6 +718,7 @@ pub struct Studio {
 
     // ── the view ──
     pub lane_view: HashMap<String, LaneView>,
+    pub keyframe_graph: Option<KeyframeGraphState>,
     pub selection: Vec<String>,
     pub playhead: f32,
     pub scroll_left: f32,
@@ -625,12 +729,23 @@ pub struct Studio {
     pub quality: usize,
     pub playing: bool,
     transport: slint::Timer,
+    /// Coalesces pointer-rate animation edits to one monitor request per UI
+    /// frame, the desktop equivalent of requestAnimationFrame.
+    preview_frame: slint::Timer,
     /// One clip, held for Paste.
     pub clipboard: Option<Clip>,
     /// The monitor's last frame, and whether another is wanted.
     pub preview: slint::Image,
     preview_busy: bool,
     preview_wanted: bool,
+    /// Monotonically identifies the newest requested picture. A worker may
+    /// finish after another gesture has moved on; that result is discarded.
+    preview_generation: u64,
+    /// A graph gesture gets a cheaper monitor frame and no speculative decode.
+    preview_interactive: bool,
+    /// The export-shaped clip list retained during a graph gesture. Only the
+    /// selected clip's animation keys are replaced between pointer events.
+    preview_flattened: Option<Vec<ExportClip>>,
     /// Said once per session: a monitor that cannot decode says so, and
     /// then stops repeating itself.
     preview_failed: bool,
@@ -695,6 +810,20 @@ pub struct Studio {
     pub painting: bool,
     /// The mask analyses running, by media id, and how far each has got.
     cutout_jobs: HashMap<String, f32>,
+
+    // ── geometric masks ──
+    /// The active mask in the sole selected clip; a stale id falls back to
+    /// that clip's first mask when the selection changes.
+    pub selected_mask: Option<String>,
+    /// Brush/Pen presses paint the active mask instead of moving the clip.
+    pub mask_drawing: bool,
+    /// 0 both, 1 forward, 2 backward.
+    pub mask_track_direction: usize,
+    /// A running tracker, `None` while idle.
+    pub mask_track_progress: Option<f32>,
+    /// Monotonically identifies the newest mask-tracking job. Results from
+    /// jobs that outlive their project or a newer job are discarded.
+    mask_track_generation: u64,
 }
 
 // ── conversions between the document and the window ─────────────────────
@@ -706,6 +835,363 @@ fn kind_of(clip: &Clip) -> ClipKind {
         model::ClipKind::Image => ClipKind::Image,
         model::ClipKind::Text => ClipKind::Text,
         model::ClipKind::Layer => ClipKind::Filter,
+    }
+}
+
+fn keyframe_property(field: ClipField) -> Option<KeyframeProperty> {
+    match field {
+        ClipField::Scale => Some(KeyframeProperty::Scale),
+        ClipField::OffsetX => Some(KeyframeProperty::OffsetX),
+        ClipField::OffsetY => Some(KeyframeProperty::OffsetY),
+        ClipField::AnchorX => Some(KeyframeProperty::AnchorX),
+        ClipField::AnchorY => Some(KeyframeProperty::AnchorY),
+        ClipField::Rotation => Some(KeyframeProperty::Rotation),
+        ClipField::RotationX => Some(KeyframeProperty::RotationX),
+        ClipField::RotationY => Some(KeyframeProperty::RotationY),
+        ClipField::PositionZ => Some(KeyframeProperty::PositionZ),
+        ClipField::StretchX => Some(KeyframeProperty::StretchX),
+        ClipField::StretchY => Some(KeyframeProperty::StretchY),
+        ClipField::Opacity => Some(KeyframeProperty::Opacity),
+        ClipField::LayerOrder => Some(KeyframeProperty::LayerOrder),
+        _ => None,
+    }
+}
+
+fn mask_shape(index: i32) -> model::MaskShape {
+    model::MaskShape::ALL
+        .get(index.max(0) as usize)
+        .copied()
+        .unwrap_or_default()
+}
+
+fn mask_property(index: i32) -> Option<model::MaskProperty> {
+    model::MaskProperty::ALL.get(index.max(0) as usize).copied()
+}
+
+fn clip_property(clip: &Clip, property: KeyframeProperty) -> f64 {
+    match property {
+        KeyframeProperty::Scale => clip.scale,
+        KeyframeProperty::OffsetX => clip.offset_x,
+        KeyframeProperty::OffsetY => clip.offset_y,
+        KeyframeProperty::AnchorX => clip.anchor_x,
+        KeyframeProperty::AnchorY => clip.anchor_y,
+        KeyframeProperty::Rotation => clip.rotation,
+        KeyframeProperty::RotationX => clip.rotation_x,
+        KeyframeProperty::RotationY => clip.rotation_y,
+        KeyframeProperty::PositionZ => clip.position_z,
+        KeyframeProperty::StretchX => clip.stretch_x,
+        KeyframeProperty::StretchY => clip.stretch_y,
+        KeyframeProperty::Opacity => clip.opacity,
+        KeyframeProperty::LayerOrder => clip.layer_order,
+        KeyframeProperty::TimeRemap => clip.speed,
+    }
+}
+
+fn clamp_keyframe_value(property: KeyframeProperty, value: f64) -> f64 {
+    match property {
+        KeyframeProperty::Scale => value.clamp(0.05, 8.0),
+        KeyframeProperty::OffsetX
+        | KeyframeProperty::OffsetY
+        | KeyframeProperty::AnchorX
+        | KeyframeProperty::AnchorY => value.clamp(-3.0, 3.0),
+        KeyframeProperty::Rotation | KeyframeProperty::RotationX | KeyframeProperty::RotationY => {
+            value.clamp(-3600.0, 3600.0)
+        }
+        KeyframeProperty::PositionZ => value.clamp(-10.0, 10.0),
+        KeyframeProperty::StretchX | KeyframeProperty::StretchY => value.clamp(0.01, 16.0),
+        KeyframeProperty::Opacity => value.clamp(0.0, 1.0),
+        KeyframeProperty::LayerOrder => value.clamp(-128.0, 128.0).round(),
+        KeyframeProperty::TimeRemap => value.clamp(0.0625, 16.0),
+    }
+}
+
+fn set_clip_property(clip: &mut Clip, property: KeyframeProperty, value: f64) {
+    match property {
+        KeyframeProperty::Scale => clip.scale = value,
+        KeyframeProperty::OffsetX => clip.offset_x = value,
+        KeyframeProperty::OffsetY => clip.offset_y = value,
+        KeyframeProperty::AnchorX => clip.anchor_x = value,
+        KeyframeProperty::AnchorY => clip.anchor_y = value,
+        KeyframeProperty::Rotation => clip.rotation = value,
+        KeyframeProperty::RotationX => clip.rotation_x = value,
+        KeyframeProperty::RotationY => clip.rotation_y = value,
+        KeyframeProperty::PositionZ => clip.position_z = value,
+        KeyframeProperty::StretchX => clip.stretch_x = value,
+        KeyframeProperty::StretchY => clip.stretch_y = value,
+        KeyframeProperty::Opacity => clip.opacity = value,
+        KeyframeProperty::LayerOrder => clip.layer_order = value,
+        KeyframeProperty::TimeRemap => clip.speed = value,
+    }
+}
+
+/// The selected clip's local playhead and half-frame matching tolerance.
+fn keyframe_time(clip: &Clip, playhead: f32, frame_rate: f32) -> (f64, f64) {
+    let duration = clip.duration.max(1e-6);
+    let at = ((f64::from(playhead) - clip.start) / duration).clamp(0.0, 1.0);
+    let tolerance = (0.5 / f64::from(frame_rate.max(1.0)) / duration).max(1e-7);
+    (at, tolerance)
+}
+
+fn clip_property_at(clip: &Clip, property: KeyframeProperty, playhead: f32) -> f64 {
+    let (at, _) = keyframe_time(clip, playhead, 30.0);
+    clip.keyframes
+        .value_at(property, at, clip_property(clip, property))
+}
+
+fn set_clip_property_at(
+    clip: &mut Clip,
+    property: KeyframeProperty,
+    value: f64,
+    playhead: f32,
+    frame_rate: f32,
+) {
+    let value = clamp_keyframe_value(property, value);
+    if clip.keyframes.track(property).is_empty() {
+        set_clip_property(clip, property, value);
+    } else {
+        let (at, tolerance) = keyframe_time(clip, playhead, frame_rate);
+        clip.keyframes.set_at(property, at, value, tolerance);
+    }
+}
+
+type GraphPoint = (f64, f64, KeyframeEase, Option<TemporalCurve>);
+
+fn graph_points(clip: &Clip, property: GraphProperty) -> Vec<GraphPoint> {
+    if let Some(property) = property.keyframe() {
+        let keys = clip.keyframes.track(property);
+        if property == KeyframeProperty::TimeRemap && keys.is_empty() {
+            return clip
+                .speed_curve
+                .as_deref()
+                .unwrap_or(&[])
+                .iter()
+                .map(|point| (point.at, point.speed, KeyframeEase::Linear, None))
+                .collect();
+        }
+        keys.iter()
+            .map(|key| (key.at, key.value, key.ease, key.temporal_curve))
+            .collect()
+    } else if let Some(points) = clip.speed_curve.as_ref() {
+        points
+            .iter()
+            .map(|point| (point.at, point.speed, KeyframeEase::Linear, None))
+            .collect()
+    } else {
+        Vec::new()
+    }
+}
+
+/// Bring old preset/linear speed curves into the generic property model at
+/// the first graph edit. Existing project files remain readable, while every
+/// new gesture uses the same key type and evaluator as transform properties.
+fn migrate_time_remap(clip: &mut Clip) {
+    if !clip.keyframes.track(KeyframeProperty::TimeRemap).is_empty() {
+        return;
+    }
+    let Some(points) = clip.speed_curve.take() else {
+        return;
+    };
+    let track = clip
+        .keyframes
+        .named_track_mut(KeyframeProperty::TimeRemap.id());
+    track.keys = points
+        .into_iter()
+        .map(|point| model::ClipKeyframe::linear(point.at, point.speed))
+        .collect();
+}
+
+/// Keep the document's aggregate rate and duration in step with its authored
+/// time-remap track. Preview and export later consume samples from this exact
+/// evaluator, so changing a temporal handle cannot make those paths diverge.
+fn sync_time_remap(clip: &mut Clip, covered: f64, rest: f64) {
+    let mean = clip
+        .keyframes
+        .named_mean(KeyframeProperty::TimeRemap.id(), rest, 256)
+        .clamp(0.0625, 16.0);
+    clip.speed = mean;
+    clip.duration = (covered / mean).max(f64::from(MIN_DURATION));
+}
+
+/// Points used only to paint the graph. An empty property is a static line;
+/// once it has authored keys, the visible curve begins at the first one and
+/// ends at the last one. Playback still holds those values outside that span,
+/// but drawing a continuation to the clip edge makes the authored animation
+/// look longer than it is.
+fn graph_display_points(
+    clip: &Clip,
+    property: GraphProperty,
+    authored: &[GraphPoint],
+) -> Vec<GraphPoint> {
+    let fallback = property
+        .keyframe()
+        .map_or(clip.speed, |property| clip_property(clip, property));
+    if authored.is_empty() {
+        return vec![
+            (0.0, fallback, KeyframeEase::Linear, None),
+            (1.0, fallback, KeyframeEase::Linear, None),
+        ];
+    }
+    authored.to_vec()
+}
+
+fn graph_range(property: GraphProperty, points: &[GraphPoint]) -> (f64, f64) {
+    let observed = points
+        .iter()
+        .map(|point| point.1.abs())
+        .fold(0.0_f64, f64::max);
+    match property {
+        GraphProperty::Scale => (0.0, observed.max(2.0) * 1.15),
+        GraphProperty::OffsetX
+        | GraphProperty::OffsetY
+        | GraphProperty::AnchorX
+        | GraphProperty::AnchorY => (-1.0, 1.0),
+        GraphProperty::Rotation | GraphProperty::RotationX | GraphProperty::RotationY => {
+            (-180.0_f64.min(-observed), 180.0_f64.max(observed))
+        }
+        GraphProperty::PositionZ => (-2.0_f64.min(-observed), 2.0_f64.max(observed)),
+        GraphProperty::StretchX | GraphProperty::StretchY => (0.0, observed.max(2.0) * 1.15),
+        GraphProperty::Opacity => (0.0, 1.0),
+        GraphProperty::LayerOrder => (-8.0_f64.min(-observed), 8.0_f64.max(observed)),
+        GraphProperty::Speed => (0.0, observed.max(4.0) * 1.15),
+    }
+}
+
+fn graph_labels(property: GraphProperty) -> (&'static str, &'static str) {
+    match property {
+        GraphProperty::Scale => ("Position & Size", "Scale"),
+        GraphProperty::OffsetX => ("Position & Size", "Position X"),
+        GraphProperty::OffsetY => ("Position & Size", "Position Y"),
+        GraphProperty::AnchorX => ("Anchor", "Anchor X"),
+        GraphProperty::AnchorY => ("Anchor", "Anchor Y"),
+        GraphProperty::Rotation => ("Position & Size", "Rotation Z"),
+        GraphProperty::RotationX => ("3D Transform", "Rotation X"),
+        GraphProperty::RotationY => ("3D Transform", "Rotation Y"),
+        GraphProperty::PositionZ => ("3D Transform", "Position Z"),
+        GraphProperty::StretchX => ("Position & Size", "Scale X"),
+        GraphProperty::StretchY => ("Position & Size", "Scale Y"),
+        GraphProperty::Opacity => ("Blend", "Opacity"),
+        GraphProperty::LayerOrder => ("Layer", "Layer order"),
+        GraphProperty::Speed => ("Speed", "Speed"),
+    }
+}
+
+fn graph_path(points: &[GraphPoint], min: f64, max: f64) -> String {
+    let span = (max - min).max(1e-9);
+    let Some(&(first_at, first_value, _, _)) = points.first() else {
+        return String::new();
+    };
+    let point = |at: f64, value: f64| {
+        let x = at.clamp(0.0, 1.0) * 1000.0;
+        let y = (1.0 - (value - min) / span).clamp(0.0, 1.0) * 1000.0;
+        format!("{x:.3} {y:.3}")
+    };
+    let mut path = format!("M {}", point(first_at, first_value));
+    for pair in points.windows(2) {
+        let (left, right) = (pair[0], pair[1]);
+        for step in 1..=12 {
+            let t = f64::from(step) / 12.0;
+            let eased = right.3.map_or_else(
+                || right.2.apply(t),
+                |curve| {
+                    concat_core::animate::CubicBezier {
+                        x1: curve.x1,
+                        y1: curve.y1,
+                        x2: curve.x2,
+                        y2: curve.y2,
+                    }
+                    .solve(t)
+                },
+            );
+            let at = left.0 + (right.0 - left.0) * t;
+            let value = left.1 + (right.1 - left.1) * eased;
+            path.push_str(&format!(" L {}", point(at, value)));
+        }
+    }
+    path
+}
+
+/// Snap a normalized clip position to its nearest project frame.
+fn snap_graph_at(duration: f64, frame_rate: f32, at: f64) -> f64 {
+    let frames = (duration.max(1e-6) * f64::from(frame_rate.max(1.0)))
+        .round()
+        .max(1.0);
+    (at.clamp(0.0, 1.0) * frames).round() / frames
+}
+
+/// Move one graph point without crossing either neighbour. The first and
+/// last authored points are ordinary points, not implicit clip-edge anchors.
+fn moved_graph_at(
+    current: f64,
+    before: Option<f64>,
+    after: Option<f64>,
+    requested: f64,
+    duration: f64,
+    frame_rate: f32,
+) -> f64 {
+    let frames = (duration.max(1e-6) * f64::from(frame_rate.max(1.0)))
+        .round()
+        .max(1.0);
+    let candidate = snap_graph_at(duration, frame_rate, requested);
+    let lower = before.map_or(0.0, |at| ((at * frames).floor() + 1.0) / frames);
+    let upper = after.map_or(1.0, |at| ((at * frames).ceil() - 1.0) / frames);
+    if lower <= upper {
+        candidate.clamp(lower, upper)
+    } else {
+        current
+    }
+}
+
+fn update_graph_point(
+    clip: &mut Clip,
+    property: GraphProperty,
+    index: usize,
+    at: f64,
+    value: f64,
+    frame_rate: f32,
+) {
+    let duration = clip.duration;
+    if let Some(property) = property.keyframe() {
+        let covered = clip.duration * clip.speed;
+        let rest = clip.speed;
+        if property == KeyframeProperty::TimeRemap {
+            migrate_time_remap(clip);
+        }
+        let keys = clip.keyframes.track_mut(property);
+        if index >= keys.len() {
+            return;
+        }
+        keys[index].at = moved_graph_at(
+            keys[index].at,
+            index.checked_sub(1).map(|before| keys[before].at),
+            keys.get(index + 1).map(|after| after.at),
+            at,
+            duration,
+            frame_rate,
+        );
+        keys[index].value = clamp_keyframe_value(property, value);
+        if property == KeyframeProperty::TimeRemap {
+            sync_time_remap(clip, covered, rest);
+        }
+    } else {
+        let covered = clip.duration * clip.speed;
+        let Some(points) = clip.speed_curve.as_mut() else {
+            return;
+        };
+        if index >= points.len() {
+            return;
+        }
+        points[index].at = moved_graph_at(
+            points[index].at,
+            index.checked_sub(1).map(|before| points[before].at),
+            points.get(index + 1).map(|after| after.at),
+            at,
+            duration,
+            frame_rate,
+        );
+        points[index].speed = value.clamp(0.0625, 16.0);
+        let mean = concat_project::speed::mean_of(points).clamp(0.0625, 16.0);
+        clip.speed = mean;
+        clip.duration = (covered / mean).max(f64::from(MIN_DURATION));
     }
 }
 
@@ -805,6 +1291,8 @@ fn commit_key(commands: &[Command]) -> String {
         .map(|command| match command {
             Command::SetClipTransform { .. } => "transform".to_owned(),
             Command::SetClipCutout { .. } => "cutout".to_owned(),
+            Command::UpdateClipMask { mask, .. } => format!("mask:{}", mask.id),
+            Command::SetClipMasksEnabled { .. } => "masks-enabled".to_owned(),
             Command::SetClipSpeed { .. } => "speed".to_owned(),
             Command::SetClipSpeedCurve { .. } => "curve".to_owned(),
             Command::SetClipAnimation { slot, .. } => format!("animation:{slot:?}"),
@@ -824,6 +1312,9 @@ fn commit_key(commands: &[Command]) -> String {
                 }
                 if patch.opacity.is_some() {
                     fields.push("opacity");
+                }
+                if patch.keyframes.is_some() {
+                    fields.push("keyframes");
                 }
                 if patch.text.is_some() {
                     fields.push("text");
@@ -909,6 +1400,8 @@ fn adjust_rows(chain: &[AppliedFilter]) -> Vec<AppliedParamData> {
                 .and_then(|entry| entry.params.get(&param.key).copied())
                 .unwrap_or(param.default) as f32,
             fmt: format_of(&param.unit),
+            keyframed: false,
+            animatable: false,
         })
         .collect()
 }
@@ -917,7 +1410,17 @@ fn adjust_rows(chain: &[AppliedFilter]) -> Vec<AppliedParamData> {
 /// knob its package declares, holding the document's value or the default.
 /// A link no package answers to keeps its row - so it can be removed - and
 /// gets no knobs.
-fn chain_rows(chain: &[AppliedFilter]) -> (Vec<AppliedEntryData>, Vec<AppliedParamData>) {
+fn chain_rows(
+    clip: &Clip,
+    audio: bool,
+    at: f64,
+    tolerance: f64,
+) -> (Vec<AppliedEntryData>, Vec<AppliedParamData>) {
+    let chain = if audio {
+        &clip.filters
+    } else {
+        &clip.video_effects
+    };
     let catalogue = Catalogue::builtin();
     let mut rows = Vec::new();
     let mut knobs = Vec::new();
@@ -957,6 +1460,8 @@ fn chain_rows(chain: &[AppliedFilter]) -> (Vec<AppliedEntryData>, Vec<AppliedPar
                     .copied()
                     .unwrap_or(100.0) as f32,
                 fmt: ParamFormat::Percent,
+                keyframed: false,
+                animatable: true,
             });
         }
         for param in &package.manifest.params {
@@ -979,7 +1484,22 @@ fn chain_rows(chain: &[AppliedFilter]) -> (Vec<AppliedEntryData>, Vec<AppliedPar
                     .copied()
                     .unwrap_or(param.default) as f32,
                 fmt: format_of(&param.unit),
+                keyframed: false,
+                animatable: true,
             });
+        }
+    }
+    if !audio {
+        for knob in &mut knobs {
+            let id = format!("effect:{}:{}", knob.entry, knob.key);
+            knob.keyframed = clip.keyframes.named_has_at(&id, at, tolerance);
+            knob.value = clip
+                .keyframes
+                .named_value_at(&id, at, f64::from(knob.value)) as f32;
+        }
+    } else {
+        for knob in &mut knobs {
+            knob.animatable = false;
         }
     }
     (rows, knobs)
@@ -1026,6 +1546,7 @@ impl Studio {
             art_pending: HashSet::new(),
             waves: RefCell::new(HashMap::new()),
             lane_view: HashMap::new(),
+            keyframe_graph: None,
             selection: Vec::new(),
             playhead: 0.0,
             scroll_left: 0.0,
@@ -1036,10 +1557,14 @@ impl Studio {
             quality: 1,
             playing: false,
             transport: slint::Timer::default(),
+            preview_frame: slint::Timer::default(),
             clipboard: None,
             preview: slint::Image::default(),
             preview_busy: false,
             preview_wanted: false,
+            preview_generation: 0,
+            preview_interactive: false,
+            preview_flattened: None,
             preview_failed: false,
             export: ExportState::default(),
             settings: SettingsState::default(),
@@ -1075,6 +1600,11 @@ impl Studio {
             brush_size: 0.06,
             painting: true,
             cutout_jobs: HashMap::new(),
+            selected_mask: None,
+            mask_drawing: false,
+            mask_track_direction: 0,
+            mask_track_progress: None,
+            mask_track_generation: 0,
             host,
         };
         studio.settings.language = studio
@@ -1160,7 +1690,7 @@ impl Studio {
     /// thing on it, without the lanes having to be typed. An empty one takes
     /// the middle size.
     fn lane_height(&self, lane: &Track) -> f32 {
-        match self.lane_size(&lane.id) {
+        let base = match self.lane_size(&lane.id) {
             TrackSize::Small => LANE_SMALL,
             TrackSize::Medium => LANE_MEDIUM,
             TrackSize::Large => LANE_LARGE,
@@ -1180,7 +1710,13 @@ impl Studio {
                     .fold(0.0_f32, f32::max);
                 if tallest > 0.0 { tallest } else { LANE_MEDIUM }
             }
-        }
+        };
+        let expanded = self
+            .keyframe_graph
+            .as_ref()
+            .and_then(|graph| self.clip(&graph.clip))
+            .is_some_and(|clip| clip.track_id == lane.id);
+        base + if expanded { KEYFRAME_GRAPH_HEIGHT } else { 0.0 }
     }
 
     /// Every lane's height, top-most first.
@@ -1258,6 +1794,7 @@ impl Studio {
     /// follow the document, the autosave, the monitor and the mix.
     fn after_change(&mut self) {
         self.dirty = true;
+        self.preview_flattened = None;
         self.assign_media_rows();
         let survivors: HashSet<String> = self
             .timeline()
