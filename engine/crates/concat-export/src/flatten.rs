@@ -95,6 +95,8 @@ pub fn flatten_timeline_in(
                     has_audio: Some(false),
                     cutout: None,
                     mask_dir: String::new(),
+                    masks: Vec::new(),
+                    masks_enabled: false,
                 });
             }
 
@@ -171,6 +173,8 @@ pub fn flatten_timeline_in(
                         .into_owned(),
                     _ => String::new(),
                 },
+                masks: clip.masks.clone(),
+                masks_enabled: clip.masks_enabled,
             })
         })
         .collect()

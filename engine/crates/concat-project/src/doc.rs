@@ -23,8 +23,8 @@ use serde_json::{Map, Value, json};
 use crate::commands::{MAX_STRETCH, MIN_STRETCH};
 use crate::model::{
     AppliedFilter, Clip, ClipAnimation, ClipKey, ClipKind, ClipMask, Crop, CustomFont, Cutout,
-    KeyEase, KeyProperty, MediaItem, MediaKind, Project, SpeedPoint, TextAlign, TextStyle, Timeline,
-    Track, Transition, VideoSettings,
+    KeyEase, KeyProperty, MediaItem, MediaKind, Project, SpeedPoint, TextAlign, TextStyle,
+    Timeline, Track, Transition, VideoSettings,
 };
 
 /// Bumped only when a change cannot be absorbed by defaulting.
@@ -462,7 +462,8 @@ fn read_keys(raw: Option<&Value>) -> Vec<ClipKey> {
             let property = KeyProperty::from_name(entry.get("property")?.as_str()?)?;
             let at = number(entry.get("at"), -1.0);
             let value = number(entry.get("value"), f64::NAN);
-            (0.0..=1.0).contains(&at)
+            (0.0..=1.0)
+                .contains(&at)
                 .then_some(ClipKey {
                     property,
                     at,

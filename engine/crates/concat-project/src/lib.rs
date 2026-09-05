@@ -127,10 +127,7 @@ mod tests {
         assert_eq!(clip.masks[0].position_x, 0.25);
 
         editor
-            .apply(Command::RemoveClipMask {
-                clip_id,
-                mask_id,
-            })
+            .apply(Command::RemoveClipMask { clip_id, mask_id })
             .expect("removes mask");
         assert!(editor.project().active().clips[0].masks.is_empty());
         assert!(editor.undo());

@@ -33,17 +33,21 @@
 //! are undone.
 
 pub mod apply;
+pub mod geometric;
 pub mod mask;
 #[cfg(feature = "infer")]
 pub mod segment;
 pub mod store;
 pub mod strokes;
+pub mod tracking;
 
 pub use apply::{Mapping, cut};
+pub use geometric::cut as cut_geometric;
 pub use mask::Mask;
 #[cfg(feature = "infer")]
 pub use segment::Segmenter;
 pub use store::{MaskStore, mask_dir};
+pub use tracking::TranslationTracker;
 
 /// Masks are found this many times a second of source. Ten is where a
 /// person's outline stops visibly lagging their movement, and where a

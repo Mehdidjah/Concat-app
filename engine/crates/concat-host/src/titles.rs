@@ -136,6 +136,8 @@ impl Titles {
                     has_audio: Some(false),
                     cutout: None,
                     mask_dir: String::new(),
+                    masks: Vec::new(),
+                    masks_enabled: false,
                 },
                 block,
             });

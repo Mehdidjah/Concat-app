@@ -257,6 +257,9 @@ pub struct ClipMask {
     /// Brush diameter as a fraction of picture width.
     #[serde(default = "default_mask_brush")]
     pub brush_size: f64,
+    /// Independent animation keys for this mask's numeric properties.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub keys: Vec<MaskKey>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
@@ -316,7 +319,8 @@ impl MaskShape {
 
 /// A mask setting that may use the same namespaced keyframe model as an
 /// effect parameter or clip transform.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub enum MaskProperty {
     /// Horizontal centre offset.
     PositionX,
@@ -332,6 +336,25 @@ pub enum MaskProperty {
     Feather,
     /// Rectangle corner radius.
     Roundness,
+}
+
+/// One key on one numeric mask property.
+///
+/// Mask keys deliberately live on the mask rather than in the clip's six
+/// transform/audio tracks. That keeps upstream's clip-key schema intact and
+/// lets tracking animate one mask without changing the clip itself.
+#[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MaskKey {
+    /// Which mask property this key animates.
+    pub property: MaskProperty,
+    /// Fraction of the clip's timeline duration, `0..=1`.
+    pub at: f64,
+    /// Property value at this key.
+    pub value: f64,
+    /// How this key is approached from the previous key.
+    #[serde(default)]
+    pub ease: KeyEase,
 }
 
 impl MaskProperty {
@@ -362,6 +385,28 @@ impl MaskProperty {
     /// Stable keyframe track id for one mask's property.
     pub fn id(self, mask_id: &str) -> String {
         format!("mask:{mask_id}:{}", self.suffix())
+    }
+
+    const fn index(self) -> u8 {
+        match self {
+            Self::PositionX => 0,
+            Self::PositionY => 1,
+            Self::Rotation => 2,
+            Self::Width => 3,
+            Self::Height => 4,
+            Self::Feather => 5,
+            Self::Roundness => 6,
+        }
+    }
+
+    fn clamp(self, value: f64) -> f64 {
+        match self {
+            Self::PositionX | Self::PositionY => value.clamp(-2.0, 2.0),
+            Self::Rotation => value.clamp(-3600.0, 3600.0),
+            Self::Width | Self::Height => value.clamp(0.01, 4.0),
+            Self::Feather => value.clamp(0.0, 0.5),
+            Self::Roundness => value.clamp(0.0, 1.0),
+        }
     }
 }
 
@@ -407,6 +452,7 @@ impl ClipMask {
             text: default_mask_text(),
             points: Vec::new(),
             brush_size: default_mask_brush(),
+            keys: Vec::new(),
         }
     }
 
@@ -425,13 +471,7 @@ impl ClipMask {
 
     /// Writes and clamps an animatable property.
     pub fn set_value(&mut self, property: MaskProperty, value: f64) {
-        let value = match property {
-            MaskProperty::PositionX | MaskProperty::PositionY => value.clamp(-2.0, 2.0),
-            MaskProperty::Rotation => value.clamp(-3600.0, 3600.0),
-            MaskProperty::Width | MaskProperty::Height => value.clamp(0.01, 4.0),
-            MaskProperty::Feather => value.clamp(0.0, 0.5),
-            MaskProperty::Roundness => value.clamp(0.0, 1.0),
-        };
+        let value = property.clamp(value);
         match property {
             MaskProperty::PositionX => self.position_x = value,
             MaskProperty::PositionY => self.position_y = value,
@@ -441,6 +481,74 @@ impl ClipMask {
             MaskProperty::Feather => self.feather = value,
             MaskProperty::Roundness => self.roundness = value,
         }
+    }
+
+    /// This property's keys in time order.
+    pub fn keys_on(
+        &self,
+        property: MaskProperty,
+    ) -> impl DoubleEndedIterator<Item = &MaskKey> + Clone {
+        self.keys.iter().filter(move |key| key.property == property)
+    }
+
+    /// The index of this property's nearest key at `at`.
+    pub fn key_at(&self, property: MaskProperty, at: f64) -> Option<usize> {
+        self.keys
+            .iter()
+            .enumerate()
+            .filter(|(_, key)| key.property == property && (key.at - at).abs() <= KEY_EPSILON)
+            .min_by(|(_, a), (_, b)| (a.at - at).abs().total_cmp(&(b.at - at).abs()))
+            .map(|(index, _)| index)
+    }
+
+    /// The evaluated property value at one point in the clip.
+    pub fn value_at(&self, property: MaskProperty, at: f64) -> f64 {
+        let rest = self.value(property);
+        let keys = self
+            .keys_on(property)
+            .map(|key| concat_core::animate::Key {
+                at: key.at,
+                value: key.value,
+                ease: key.ease.into(),
+            })
+            .collect();
+        concat_core::animate::Track::new(keys).value_at(at, rest)
+    }
+
+    /// Sets or replaces a key and keeps the storage order deterministic.
+    pub fn set_key(&mut self, property: MaskProperty, at: f64, value: f64, ease: KeyEase) {
+        if !at.is_finite() || !value.is_finite() {
+            return;
+        }
+        let key = MaskKey {
+            property,
+            at: at.clamp(0.0, 1.0),
+            value: property.clamp(value),
+            ease: ease.sane(),
+        };
+        match self.key_at(property, key.at) {
+            Some(index) => self.keys[index] = key,
+            None => self.keys.push(key),
+        }
+        self.sort_keys();
+    }
+
+    /// Removes the key on `property` at `at`.
+    pub fn clear_key(&mut self, property: MaskProperty, at: f64) -> bool {
+        let Some(index) = self.key_at(property, at) else {
+            return false;
+        };
+        self.keys.remove(index);
+        true
+    }
+
+    fn sort_keys(&mut self) {
+        self.keys.sort_by(|a, b| {
+            a.property
+                .index()
+                .cmp(&b.property.index())
+                .then_with(|| a.at.total_cmp(&b.at))
+        });
     }
 
     /// Normalises values read from a document or received in a command.
@@ -468,6 +576,16 @@ impl ClipMask {
             *x = x.clamp(0.0, 1.0);
             *y = y.clamp(0.0, 1.0);
         }
+        self.keys
+            .retain(|key| key.at.is_finite() && key.value.is_finite());
+        for key in &mut self.keys {
+            key.at = key.at.clamp(0.0, 1.0);
+            key.value = key.property.clamp(key.value);
+            key.ease = key.ease.sane();
+        }
+        self.sort_keys();
+        self.keys
+            .dedup_by(|a, b| a.property == b.property && (a.at - b.at).abs() <= f64::EPSILON);
         self
     }
 }
@@ -1081,8 +1199,20 @@ impl Clip {
         }
         let at = at.clamp(0.0, 1.0);
         match self.key_at(property, at) {
-            Some(index) => self.keys[index] = ClipKey { property, at, value, ease },
-            None => self.keys.push(ClipKey { property, at, value, ease }),
+            Some(index) => {
+                self.keys[index] = ClipKey {
+                    property,
+                    at,
+                    value,
+                    ease,
+                }
+            }
+            None => self.keys.push(ClipKey {
+                property,
+                at,
+                value,
+                ease,
+            }),
         }
         self.sort_keys();
     }
@@ -1110,8 +1240,9 @@ impl Clip {
     /// Called by everything that can put a key in, including the document
     /// reader, so a hand-edited file cannot produce an unsorted track.
     pub fn sort_keys(&mut self) {
-        self.keys
-            .retain(|key| key.at.is_finite() && key.value.is_finite() && (0.0..=1.0).contains(&key.at));
+        self.keys.retain(|key| {
+            key.at.is_finite() && key.value.is_finite() && (0.0..=1.0).contains(&key.at)
+        });
         self.keys.sort_by(|a, b| {
             (a.property as u8)
                 .cmp(&(b.property as u8))

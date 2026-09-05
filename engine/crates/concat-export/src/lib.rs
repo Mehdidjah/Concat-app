@@ -23,7 +23,7 @@
 pub mod chains;
 pub mod flatten;
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -36,9 +36,10 @@ use concat_core::timeline::{Clip, ClipId, MediaRef, Timeline, Track, TrackKind, 
 use concat_effects::Catalogue;
 use concat_media::audio::{self, AudioClip};
 use concat_media::{DecodeOptions, Decoder, EncodeOptions, Encoder, FrameSink, FrameSource};
-use concat_project::model::{AppliedFilter, Cutout};
+use concat_project::model::{AppliedFilter, ClipMask, Cutout, MaskShape};
 use concat_render::{Compositor, CpuCompositor, Layer, Placement, plan_frame};
-use concat_vision::{Mapping, MaskStore};
+use concat_text::{Align, Fonts, TitleStyle};
+use concat_vision::{Mapping, Mask, MaskStore};
 use serde::Deserialize;
 
 /// What a flattened clip is. Typed, so a kind check the compiler has not
@@ -66,7 +67,7 @@ impl ClipKind {
 }
 
 /// One clip, as the frontend's flattener describes it.
-#[derive(Deserialize, Clone)]
+#[derive(Deserialize, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ExportClip {
     /// The media file this clip shows or plays.
@@ -195,6 +196,12 @@ pub struct ExportClip {
     /// - or empty when the flattener had no project folder to name it by.
     #[serde(default)]
     pub mask_dir: String,
+    /// Source-space masks combined as an alpha matte before placement.
+    #[serde(default)]
+    pub masks: Vec<ClipMask>,
+    /// Clip-level bypass for all geometric masks.
+    #[serde(default)]
+    pub masks_enabled: bool,
 }
 
 /// One animation key, as the flattener hands it over.
@@ -222,7 +229,7 @@ fn linear_ease() -> [f64; 4] {
 }
 
 /// A transition on the cut into a clip.
-#[derive(Deserialize, Clone)]
+#[derive(Deserialize, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct TransitionSpec {
     /// "cross-fade", "fade-black" or "fade-white". Anything else is ignored.
@@ -707,6 +714,65 @@ impl CutoutJob {
     }
 }
 
+/// Geometric masks prepared once per built timeline. Text masks rasterise
+/// here; all other shapes are evaluated analytically against each frame.
+struct GeometricMaskJob {
+    masks: Vec<ClipMask>,
+    text_masks: BTreeMap<String, Mask>,
+}
+
+impl GeometricMaskJob {
+    fn of(clip: &ExportClip) -> Option<Self> {
+        if !clip.masks_enabled || !clip.masks.iter().any(|mask| mask.enabled) {
+            return None;
+        }
+        let mut text_masks = BTreeMap::new();
+        if clip
+            .masks
+            .iter()
+            .any(|mask| mask.enabled && mask.shape == MaskShape::Text)
+        {
+            let fonts = Fonts::new();
+            for mask in clip
+                .masks
+                .iter()
+                .filter(|mask| mask.enabled && mask.shape == MaskShape::Text)
+            {
+                let style = TitleStyle {
+                    content: mask.text.clone(),
+                    font_family: "Inter".to_owned(),
+                    font_size: 0.56,
+                    font_weight: 700.0,
+                    italic: false,
+                    color: "#ffffffff".to_owned(),
+                    align: Align::Center,
+                    stroke_width: 0.0,
+                    stroke_color: "#00000000".to_owned(),
+                    shadow: false,
+                    background: String::new(),
+                    line_height: 1.0,
+                    tracking: 0.0,
+                };
+                if let Ok(rendered) = concat_text::render(&fonts, &style, 512, 256)
+                    && let Some(raster) = Mask::from_png(&rendered.png)
+                {
+                    text_masks.insert(mask.id.clone(), raster);
+                }
+            }
+        }
+        Some(Self {
+            masks: clip.masks.clone(),
+            text_masks,
+        })
+    }
+
+    fn cut(&self, frame: &Frame, at: f64) -> Frame {
+        let mut out = frame.clone();
+        concat_vision::cut_geometric(&mut out, &self.masks, at, &self.text_masks);
+        out
+    }
+}
+
 /// The fraction-to-pixel placement of one composited layer: fitted and
 /// centred is the base, the clip's transform moves it from there. The one
 /// definition the exporter and the preview share - these two paths must
@@ -762,6 +828,7 @@ fn render_picture(
     let (mut compositor, gpu) = best_compositor();
     let BuiltTimeline {
         timeline,
+        preview_clips: _,
         stills,
         decode_sizes,
         filter_chains,
@@ -770,6 +837,7 @@ fn render_picture(
         pre_chains,
         passes,
         cutouts,
+        geometric_masks,
     } = build_timeline(request, rate, visible, gpu);
 
     let mut encoder = Encoder::create(
@@ -824,6 +892,14 @@ fn render_picture(
                         .get(&layer.clip)
                         .and_then(|job| job.cut(&frame, layer.source_time))
                         .unwrap_or_else(|| frame.as_ref().clone());
+                    let frame = if let Some(job) = geometric_masks.get(&layer.clip) {
+                        let at = timeline
+                            .clip(layer.clip)
+                            .map_or(0.0, |clip| clip.fraction_at(time));
+                        job.cut(&frame, at)
+                    } else {
+                        frame
+                    };
                     sources.push(Source {
                         frame,
                         opacity: layer.opacity,
@@ -897,6 +973,14 @@ fn render_picture(
                     Some(cut) => cut,
                     None => frame,
                 };
+                let frame = if let Some(job) = geometric_masks.get(&layer.clip) {
+                    let at = timeline
+                        .clip(layer.clip)
+                        .map_or(0.0, |clip| clip.fraction_at(time));
+                    job.cut(&frame, at)
+                } else {
+                    frame
+                };
                 sources.push(Source {
                     frame,
                     opacity: layer.opacity,
@@ -957,6 +1041,9 @@ fn render_picture(
 /// engine's model has no field for.
 struct BuiltTimeline {
     timeline: Timeline,
+    /// Engine clip handles in flattened visual-clip order. Preview cache hits
+    /// update only their animation tracks and mask-key data.
+    preview_clips: Vec<ClipId>,
     /// Clips that are stills: one-frame streams, decoded looping.
     stills: std::collections::HashSet<ClipId>,
     /// Contain-fitted decode size per clip, where the source's size is known.
@@ -973,6 +1060,8 @@ struct BuiltTimeline {
     treatments: Vec<Treatment>,
     /// The clips whose background a mask takes away.
     cutouts: HashMap<ClipId, CutoutJob>,
+    /// Source-space masks prepared for preview and export.
+    geometric_masks: HashMap<ClipId, GeometricMaskJob>,
 }
 
 /// A layer clip, as the compositor needs it: when, over which tracks, what
@@ -1108,6 +1197,8 @@ fn build_timeline(
     let mut pre_chains: HashMap<ClipId, String> = HashMap::new();
     let mut passes: HashMap<ClipId, Vec<ShaderPass>> = HashMap::new();
     let mut cutouts: HashMap<ClipId, CutoutJob> = HashMap::new();
+    let mut geometric_masks: HashMap<ClipId, GeometricMaskJob> = HashMap::new();
+    let mut preview_clips = Vec::new();
 
     let lanes = visible.iter().map(|clip| clip.track).max().unwrap_or(0) + 1;
     let tracks: Vec<_> = (0..lanes)
@@ -1170,6 +1261,7 @@ fn build_timeline(
         engine_clip.video_fade_in = quantise(clip.video_fade_in, rate);
 
         if let Some(id) = timeline.add_clip(tracks[clip.track], engine_clip) {
+            preview_clips.push(id);
             tracks_of.insert(id, clip.track);
             if clip.kind == ClipKind::Image {
                 stills.insert(id);
@@ -1194,11 +1286,15 @@ fn build_timeline(
             if let Some(job) = CutoutJob::of(clip) {
                 cutouts.insert(id, job);
             }
+            if let Some(job) = GeometricMaskJob::of(clip) {
+                geometric_masks.insert(id, job);
+            }
         }
     }
 
     BuiltTimeline {
         timeline,
+        preview_clips,
         stills,
         decode_sizes,
         filter_chains,
@@ -1207,6 +1303,7 @@ fn build_timeline(
         pre_chains,
         passes,
         cutouts,
+        geometric_masks,
     }
 }
 
@@ -1459,29 +1556,131 @@ pub fn preview_sources(
     gpu: bool,
 ) -> Result<PreviewSources, String> {
     let rate = FrameRate::new(Rational::new(request.rate_num, request.rate_den));
-    let BuiltTimeline {
-        timeline,
-        stills,
-        decode_sizes,
-        filter_chains,
-        tracks,
-        treatments,
-        pre_chains,
-        passes,
-        cutouts,
-    } = preview_timeline(request, rate, gpu);
+    let built = preview_timeline(request, rate, gpu);
+    preview_sources_from(pool, request, &built, rate)
+}
+
+/// Structural preview state retained while only animation keys are changing.
+/// Decoded frames remain owned by the reader pool.
+#[derive(Default)]
+pub struct PreviewCache {
+    entry: Option<PreviewCacheEntry>,
+}
+
+struct PreviewCacheEntry {
+    clips: Vec<ExportClip>,
+    width: u32,
+    height: u32,
+    rate_num: i64,
+    rate_den: i64,
+    gpu: bool,
+    built: BuiltTimeline,
+}
+
+impl PreviewCache {
+    /// Invalidates the structural timeline without clearing decoded frames.
+    pub fn clear(&mut self) {
+        self.entry = None;
+    }
+}
+
+/// Preview rendering with a retained engine timeline. Transform keys and
+/// mask keys refresh in place; timing, media, effects, or mask geometry
+/// changes rebuild the structure.
+pub fn preview_sources_cached(
+    pool: &concat_media::ReaderPool,
+    request: &PreviewFrameRequest,
+    gpu: bool,
+    cache: &mut PreviewCache,
+) -> Result<PreviewSources, String> {
+    let rate = FrameRate::new(Rational::new(request.rate_num, request.rate_den));
+    let reusable = cache.entry.as_ref().is_some_and(|entry| {
+        entry.width == request.width
+            && entry.height == request.height
+            && entry.rate_num == request.rate_num
+            && entry.rate_den == request.rate_den
+            && entry.gpu == gpu
+            && preview_structure_matches(&entry.clips, &request.clips)
+    });
+    if !reusable {
+        cache.entry = Some(PreviewCacheEntry {
+            clips: request.clips.clone(),
+            width: request.width,
+            height: request.height,
+            rate_num: request.rate_num,
+            rate_den: request.rate_den,
+            gpu,
+            built: preview_timeline(request, rate, gpu),
+        });
+    } else if let Some(entry) = cache.entry.as_mut() {
+        refresh_preview_animation(&mut entry.built, request, rate);
+        entry.clips = request.clips.clone();
+    }
+    let entry = cache.entry.as_ref().expect("preview cache was prepared");
+    preview_sources_from(pool, request, &entry.built, rate)
+}
+
+fn preview_structure_matches(previous: &[ExportClip], next: &[ExportClip]) -> bool {
+    previous.len() == next.len()
+        && previous.iter().zip(next).all(|(previous, next)| {
+            let mut previous = previous.clone();
+            let mut next = next.clone();
+            if previous.kind != ClipKind::Layer && next.kind != ClipKind::Layer {
+                previous.animation.clear();
+                next.animation.clear();
+                for mask in &mut previous.masks {
+                    mask.keys.clear();
+                }
+                for mask in &mut next.masks {
+                    mask.keys.clear();
+                }
+            }
+            previous == next
+        })
+}
+
+fn refresh_preview_animation(
+    built: &mut BuiltTimeline,
+    request: &PreviewFrameRequest,
+    rate: FrameRate,
+) {
+    let mut resolved = request.clips.clone();
+    resolve_transitions(&mut resolved, rate, false);
+    let visible: Vec<&ExportClip> = resolved
+        .iter()
+        .filter(|clip| clip.kind.is_visual() && !clip.hidden)
+        .filter(|clip| !quantise(clip.duration, rate).is_zero())
+        .collect();
+    debug_assert_eq!(visible.len(), built.preview_clips.len());
+    for (source, id) in visible.into_iter().zip(built.preview_clips.iter().copied()) {
+        if let Some(clip) = built.timeline.clip_mut(id) {
+            clip.animation = animation_of(&source.animation);
+        }
+        if let Some(job) = built.geometric_masks.get_mut(&id) {
+            job.masks = source.masks.clone();
+        }
+    }
+}
+
+fn preview_sources_from(
+    pool: &concat_media::ReaderPool,
+    request: &PreviewFrameRequest,
+    built: &BuiltTimeline,
+    rate: FrameRate,
+) -> Result<PreviewSources, String> {
     let time = quantise(request.time, rate);
-    let plan = plan_frame(&timeline, time);
+    let plan = plan_frame(&built.timeline, time);
 
     let mut sources: Vec<Source<std::sync::Arc<Frame>>> = Vec::with_capacity(plan.layers.len());
     let mut failures: Vec<String> = Vec::new();
     for layer in &plan.layers {
-        let (decode_width, decode_height) = decode_sizes
+        let (decode_width, decode_height) = built
+            .decode_sizes
             .get(&layer.clip)
             .copied()
             .unwrap_or((request.width, request.height));
-        let chain = filter_chains.get(&layer.clip).map(String::as_str);
-        let pre = pre_chains.get(&layer.clip).map(String::as_str);
+        let chain = built.filter_chains.get(&layer.clip).map(String::as_str);
+        let pre = built.pre_chains.get(&layer.clip).map(String::as_str);
         // A source that fails to decode contributes nothing rather than
         // blanking the monitor - same grace the exporter extends.
         match pool.frame_at(
@@ -1489,25 +1688,35 @@ pub fn preview_sources(
             layer.source_time,
             decode_width,
             decode_height,
-            stills.contains(&layer.clip),
+            built.stills.contains(&layer.clip),
             chain,
             pre,
         ) {
             Ok(frame) => {
-                let frame = match cutouts
+                let frame = match built
+                    .cutouts
                     .get(&layer.clip)
                     .and_then(|job| job.cut(&frame, layer.source_time))
                 {
                     Some(cut) => std::sync::Arc::new(cut),
                     None => frame,
                 };
+                let frame = if let Some(job) = built.geometric_masks.get(&layer.clip) {
+                    let at = built
+                        .timeline
+                        .clip(layer.clip)
+                        .map_or(0.0, |clip| clip.fraction_at(time));
+                    std::sync::Arc::new(job.cut(&frame, at))
+                } else {
+                    frame
+                };
                 sources.push(Source {
                     frame,
                     opacity: layer.opacity,
                     transform: layer.transform,
-                    track: tracks.get(&layer.clip).copied().unwrap_or(0),
+                    track: built.tracks.get(&layer.clip).copied().unwrap_or(0),
                     blend: layer.blend,
-                    passes: passes.get(&layer.clip).cloned().unwrap_or_default(),
+                    passes: built.passes.get(&layer.clip).cloned().unwrap_or_default(),
                 })
             }
             Err(error) => failures.push(format!("{}: {error}", layer.media.display())),
@@ -1530,7 +1739,7 @@ pub fn preview_sources(
         width: request.width,
         height: request.height,
         time,
-        treatments,
+        treatments: built.treatments.clone(),
     })
 }
 
@@ -1586,7 +1795,7 @@ pub fn preview_prefetch(
     } = preview_timeline(request, rate, gpu);
     let fps = rate.fps().as_f64();
 
-    for ahead in 0..frames {
+    for ahead in 1..=frames {
         let time = request.time + f64::from(ahead) / fps;
         let plan = plan_frame(&timeline, quantise(time, rate));
         for layer in &plan.layers {
@@ -1731,6 +1940,8 @@ mod tests {
             has_audio: None,
             cutout: None,
             mask_dir: String::new(),
+            masks: Vec::new(),
+            masks_enabled: false,
         }
     }
 
