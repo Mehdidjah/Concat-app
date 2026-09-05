@@ -118,6 +118,97 @@ export struct ClipData {
     strip: StripData,
 }
 
+/// One user-created keyframe diamond on a timeline clip.
+export struct KeyframeMarkerData {
+    clip-id: string,
+    /// Absolute timeline seconds, already resolved from the clip-relative key.
+    time: float,
+    /// Track row, so the flat marker model paints in one pass.
+    row: int,
+    selected: bool,
+}
+
+/// The one expanded keyframe graph in the timeline. Its horizontal extent is
+/// the clip's own start and duration, while its row tells the lane which clip
+/// body to move underneath it.
+export struct KeyframeGraphData {
+    present: bool,
+    clip-id: string,
+    row: int,
+    start: float,
+    duration: float,
+    /// Scale, X, Y, Rotation, Opacity, Speed.
+    property: int,
+    group-label: string,
+    label: string,
+    min: float,
+    max: float,
+    /// Polyline in a 1000 x 1000 viewbox.
+    path: string,
+    selected: int,
+    /// Linear, Ease In, Ease Out, Ease In & Out.
+    ease: int,
+    /// Temporal cubic handles for the segment ending at `selected`.
+    custom-curve: bool,
+    curve-x1: float,
+    curve-y1: float,
+    curve-x2: float,
+    curve-y2: float,
+    segment-left-at: float,
+    segment-left-value: float,
+    segment-right-at: float,
+    segment-right-value: float,
+    /// Hold, Reset, Loop, Extrapolate.
+    post: int,
+}
+
+/// One editable diamond in the expanded graph. `at` is relative to the clip;
+/// `value` uses the property's real units, not graph pixels.
+export struct KeyframeGraphPointData {
+    at: float,
+    value: float,
+    selected: bool,
+}
+
+/// One mask in the selected clip's mask stack.
+export struct MaskChipData {
+    id: string,
+    label: string,
+    /// Split, Filmstrip, Circle, Rectangle, Star, Heart, Text, Brush, Pen.
+    shape: int,
+}
+
+/// The selected mask flattened for the inspector at the current playhead.
+export struct MaskInspectorData {
+    present: bool,
+    id: string,
+    enabled: bool,
+    inverted: bool,
+    shape: int,
+    position-x: float,
+    position-y: float,
+    rotation: float,
+    width: float,
+    height: float,
+    feather: float,
+    roundness: float,
+    linked: bool,
+    text: string,
+    brush-size: float,
+    points: int,
+    position-x-keyframed: bool,
+    position-y-keyframed: bool,
+    rotation-keyframed: bool,
+    width-keyframed: bool,
+    height-keyframed: bool,
+    feather-keyframed: bool,
+    roundness-keyframed: bool,
+    drawing: bool,
+    tracking: bool,
+    track-progress: float,
+    track-direction: int,
+}
+
 
 /// What a drag from the library will leave on the timeline if it is released
 /// where the pointer is now.
@@ -150,7 +241,8 @@ export enum TextAlignment { left, center, right }
 /// and alignment as its ordinal, which keeps this to two callbacks instead of
 /// one per control.
 export enum ClipField {
-    scale, offset-x, offset-y, rotation, stretch-x, stretch-y, opacity,
+    scale, offset-x, offset-y, anchor-x, anchor-y, rotation, rotation-x, rotation-y,
+    position-z, stretch-x, stretch-y, opacity, layer-order,
     volume, speed, preserve-pitch, speed-curve, reverse, fade-in, fade-out,
     anim-in, anim-out, anim-combo, anim-in-duration, anim-out-duration,
     flip-h, flip-v, blend, crop-left, crop-top, crop-right, crop-bottom,
@@ -183,11 +275,33 @@ export struct SelectedClipData {
     scale: float,
     offset-x: float,
     offset-y: float,
+    anchor-x: float,
+    anchor-y: float,
     rotation: float,
+    rotation-x: float,
+    rotation-y: float,
+    position-z: float,
     /// the width and height pulled beyond the scale; 1 keeps the aspect
     stretch-x: float,
     stretch-y: float,
     opacity: float,
+    layer-order: float,
+
+    // A diamond is filled only when that property's key is on the current
+    // playhead frame. These are deliberately separate: X must never light Y.
+    scale-keyframed: bool,
+    offset-x-keyframed: bool,
+    offset-y-keyframed: bool,
+    anchor-x-keyframed: bool,
+    anchor-y-keyframed: bool,
+    rotation-keyframed: bool,
+    rotation-x-keyframed: bool,
+    rotation-y-keyframed: bool,
+    position-z-keyframed: bool,
+    stretch-x-keyframed: bool,
+    stretch-y-keyframed: bool,
+    opacity-keyframed: bool,
+    layer-order-keyframed: bool,
 
     // sound — everything but a still
     /// linear gain; the fader works in decibels and converts

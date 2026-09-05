@@ -4,7 +4,13 @@
 import { Theme } from "../theme/theme.slint";
 import { Fmt, Payload } from "../util.slint";
 import { Glyph, Icon } from "../icons.slint";
-import { ClipData, ClipKind, DropData, TimelineTool, TrackData } from "model.slint";
+import { Editor } from "../editor.slint";
+import { Select } from "../primitives/select.slint";
+import { IconButton } from "../primitives/panel.slint";
+import {
+    ClipData, ClipKind, DropData, KeyframeGraphData, KeyframeGraphPointData,
+    KeyframeMarkerData, TimelineTool, TrackData,
+} from "model.slint";
 import { ContextMenu, MenuItemData } from "../primitives/context-menu.slint";
 
 // The lanes: the ruler, the banded track stack, the clips on it, the playhead
@@ -374,6 +380,329 @@ component Clip inherits Rectangle {
 
         property <length> origin-x;
         property <length> origin-y;
+
+        double-clicked => { root.context-requested(); }
+    }
+}
+
+// ── one expanded keyframe graph ─────────────────────────────────────────────
+
+component KeyframeGraph inherits Rectangle {
+    in property <KeyframeGraphData> graph;
+    in property <[KeyframeGraphPointData]> points;
+
+    property <length> plot-x: 34px;
+    property <length> plot-y: 66px;
+    property <length> plot-w: Math.max(1px, root.width - root.plot-x - 8px);
+    property <length> plot-h: Math.max(1px, root.height - root.plot-y - 8px);
+    property <float> span: Math.max(0.000001, root.graph.max - root.graph.min);
+    property <bool> has-curve-segment: root.graph.selected > 0;
+
+    pure function point-x(at: float) -> length {
+        return root.plot-x + Math.clamp(at, 0, 1) * root.plot-w;
+    }
+    pure function point-y(value: float) -> length {
+        return root.plot-y + (1 - Math.clamp((value - root.graph.min) / root.span, 0, 1))
+            * root.plot-h;
+    }
+    pure function at-x(x: length) -> float {
+        return Math.clamp((x - root.plot-x) / root.plot-w, 0, 1);
+    }
+    pure function value-y(y: length) -> float {
+        return root.graph.max - Math.clamp((y - root.plot-y) / root.plot-h, 0, 1)
+            * root.span;
+    }
+    pure function handle-at(index: int) -> float {
+        return root.graph.segment-left-at
+            + (root.graph.segment-right-at - root.graph.segment-left-at)
+                * (index == 0 ? root.graph.curve-x1 : root.graph.curve-x2);
+    }
+    pure function handle-value(index: int) -> float {
+        return root.graph.segment-left-value
+            + (root.graph.segment-right-value - root.graph.segment-left-value)
+                * (index == 0 ? root.graph.curve-y1 : root.graph.curve-y2);
+    }
+    pure function curve-x(at: float) -> float {
+        return Math.clamp((at - root.graph.segment-left-at)
+            / Math.max(0.000001, root.graph.segment-right-at - root.graph.segment-left-at), 0, 1);
+    }
+    pure function curve-y(value: float) -> float {
+        return Math.clamp((value - root.graph.segment-left-value)
+            / (Math.abs(root.graph.segment-right-value - root.graph.segment-left-value) < 0.000001
+                ? 1 : root.graph.segment-right-value - root.graph.segment-left-value), -2, 3);
+    }
+    function move-curve-handle(index: int, at: float, value: float) {
+        if (index == 0) {
+            Editor.keyframe-graph-curve-changed(root.curve-x(at), root.curve-y(value),
+                root.graph.curve-x2, root.graph.curve-y2);
+        } else {
+            Editor.keyframe-graph-curve-changed(root.graph.curve-x1, root.graph.curve-y1,
+                root.curve-x(at), root.curve-y(value));
+        }
+    }
+
+    background: Theme.raised;
+    border-width: 1px;
+    border-color: Theme.line-strong;
+    border-radius: Theme.r-sm;
+    clip: true;
+
+    Rectangle {
+        x: 0;
+        y: 0;
+        width: parent.width;
+        height: 30px;
+        background: Theme.field-hover;
+
+        Text {
+            x: 8px;
+            width: Math.max(0px, parent.width - 42px);
+            height: parent.height;
+            text: root.graph.group-label;
+            color: Theme.fg;
+            font-size: Theme.fs;
+            font-weight: Theme.weight-title;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+
+        IconButton {
+            x: parent.width - self.width - 2px;
+            height: parent.height;
+            glyph: Glyph.close;
+            icon-size: 12px;
+            label: "Close keyframe graph";
+            clicked => { Editor.keyframe-graph-closed(); }
+        }
+    }
+
+    Select {
+        x: 5px;
+        y: 33px;
+        width: Math.min(154px, Math.max(72px, parent.width - 96px));
+        height: 28px;
+        options: ["Scale", "Position X", "Position Y", "Rotation Z", "Anchor X", "Anchor Y",
+            "Rotation X", "Rotation Y", "Position Z", "Scale X", "Scale Y", "Opacity",
+            "Layer order", "Time remap"];
+        current: root.graph.property;
+        flat: true;
+        changed(index) => { Editor.keyframe-graph-property-changed(index); }
+    }
+
+    if root.width > 430px: Select {
+        x: 164px;
+        y: 33px;
+        width: 108px;
+        height: 28px;
+        options: ["Hold", "Reset", "Loop", "Extrapolate"];
+        current: root.graph.post;
+        flat: true;
+        changed(index) => { Editor.keyframe-graph-post-changed(index); }
+    }
+
+    if root.graph.selected >= 0 && root.width > 285px:
+        Rectangle {
+        x: parent.width - 139px;
+        y: 35px;
+        width: 102px;
+        height: 24px;
+        background: Colors.transparent;
+
+        for label[index] in ["—", "In", "Out", "S"]: Rectangle {
+            x: index * 26px;
+            y: 0px;
+            width: 24px;
+            height: 24px;
+            border-radius: Theme.r-sm;
+            background: root.graph.ease == index ? Theme.accent-soft : Theme.field;
+
+            Text {
+                width: parent.width;
+                height: parent.height;
+                text: label;
+                color: root.graph.ease == index ? Theme.accent : Theme.fg-muted;
+                font-size: Theme.fs-xs;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+            TouchArea {
+                mouse-cursor: pointer;
+                clicked => { Editor.keyframe-graph-ease-changed(index); }
+            }
+        }
+    }
+
+    if root.graph.selected >= 0: IconButton {
+        x: parent.width - self.width - 3px;
+        y: 33px;
+        height: 28px;
+        glyph: Glyph.trash;
+        icon-size: 12px;
+        label: "Remove selected keyframe";
+        danger: true;
+        clicked => { Editor.keyframe-graph-point-removed(root.graph.selected); }
+    }
+
+    // Value labels and dotted horizontal guides, as in the compact curve
+    // editors used by desktop video tools.
+    Text {
+        x: 4px;
+        y: root.plot-y - 7px;
+        width: root.plot-x - 7px;
+        height: 12px;
+        text: "\{Fmt.round-to(root.graph.max, 2)}";
+        color: Theme.fg-dim;
+        font-size: Theme.fs-xs;
+        horizontal-alignment: right;
+    }
+    Text {
+        x: 4px;
+        y: root.plot-y + root.plot-h - 7px;
+        width: root.plot-x - 7px;
+        height: 12px;
+        text: "\{Fmt.round-to(root.graph.min, 2)}";
+        color: Theme.fg-dim;
+        font-size: Theme.fs-xs;
+        horizontal-alignment: right;
+    }
+
+    for line in 5: Rectangle {
+        x: root.plot-x;
+        y: root.plot-y + line * root.plot-h / 4;
+        width: root.plot-w;
+        height: 1px;
+        background: Theme.grid;
+    }
+
+    plot-touch := TouchArea {
+        x: root.plot-x;
+        y: root.plot-y;
+        width: root.plot-w;
+        height: root.plot-h;
+        mouse-cursor: crosshair;
+        double-clicked => {
+            Editor.keyframe-graph-point-added(
+                root.at-x(self.mouse-x + root.plot-x),
+                root.value-y(self.mouse-y + root.plot-y));
+        }
+    }
+
+    Path {
+        x: root.plot-x;
+        y: root.plot-y;
+        width: root.plot-w;
+        height: root.plot-h;
+        viewbox-width: 1000;
+        viewbox-height: 1000;
+        fit: fill;
+        commands: root.graph.path;
+        stroke: Theme.accent;
+        stroke-width: 2px;
+        stroke-line-cap: round;
+        stroke-line-join: round;
+    }
+
+    // Temporal handles belong to interpolation progress. Position's spatial
+    // tangents are persisted separately and never feed these controls.
+    if root.has-curve-segment: Path {
+        x: root.plot-x;
+        y: root.plot-y;
+        width: root.plot-w;
+        height: root.plot-h;
+        viewbox-width: 1000;
+        viewbox-height: 1000;
+        stroke: Theme.fg-muted;
+        stroke-width: 1px;
+
+        MoveTo {
+            x: root.graph.segment-left-at * 1000;
+            y: (1 - Math.clamp((root.graph.segment-left-value - root.graph.min) / root.span, 0, 1)) * 1000;
+        }
+        LineTo {
+            x: root.handle-at(0) * 1000;
+            y: (1 - Math.clamp((root.handle-value(0) - root.graph.min) / root.span, 0, 1)) * 1000;
+        }
+        MoveTo {
+            x: root.graph.segment-right-at * 1000;
+            y: (1 - Math.clamp((root.graph.segment-right-value - root.graph.min) / root.span, 0, 1)) * 1000;
+        }
+        LineTo {
+            x: root.handle-at(1) * 1000;
+            y: (1 - Math.clamp((root.handle-value(1) - root.graph.min) / root.span, 0, 1)) * 1000;
+        }
+    }
+
+    for handle[index] in 2: Rectangle {
+        x: root.point-x(root.handle-at(index)) - self.width / 2;
+        y: root.point-y(root.handle-value(index)) - self.height / 2;
+        width: 11px;
+        height: 11px;
+        border-radius: self.width / 2;
+        background: Theme.accent;
+        border-width: 1px;
+        border-color: Theme.panel;
+        visible: root.has-curve-segment;
+
+        curve-touch := TouchArea {
+            mouse-cursor: self.dragging ? MouseCursor.grabbing : MouseCursor.grab;
+            property <bool> dragging;
+            pointer-event(event) => {
+                if (event.kind == PointerEventKind.down && event.button == PointerEventButton.left) {
+                    self.dragging = true;
+                    Editor.keyframe-graph-curve-pressed();
+                } else if (event.kind == PointerEventKind.up || event.kind == PointerEventKind.cancel) {
+                    if (self.dragging) {
+                        self.dragging = false;
+                        Editor.keyframe-graph-curve-released();
+                    }
+                }
+            }
+            moved => {
+                if (self.dragging) {
+                    root.move-curve-handle(index,
+                        root.at-x(self.absolute-position.x + self.mouse-x - root.absolute-position.x),
+                        root.value-y(self.absolute-position.y + self.mouse-y - root.absolute-position.y));
+                }
+            }
+        }
+    }
+
+    for point[index] in root.points: Icon {
+        x: root.point-x(point.at) - self.width / 2;
+        y: root.point-y(point.value) - self.height / 2;
+        glyph: Glyph.keyframe;
+        size: 13px;
+        weight: 2.8;
+        filled: point.selected;
+        tint: point.selected ? Theme.accent : Theme.fg;
+
+        touch := TouchArea {
+            mouse-cursor: grab;
+            property <bool> dragging;
+
+            pointer-event(event) => {
+                if (event.kind == PointerEventKind.down
+                    && event.button == PointerEventButton.left) {
+                    self.dragging = true;
+                    Editor.keyframe-graph-point-pressed(index);
+                } else if (event.kind == PointerEventKind.up
+                    || event.kind == PointerEventKind.cancel) {
+                    if (self.dragging) {
+                        self.dragging = false;
+                        Editor.keyframe-graph-point-released();
+                    }
+                }
+            }
+            moved => {
+                if (self.dragging) {
+                    Editor.keyframe-graph-point-dragged(index,
+                        root.at-x(self.absolute-position.x + self.mouse-x
+                            - root.absolute-position.x),
+                        root.value-y(self.absolute-position.y + self.mouse-y
+                            - root.absolute-position.y));
+                }
+            }
+        }
     }
 }
 
@@ -382,6 +711,7 @@ component Clip inherits Rectangle {
 export component Lanes inherits Rectangle {
     in property <[TrackData]> tracks;
     in property <[ClipData]> clips;
+    in property <[KeyframeMarkerData]> keyframes;
     in property <TimelineTool> tool: TimelineTool.select;
     in property <float> playhead;
     in property <float> frame-rate: 30;
@@ -447,6 +777,7 @@ export component Lanes inherits Rectangle {
 
     property <length> px-per-second: 1px / Math.max(root.seconds-per-pixel, 0.000001);
     property <length> lanes-h: Math.max(0px, root.height - root.ruler-height);
+    property <length> graph-h: 184px;
     /// x of a moment, in the lanes' own coordinates
     pure function at(seconds: float) -> length {
         return (seconds - root.scroll-left) * root.px-per-second;
@@ -464,6 +795,10 @@ export component Lanes inherits Rectangle {
     /// The top of a row inside the lane area, scroll included.
     pure function row-y(row: int) -> length {
         return root.ruler-height + root.tracks[row].top - root.track-scroll;
+    }
+    pure function graph-offset(row: int) -> length {
+        return Editor.keyframe-graph.present && Editor.keyframe-graph.row == row
+            ? root.graph-h : 0px;
     }
 
     // The ruler's tick ladder, from Rust. Zero means unbound, which draws no
@@ -586,14 +921,27 @@ export component Lanes inherits Rectangle {
             }
         }
 
+        // ── the expanded keyframe graph ─────────────────────────────────
+        if Editor.keyframe-graph.present: KeyframeGraph {
+            x: root.at(Editor.keyframe-graph.start);
+            y: root.row-y(Editor.keyframe-graph.row) + 3px;
+            width: Math.max(80px, Editor.keyframe-graph.duration * root.px-per-second);
+            height: root.graph-h - 6px;
+            graph: Editor.keyframe-graph;
+            points: Editor.keyframe-graph-points;
+            visible: self.x + self.width > 0px && self.x < root.width
+                && self.y + self.height > root.ruler-height && self.y < root.height;
+        }
+
         // ── the clips ────────────────────────────────────────────────────
         for entry in root.clips: Clip {
             x: root.at(entry.start);
             // Both from the lane it sits on, so a clip follows its row's
             // height without a second copy of it to keep in step.
-            y: root.row-y(entry.row) + 4px;
+            y: root.row-y(entry.row) + root.graph-offset(entry.row) + 4px;
             width: Math.max(2px, entry.duration * root.px-per-second);
-            height: Math.max(2px, root.tracks[entry.row].height - 10px);
+            height: Math.max(2px, root.tracks[entry.row].height
+                - root.graph-offset(entry.row) - 10px);
             visible: self.x + self.width > 0 && self.x < root.width
                 && self.y + self.height > root.ruler-height && self.y < root.height;
 
@@ -619,6 +967,30 @@ export component Lanes inherits Rectangle {
                 menu.request-y = wheel.mouse-y;
                 root.asked = true;
                 root.clip-context(entry.id);
+            }
+        }
+
+        // One fixed-size diamond for every user-authored key. The Rust model
+        // merges properties that share a time, so this stays one icon per
+        // visible timeline marker rather than every clip scanning every key.
+        for marker in root.keyframes: Icon {
+            x: root.at(marker.time) - self.width / 2;
+            y: root.row-y(marker.row)
+                + root.graph-offset(marker.row)
+                + (root.tracks[marker.row].height - root.graph-offset(marker.row)
+                    - self.height) / 2;
+            glyph: Glyph.keyframe;
+            size: 12px;
+            weight: 2.6;
+            filled: true;
+            tint: marker.selected ? Theme.accent : Theme.fg;
+            visible: marker.row >= 0 && marker.row < root.tracks.length
+                && self.x + self.width > 0px && self.x < root.width
+                && self.y + self.height > root.ruler-height && self.y < root.height;
+
+            TouchArea {
+                mouse-cursor: pointer;
+                clicked => { Editor.keyframe-marker-selected(marker.clip-id, marker.time); }
             }
         }
 

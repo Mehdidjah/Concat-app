@@ -9,7 +9,7 @@ import { MenuItemData } from "../primitives/context-menu.slint";
 import { HairlineSplitter } from "splitter.slint";
 import { ThinScrollbar } from "../primitives/scrollbar.slint";
 import {
-    ClipData, DropData, TimelineTabData, TimelineTool, TrackData, TrackSize,
+    ClipData, DropData, KeyframeMarkerData, TimelineTabData, TimelineTool, TrackData, TrackSize,
 } from "../timeline/model.slint";
 import { TimelineTabs } from "../timeline/tabs.slint";
 import { TimelineTray } from "../timeline/tray.slint";
@@ -59,6 +59,7 @@ export component TimelinePane inherits Rectangle {
     // ── the grid ─────────────────────────────────────────────────────────
     in property <[TrackData]> tracks;
     in property <[ClipData]> clips;
+    in property <[KeyframeMarkerData]> keyframes;
     in property <float> playhead;
     in property <float> frame-rate: 30;
     in property <float> scroll-left;
@@ -253,6 +254,7 @@ export component TimelinePane inherits Rectangle {
 
                 tracks: root.tracks;
                 clips: root.clips;
+                keyframes: root.keyframes;
                 tool: root.tool;
                 playhead: root.playhead;
                 frame-rate: root.frame-rate;
