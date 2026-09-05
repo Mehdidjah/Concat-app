@@ -1919,6 +1919,18 @@ impl Studio {
     /// Asks the engine for the frame at the playhead, one at a time: a
     /// request while one is out waits for it, and the newest wins.
     pub fn request_preview(&mut self) {
+        self.preview_generation = self.preview_generation.wrapping_add(1);
+        if self.preview_busy {
+            self.preview_wanted = true;
+            return;
+        }
+        self.start_preview_request();
+    }
+
+    /// Starts the newest preview generation. Kept separate from
+    /// `request_preview` so a queued latest request does not mint another
+    /// generation when the previous worker completes.
+    fn start_preview_request(&mut self) {
         /// A monitor frame on its way to the window.
         enum Picture {
             /// Already on the GPU, on the window's own device.
@@ -1930,27 +1942,31 @@ impl Studio {
         if self.on_start || self.session.is_none() {
             return;
         }
-        if self.preview_busy {
-            self.preview_wanted = true;
-            return;
-        }
-        let Some(session) = self.session.as_ref() else {
+        let Some(settings) = self
+            .session
+            .as_ref()
+            .map(|session| session.settings().clone())
+        else {
             return;
         };
-        // The echo when there is one: a picture being dragged on the stage
-        // is drawn where the pointer has it, not where the document last
-        // had it. Same flattening the session does for itself.
-        let mut clips = concat_export::flatten::flatten_timeline(self.project(), None);
         let (width, height) = self.output_size();
-        // Titles, painted to pictures and rejoined; see concat-host's titles.
-        for title in self.host.titles.clips(self.project(), width, height) {
-            self.title_blocks.insert(title.clip_id, title.block);
-            clips.push(title.clip);
-        }
-        let scale = match self.quality {
+        let clips = self.preview_clips(width, height);
+        let configured_scale: f64 = match self.quality {
             0 => 1.0,
             1 => 0.5,
             _ => 0.25,
+        };
+        // Keep live feedback cheap even for 4K/8K projects. A graph drag gets
+        // a 960 px long edge and playback a 1280 px one; pausing or releasing
+        // immediately requests the configured quality again.
+        let scale = if self.preview_interactive {
+            let long_edge = f64::from(width.max(height)).max(1.0);
+            configured_scale.min(0.5).min(960.0 / long_edge)
+        } else if self.playing {
+            let long_edge = f64::from(width.max(height)).max(1.0);
+            configured_scale.min(1280.0 / long_edge)
+        } else {
+            configured_scale
         };
         let width = ((f64::from(width) * scale).round() as u32).max(2) & !1;
         let height = ((f64::from(height) * scale).round() as u32).max(2) & !1;
@@ -1959,11 +1975,16 @@ impl Studio {
             width,
             height,
         };
-        let settings = session.settings().clone();
         let monitor = self.host.monitor.clone();
+        let prefetch_monitor = monitor.clone();
+        let prefetch_clips = clips.clone();
+        let prefetch_settings = settings.clone();
+        let generation = self.preview_generation;
+        let interactive = self.preview_interactive;
+        let playing = self.playing;
         self.preview_busy = true;
         self.preview_wanted = false;
-        spawn(
+        spawn_unpublished(
             move || {
                 // On the window's device the frame stays a texture; without
                 // one it comes back as pixels and is uploaded here.
@@ -1976,35 +1997,128 @@ impl Studio {
                         .frame(clips.clone(), &settings, spec)
                         .map(|bytes| Picture::Pixels(bytes, width, height))
                 };
-                // Decode-ahead for whatever comes next, while the pool is warm.
-                monitor.prefetch(clips, &settings, spec, 2);
                 frame
             },
-            |studio, _, _, result| {
+            move |studio, app, models, result| {
                 studio.preview_busy = false;
-                match result {
-                    Ok(Picture::Texture(texture)) => match slint::Image::try_from(texture) {
-                        Ok(image) => studio.preview = image,
-                        Err(error) => eprintln!("concat: preview texture: {error}"),
-                    },
-                    Ok(Picture::Pixels(bytes, width, height)) => {
-                        let buffer =
-                            slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(
-                                &bytes, width, height,
-                            );
-                        studio.preview = slint::Image::from_rgba8(buffer);
-                    }
-                    Err(error) => {
-                        eprintln!("concat: preview: {error}");
-                        if !studio.preview_failed {
-                            studio.preview_failed = true;
-                            studio.notify(&tf("Preview failed: {0}", &[&error]), true);
+                let fresh = generation == studio.preview_generation;
+                // A running stream must present the newest *completed* frame
+                // even when the clock or pointer has already queued a newer
+                // one. Otherwise any renderer taking just over one tick has
+                // every result discarded and the monitor appears frozen.
+                // Results from a mode that has since ended remain obsolete.
+                let active_stream =
+                    (playing && studio.playing) || (interactive && studio.preview_interactive);
+                if fresh || active_stream {
+                    let mut failed = false;
+                    let mut rendered = false;
+                    match result {
+                        Ok(Picture::Texture(texture)) => match slint::Image::try_from(texture) {
+                            Ok(image) => {
+                                studio.preview = image;
+                                rendered = true;
+                            }
+                            Err(error) => eprintln!("concat: preview texture: {error}"),
+                        },
+                        Ok(Picture::Pixels(bytes, width, height)) => {
+                            let buffer =
+                                slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(
+                                    &bytes, width, height,
+                                );
+                            studio.preview = slint::Image::from_rgba8(buffer);
+                            rendered = true;
                         }
+                        Err(error) => {
+                            eprintln!("concat: preview: {error}");
+                            if !studio.preview_failed {
+                                studio.preview_failed = true;
+                                studio.notify(&tf("Preview failed: {0}", &[&error]), true);
+                                failed = true;
+                            }
+                        }
+                    }
+                    studio.publish_preview(app);
+                    if failed {
+                        studio.publish_chrome(app, models);
+                    }
+                    // Presentation is the critical path. Decode-ahead starts
+                    // only after the requested picture has reached the UI,
+                    // and never competes with an active graph gesture.
+                    // Never let decode-ahead stand in front of a frame already
+                    // waiting to render. During playback one frame is enough;
+                    // the reader itself remains warm for following pulls.
+                    if rendered && !interactive && !studio.preview_wanted {
+                        std::thread::spawn(move || {
+                            prefetch_monitor.prefetch(
+                                prefetch_clips,
+                                &prefetch_settings,
+                                spec,
+                                if playing { 1 } else { 2 },
+                            );
+                        });
                     }
                 }
                 if studio.preview_wanted {
-                    studio.request_preview();
+                    studio.start_preview_request();
                 }
+            },
+        );
+    }
+
+    /// Builds the export-shaped clip list once per stable document or graph
+    /// gesture. Playback changes only time, so it reuses the list. Position,
+    /// scale, rotation, opacity and effect-key edits replace only the selected
+    /// clip's animation array; an echo outside that case (including time
+    /// remapping) changes structure and deliberately takes the full path.
+    fn preview_clips(&mut self, width: u32, height: u32) -> Vec<ExportClip> {
+        let animation_only = self.preview_interactive
+            && self
+                .keyframe_graph
+                .as_ref()
+                .is_some_and(|graph| graph.property != GraphProperty::Speed);
+        let stable_document = self.echo.is_none();
+        if !animation_only && !stable_document {
+            self.preview_flattened = None;
+            return self.flatten_preview_clips(width, height);
+        }
+        if self.preview_flattened.is_none() {
+            self.preview_flattened = Some(self.flatten_preview_clips(width, height));
+        }
+        let mut clips = self.preview_flattened.clone().unwrap_or_default();
+        if animation_only
+            && let Some(graph) = self.keyframe_graph.as_ref()
+            && let Some(source) = self.timeline().clip(&graph.clip)
+            && let Some(flattened) = clips
+                .iter_mut()
+                .find(|flattened| flattened.source_id == graph.clip)
+        {
+            flattened.animation = concat_export::flatten::export_keys(source);
+        }
+        clips
+    }
+
+    fn flatten_preview_clips(&mut self, width: u32, height: u32) -> Vec<ExportClip> {
+        // The echo when there is one: a picture being dragged is rendered
+        // where the gesture has it, not where the committed document last did.
+        let mut clips = concat_export::flatten::flatten_timeline(self.project(), None);
+        for title in self.host.titles.clips(self.project(), width, height) {
+            self.title_blocks.insert(title.clip_id, title.block);
+            clips.push(title.clip);
+        }
+        clips
+    }
+
+    fn schedule_preview_frame(&mut self) {
+        if self.preview_frame.running() {
+            return;
+        }
+        self.preview_frame.start(
+            slint::TimerMode::SingleShot,
+            std::time::Duration::from_millis(16),
+            || {
+                crate::host::Shell::with(|shell, _| {
+                    shell.studio.borrow_mut().request_preview();
+                });
             },
         );
     }
@@ -2014,6 +2128,9 @@ impl Studio {
     pub fn play_toggle(&mut self) {
         if self.playing {
             self.pause();
+            // Playback may have used its live-resolution cap. Replace that
+            // last frame with the user's configured paused-preview quality.
+            self.request_preview();
             return;
         }
         if self.session.is_none() {
@@ -2040,11 +2157,12 @@ impl Studio {
                         studio.playhead = position.min(end);
                         if position >= end {
                             studio.pause();
+                            studio.request_preview();
                         } else {
                             studio.request_preview();
                         }
                     }
-                    shell.studio.borrow().publish_lanes(&app, &shell.models);
+                    shell.studio.borrow().publish_transport(&app, &shell.models);
                 });
             },
         );

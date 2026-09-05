@@ -142,6 +142,26 @@ pub fn spawn<T: Send + 'static>(
     });
 }
 
+/// Runs slow work away from the event loop and hands its result back without
+/// publishing the whole application. Callers use this when they can publish a
+/// much smaller, purpose-built surface (the monitor preview is the important
+/// case); forcing every background completion through [`Studio::publish`]
+/// would rebuild the timeline for work that changed no timeline model.
+pub fn spawn_unpublished<T: Send + 'static>(
+    work: impl FnOnce() -> T + Send + 'static,
+    then: impl FnOnce(&mut Studio, &App, &Models, T) + Send + 'static,
+) {
+    std::thread::spawn(move || {
+        let result = work();
+        let _ = slint::invoke_from_event_loop(move || {
+            Shell::with(|shell, app| {
+                let mut studio = shell.studio.borrow_mut();
+                then(&mut studio, &app, &shell.models, result);
+            });
+        });
+    });
+}
+
 /// Runs `body` on the event-loop thread from anywhere, with a full publish
 /// after. For progress reports from a worker.
 pub fn on_ui(body: impl FnOnce(&mut Studio, &App, &Models) + Send + 'static) {

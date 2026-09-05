@@ -14,9 +14,8 @@
 //! pictures go up once, the composite happens where it is shown, and no
 //! pixel comes back down.
 
-use std::sync::Arc;
-#[cfg(feature = "gpu")]
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use concat_export::{ExportClip, PreviewFrameRequest};
 use concat_project::DocumentSettings;
@@ -37,6 +36,10 @@ pub struct FrameSpec {
 #[derive(Clone)]
 pub struct Monitor {
     pool: Arc<concat_media::ReaderPool>,
+    /// The export-shaped timeline retained while only animation tracks move.
+    prepared: Arc<Mutex<concat_export::PreviewCache>>,
+    /// At most one speculative decode may compete with requested frames.
+    prefetching: Arc<AtomicBool>,
     #[cfg(feature = "gpu")]
     gpu: Option<Arc<Mutex<concat_render::WgpuCompositor>>>,
 }
@@ -56,6 +59,8 @@ impl Monitor {
     pub fn new() -> Self {
         Self {
             pool: Arc::new(concat_media::ReaderPool::with_defaults()),
+            prepared: Arc::new(Mutex::new(concat_export::PreviewCache::default())),
+            prefetching: Arc::new(AtomicBool::new(false)),
             #[cfg(feature = "gpu")]
             gpu: None,
         }
@@ -68,6 +73,8 @@ impl Monitor {
     pub fn with_gpu(device: wgpu::Device, queue: wgpu::Queue) -> Self {
         Self {
             pool: Arc::new(concat_media::ReaderPool::with_defaults()),
+            prepared: Arc::new(Mutex::new(concat_export::PreviewCache::default())),
+            prefetching: Arc::new(AtomicBool::new(false)),
             gpu: Some(Arc::new(Mutex::new(
                 concat_render::WgpuCompositor::with_device(device, queue),
             ))),
@@ -102,7 +109,12 @@ impl Monitor {
             .as_ref()
             .ok_or_else(|| "the monitor has no GPU device".to_owned())?;
         let request = Self::request(clips, settings, spec);
-        let sources = concat_export::preview_sources(&self.pool, &request, true)?;
+        let sources = concat_export::preview_sources_cached(
+            &self.pool,
+            &request,
+            true,
+            &mut self.prepared.lock().unwrap_or_else(|e| e.into_inner()),
+        )?;
         let mut gpu = gpu.lock().map_err(|_| "compositor poisoned".to_owned())?;
         if sources.has_treatments() {
             // A layer's chain runs on the CPU, so the frame is drawn there
@@ -142,7 +154,15 @@ impl Monitor {
         spec: FrameSpec,
     ) -> Result<Vec<u8>, String> {
         let request = Self::request(clips, settings, spec);
-        concat_export::preview_frame(&self.pool, &request)
+        let sources = concat_export::preview_sources_cached(
+            &self.pool,
+            &request,
+            false,
+            &mut self.prepared.lock().unwrap_or_else(|e| e.into_inner()),
+        )?;
+        Ok(sources
+            .composite(&mut concat_render::CpuCompositor)
+            .into_pixels())
     }
 
     /// Decode-ahead for the playback stream: warms the pool for the next
@@ -156,6 +176,16 @@ impl Monitor {
         spec: FrameSpec,
         frames: u32,
     ) {
+        if self.prefetching.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        struct Finished<'a>(&'a AtomicBool);
+        impl Drop for Finished<'_> {
+            fn drop(&mut self) {
+                self.0.store(false, Ordering::Release);
+            }
+        }
+        let _finished = Finished(&self.prefetching);
         let request = Self::request(clips, settings, spec);
         concat_export::preview_prefetch(&self.pool, &request, frames.min(8), self.has_gpu());
     }
@@ -163,5 +193,9 @@ impl Monitor {
     /// Forgets every cached frame and reader, for when the project closes.
     pub fn clear(&self) {
         self.pool.clear();
+        self.prepared
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
     }
 }
