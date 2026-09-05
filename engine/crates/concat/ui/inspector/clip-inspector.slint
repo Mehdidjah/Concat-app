@@ -58,6 +58,8 @@ export struct AppliedParamData {
     default-value: float,
     value: float,
     fmt: ParamFormat,
+    keyframed: bool,
+    animatable: bool,
 }
 
 /// A chain and its library: the links applied to the selected clip, each
@@ -81,6 +83,7 @@ export component PresetStack inherits VerticalLayout {
     callback remove(index: int);
     /// One knob moved. The value lands on the echo; `commit` makes it real.
     callback set-param(index: int, key: string, value: float);
+    callback keyframe-param(index: int, key: string, on: bool);
     callback commit();
 
     property <int> group;
@@ -208,10 +211,13 @@ export component PresetStack inherits VerticalLayout {
                             default-value: p.default-value;
                             fmt: p.fmt;
                             enabled: item.on;
+                            keyframe: p.animatable;
+                            keyframed: p.keyframed;
                             changed(v) => {
                                 root.set-param(index, p.key, v);
                                 root.commit();
                             }
+                            keyframe-toggled(on) => { root.keyframe-param(index, p.key, on); }
                         }
                     }
                 }
@@ -334,11 +340,13 @@ export component VideoPanel inherits VerticalLayout {
     in property <bool> painting;
 
     callback set(field: ClipField, value: float);
+    callback keyframe-toggle(field: ClipField, on: bool);
     /// A control gesture finished: the accumulated change becomes one command.
     callback commit();
     callback chain-add(id: string);
     callback chain-remove(index: int);
     callback chain-set-param(index: int, key: string, value: float);
+    callback chain-keyframe-param(index: int, key: string, on: bool);
     /// The cutout: its mode (0 off, 1 automatic, 2 custom), and the brush.
     callback cutout-mode(mode: int);
     callback cutout-tool(index: int);
@@ -373,10 +381,16 @@ export component VideoPanel inherits VerticalLayout {
     property <float> scale;
     property <float> offset-x;
     property <float> offset-y;
+    property <float> anchor-x;
+    property <float> anchor-y;
     property <float> rotation;
+    property <float> rotation-x;
+    property <float> rotation-y;
+    property <float> position-z;
     property <float> stretch-x;
     property <float> stretch-y;
     property <float> alpha;
+    property <float> layer-order;
     property <float> crop-left;
     property <float> crop-top;
     property <float> crop-right;
@@ -388,10 +402,16 @@ export component VideoPanel inherits VerticalLayout {
         root.scale = root.selected.scale;
         root.offset-x = root.selected.offset-x;
         root.offset-y = root.selected.offset-y;
+        root.anchor-x = root.selected.anchor-x;
+        root.anchor-y = root.selected.anchor-y;
         root.rotation = root.selected.rotation;
+        root.rotation-x = root.selected.rotation-x;
+        root.rotation-y = root.selected.rotation-y;
+        root.position-z = root.selected.position-z;
         root.stretch-x = root.selected.stretch-x;
         root.stretch-y = root.selected.stretch-y;
         root.alpha = root.selected.opacity;
+        root.layer-order = root.selected.layer-order;
         root.crop-left = root.selected.crop-left;
         root.crop-top = root.selected.crop-top;
         root.crop-right = root.selected.crop-right;
@@ -432,7 +452,10 @@ export component VideoPanel inherits VerticalLayout {
             step: 0.01;
             default-value: 1;
             fmt: ParamFormat.fraction;
+            keyframe: true;
+            keyframed: root.selected.scale-keyframed;
             changed(v) => { root.set(ClipField.scale, v); root.commit(); }
+            keyframe-toggled(on) => { root.keyframe-toggle(ClipField.scale, on); }
         }
         Param {
             label: I18n.t("Position X");
@@ -442,7 +465,10 @@ export component VideoPanel inherits VerticalLayout {
             step: 0.005;
             default-value: 0;
             fmt: ParamFormat.centred;
+            keyframe: true;
+            keyframed: root.selected.offset-x-keyframed;
             changed(v) => { root.set(ClipField.offset-x, v); root.commit(); }
+            keyframe-toggled(on) => { root.keyframe-toggle(ClipField.offset-x, on); }
         }
         Param {
             label: I18n.t("Position Y");
@@ -452,7 +478,10 @@ export component VideoPanel inherits VerticalLayout {
             step: 0.005;
             default-value: 0;
             fmt: ParamFormat.centred;
+            keyframe: true;
+            keyframed: root.selected.offset-y-keyframed;
             changed(v) => { root.set(ClipField.offset-y, v); root.commit(); }
+            keyframe-toggled(on) => { root.keyframe-toggle(ClipField.offset-y, on); }
         }
         Param {
             label: I18n.t("Rotation");
@@ -462,7 +491,75 @@ export component VideoPanel inherits VerticalLayout {
             step: 1;
             default-value: 0;
             fmt: ParamFormat.degrees;
+            keyframe: true;
+            keyframed: root.selected.rotation-keyframed;
             changed(v) => { root.set(ClipField.rotation, v); root.commit(); }
+            keyframe-toggled(on) => { root.keyframe-toggle(ClipField.rotation, on); }
+        }
+        Param {
+            label: I18n.t("Anchor X");
+            value <=> root.anchor-x;
+            minimum: -1;
+            maximum: 1;
+            step: 0.005;
+            default-value: 0;
+            fmt: ParamFormat.centred;
+            keyframe: true;
+            keyframed: root.selected.anchor-x-keyframed;
+            changed(v) => { root.set(ClipField.anchor-x, v); root.commit(); }
+            keyframe-toggled(on) => { root.keyframe-toggle(ClipField.anchor-x, on); }
+        }
+        Param {
+            label: I18n.t("Anchor Y");
+            value <=> root.anchor-y;
+            minimum: -1;
+            maximum: 1;
+            step: 0.005;
+            default-value: 0;
+            fmt: ParamFormat.centred;
+            keyframe: true;
+            keyframed: root.selected.anchor-y-keyframed;
+            changed(v) => { root.set(ClipField.anchor-y, v); root.commit(); }
+            keyframe-toggled(on) => { root.keyframe-toggle(ClipField.anchor-y, on); }
+        }
+        Param {
+            label: I18n.t("Rotation X");
+            value <=> root.rotation-x;
+            minimum: -180;
+            maximum: 180;
+            step: 1;
+            default-value: 0;
+            fmt: ParamFormat.degrees;
+            keyframe: true;
+            keyframed: root.selected.rotation-x-keyframed;
+            changed(v) => { root.set(ClipField.rotation-x, v); root.commit(); }
+            keyframe-toggled(on) => { root.keyframe-toggle(ClipField.rotation-x, on); }
+        }
+        Param {
+            label: I18n.t("Rotation Y");
+            value <=> root.rotation-y;
+            minimum: -180;
+            maximum: 180;
+            step: 1;
+            default-value: 0;
+            fmt: ParamFormat.degrees;
+            keyframe: true;
+            keyframed: root.selected.rotation-y-keyframed;
+            changed(v) => { root.set(ClipField.rotation-y, v); root.commit(); }
+            keyframe-toggled(on) => { root.keyframe-toggle(ClipField.rotation-y, on); }
+        }
+        Param {
+            label: I18n.t("Position Z");
+            value <=> root.position-z;
+            minimum: -2;
+            maximum: 2;
+            step: 0.01;
+            default-value: 0;
+            fmt: ParamFormat.centred;
+            keyframe: true;
+            keyframed: root.selected.position-z-keyframed;
+            changed(v) => { root.set(ClipField.position-z, v); root.commit(); }
+            keyframe-toggled(on) => { root.keyframe-toggle(ClipField.position-z, on); }
         }
         Param {
             label: I18n.t("Width");
@@ -472,7 +569,10 @@ export component VideoPanel inherits VerticalLayout {
             step: 0.01;
             default-value: 1;
             fmt: ParamFormat.fraction;
+            keyframe: true;
+            keyframed: root.selected.stretch-x-keyframed;
             changed(v) => { root.set(ClipField.stretch-x, v); root.commit(); }
+            keyframe-toggled(on) => { root.keyframe-toggle(ClipField.stretch-x, on); }
         }
         Param {
             label: I18n.t("Height");
@@ -482,7 +582,23 @@ export component VideoPanel inherits VerticalLayout {
             step: 0.01;
             default-value: 1;
             fmt: ParamFormat.fraction;
+            keyframe: true;
+            keyframed: root.selected.stretch-y-keyframed;
             changed(v) => { root.set(ClipField.stretch-y, v); root.commit(); }
+            keyframe-toggled(on) => { root.keyframe-toggle(ClipField.stretch-y, on); }
+        }
+        Param {
+            label: I18n.t("Layer order");
+            value <=> root.layer-order;
+            minimum: -128;
+            maximum: 128;
+            step: 1;
+            default-value: 0;
+            fmt: ParamFormat.plain;
+            keyframe: true;
+            keyframed: root.selected.layer-order-keyframed;
+            changed(v) => { root.set(ClipField.layer-order, v); root.commit(); }
+            keyframe-toggled(on) => { root.keyframe-toggle(ClipField.layer-order, on); }
         }
 
         }
@@ -504,7 +620,10 @@ export component VideoPanel inherits VerticalLayout {
             step: 0.01;
             default-value: 1;
             fmt: ParamFormat.fraction;
+            keyframe: true;
+            keyframed: root.selected.opacity-keyframed;
             changed(v) => { root.set(ClipField.opacity, v); root.commit(); }
+            keyframe-toggled(on) => { root.keyframe-toggle(ClipField.opacity, on); }
         }
         Row {
             label: I18n.t("Mode");
@@ -648,9 +767,14 @@ export component VideoPanel inherits VerticalLayout {
                 step: p.step;
                 default-value: p.default-value;
                 fmt: p.fmt;
+                keyframe: p.animatable;
+                keyframed: p.keyframed;
                 changed(v) => {
                     root.chain-set-param(root.keyer-index, p.key, v);
                     root.commit();
+                }
+                keyframe-toggled(on) => {
+                    root.chain-keyframe-param(root.keyer-index, p.key, on);
                 }
             }
         }

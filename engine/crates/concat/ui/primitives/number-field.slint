@@ -30,7 +30,7 @@ export component NumberField inherits Rectangle {
     in property <string> suffix;
     /// render the keyframe diamond on the trailing edge
     in property <bool> keyframe;
-    in-out property <bool> keyframed;
+    in property <bool> keyframed;
     in property <bool> enabled: true;
 
     callback changed(value: float);
@@ -171,8 +171,7 @@ export component NumberField inherits Rectangle {
                     enabled: root.enabled;
                     mouse-cursor: pointer;
                     clicked => {
-                        root.keyframed = !root.keyframed;
-                        root.keyframe-toggled(root.keyframed);
+                        root.keyframe-toggled(!root.keyframed);
                     }
                 }
             }

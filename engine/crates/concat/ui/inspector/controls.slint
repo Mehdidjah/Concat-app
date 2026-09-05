@@ -240,8 +240,13 @@ export component Param inherits VerticalLayout {
     in property <float> default-value: root.minimum;
     in property <ParamFormat> fmt;
     in property <bool> enabled: true;
+    /// Show the per-property keyframe diamond beside the number field.
+    in property <bool> keyframe;
+    /// True only when this property has a key on the current frame.
+    in property <bool> keyframed;
 
     callback changed(value: float);
+    callback keyframe-toggled(on: bool);
 
     padding-left: Theme.pad;
     padding-right: Theme.pad;
@@ -288,7 +293,10 @@ export component Param inherits VerticalLayout {
             step: root.step;
             precision: InspectorFmt.precision-of(root.step);
             enabled: root.enabled;
+            keyframe: root.keyframe;
+            keyframed: root.keyframed;
             changed(v) => { root.changed(v); }
+            keyframe-toggled(on) => { root.keyframe-toggled(on); }
         }
     }
 }
