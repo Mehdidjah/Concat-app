@@ -22,8 +22,9 @@ use serde_json::{Map, Value, json};
 
 use crate::commands::{MAX_STRETCH, MIN_STRETCH};
 use crate::model::{
-    AppliedFilter, Clip, ClipAnimation, ClipKind, Crop, CustomFont, Cutout, MediaItem, MediaKind,
-    Project, SpeedPoint, TextAlign, TextStyle, Timeline, Track, Transition,
+    AppliedFilter, Clip, ClipAnimation, ClipKeyframes, ClipKind, ClipMask, Crop, CustomFont,
+    Cutout, MediaItem, MediaKind, Project, SpeedPoint, TextAlign, TextStyle, Timeline, Track,
+    Transition,
 };
 
 /// Bumped only when a change cannot be absorbed by defaulting.
@@ -213,12 +214,18 @@ fn read_clips(raw: Option<&Value>, tracks: &[Track], media: &[MediaItem]) -> Vec
                 scale: number(entry.get("scale"), 1.0).max(0.05),
                 offset_x: number(entry.get("offsetX"), 0.0),
                 offset_y: number(entry.get("offsetY"), 0.0),
+                anchor_x: number(entry.get("anchorX"), 0.0),
+                anchor_y: number(entry.get("anchorY"), 0.0),
                 rotation: number(entry.get("rotation"), 0.0),
+                rotation_x: number(entry.get("rotationX"), 0.0),
+                rotation_y: number(entry.get("rotationY"), 0.0),
+                position_z: number(entry.get("positionZ"), 0.0),
                 stretch_x: number(entry.get("stretchX"), 1.0).clamp(MIN_STRETCH, MAX_STRETCH),
                 stretch_y: number(entry.get("stretchY"), 1.0).clamp(MIN_STRETCH, MAX_STRETCH),
                 // Clamped: a hand-edited 2 would export differently from how
                 // the preview clamps it on screen.
                 opacity: number(entry.get("opacity"), 1.0).clamp(0.0, 1.0),
+                layer_order: number(entry.get("layerOrder"), 0.0),
                 speed: number(entry.get("speed"), 1.0).clamp(0.0625, 16.0),
                 speed_curve: entry.get("speedCurve").and_then(|value| {
                     let points: Vec<SpeedPoint> = value
@@ -236,6 +243,11 @@ fn read_clips(raw: Option<&Value>, tracks: &[Track], media: &[MediaItem]) -> Vec
                 animation_in: read_animation(entry.get("animationIn")),
                 animation_out: read_animation(entry.get("animationOut")),
                 animation_combo: read_animation(entry.get("animationCombo")),
+                keyframes: entry
+                    .get("keyframes")
+                    .and_then(|value| serde_json::from_value::<ClipKeyframes>(value.clone()).ok())
+                    .unwrap_or_default()
+                    .tidy(),
                 flip_h: flag(entry.get("flipH"), false),
                 flip_v: flag(entry.get("flipV"), false),
                 blend: text(entry.get("blend"), ""),
@@ -254,6 +266,14 @@ fn read_clips(raw: Option<&Value>, tracks: &[Track], media: &[MediaItem]) -> Vec
                     .get("cutout")
                     .and_then(|value| serde_json::from_value::<Cutout>(value.clone()).ok())
                     .map(Cutout::tidy),
+                masks: entry
+                    .get("masks")
+                    .and_then(|value| serde_json::from_value::<Vec<ClipMask>>(value.clone()).ok())
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(ClipMask::tidy)
+                    .collect(),
+                masks_enabled: flag(entry.get("masksEnabled"), entry.get("masks").is_some()),
                 preserve_pitch: flag(entry.get("preservePitch"), true),
                 filters: read_filters(entry.get("filters")),
                 video_effects: read_filters(entry.get("videoEffects")),

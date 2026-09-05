@@ -40,7 +40,10 @@ mod tests {
     use crate::commands::{ClipMove, ClipPatch, Command, TrackFlag, TrimEdge};
     use crate::doc::DocumentSettings;
     use crate::editor::Editor;
-    use crate::model::{ClipKind, MediaKind, TextStyle};
+    use crate::model::{
+        ClipKeyframe, ClipKeyframes, ClipKind, KeyframeProperty, MaskProperty, MaskShape,
+        MediaKind, SpeedPoint, TextStyle,
+    };
 
     fn media(path: &str, duration: f64, has_audio: bool) -> Command {
         Command::AddMedia {
@@ -107,6 +110,67 @@ mod tests {
     }
 
     #[test]
+    fn clip_masks_are_persistent_keyframeable_and_undoable() {
+        let (mut editor, _, clip_id) = fixture();
+        let mask_id = editor
+            .apply(Command::AddClipMask {
+                clip_id: clip_id.clone(),
+                shape: MaskShape::Circle,
+            })
+            .expect("adds mask")
+            .created_id
+            .expect("mask id");
+        let mut mask = editor.project().active().clips[0].masks[0].clone();
+        mask.position_x = 0.25;
+        editor
+            .apply(Command::UpdateClipMask {
+                clip_id: clip_id.clone(),
+                mask,
+            })
+            .expect("updates mask");
+        let mut keys = editor.project().active().clips[0].keyframes.clone();
+        keys.set_named_at(&MaskProperty::PositionX.id(&mask_id), 0.5, 0.75, 1e-9);
+        editor
+            .apply(Command::UpdateClip {
+                clip_id: clip_id.clone(),
+                patch: ClipPatch {
+                    keyframes: Some(keys),
+                    ..ClipPatch::default()
+                },
+            })
+            .expect("keys mask position");
+
+        let document = editor.to_document(&settings());
+        let restored = Editor::from_document(&document).expect("loads masks");
+        let clip = &restored.project().active().clips[0];
+        assert!(clip.masks_enabled);
+        assert_eq!(clip.masks[0].shape, MaskShape::Circle);
+        assert_eq!(clip.masks[0].position_x, 0.25);
+        assert_eq!(
+            clip.keyframes
+                .named_track(&MaskProperty::PositionX.id(&mask_id))[0]
+                .value,
+            0.75
+        );
+
+        editor
+            .apply(Command::RemoveClipMask {
+                clip_id,
+                mask_id: mask_id.clone(),
+            })
+            .expect("removes mask");
+        assert!(editor.project().active().clips[0].masks.is_empty());
+        assert!(
+            editor.project().active().clips[0]
+                .keyframes
+                .named_track(&MaskProperty::PositionX.id(&mask_id))
+                .is_empty()
+        );
+        assert!(editor.undo());
+        assert_eq!(editor.project().active().clips[0].masks.len(), 1);
+    }
+
+    #[test]
     fn split_produces_source_continuous_halves_and_merge_rejoins_them() {
         let (mut editor, _, clip_id) = fixture();
         editor
@@ -130,6 +194,75 @@ mod tests {
         assert_eq!(clips.len(), 1);
         assert_eq!(clips[0].duration, 10.0);
         assert_eq!(clips[0].id, clip_id, "the first piece keeps its identity");
+    }
+
+    #[test]
+    fn split_retimes_custom_keyframes_into_both_halves() {
+        let (mut editor, _, clip_id) = fixture();
+        editor
+            .apply(Command::UpdateClip {
+                clip_id: clip_id.clone(),
+                patch: ClipPatch {
+                    keyframes: Some(ClipKeyframes::from_tracks([(
+                        KeyframeProperty::Scale,
+                        vec![
+                            ClipKeyframe::linear(0.0, 1.0),
+                            ClipKeyframe::linear(1.0, 2.0),
+                        ],
+                    )])),
+                    ..ClipPatch::default()
+                },
+            })
+            .unwrap();
+        editor
+            .apply(Command::SplitClips {
+                clip_ids: vec![clip_id],
+                time: 4.0,
+            })
+            .unwrap();
+
+        let clips = &editor.project().active().clips;
+        assert_eq!(clips.len(), 2);
+        assert!(
+            (clips[0]
+                .keyframes
+                .track(KeyframeProperty::Scale)
+                .last()
+                .unwrap()
+                .value
+                - 1.4)
+                .abs()
+                < 1e-9
+        );
+        assert!(
+            (clips[1]
+                .keyframes
+                .track(KeyframeProperty::Scale)
+                .first()
+                .unwrap()
+                .value
+                - 1.4)
+                .abs()
+                < 1e-9
+        );
+        assert_eq!(
+            clips[0]
+                .keyframes
+                .track(KeyframeProperty::Scale)
+                .last()
+                .unwrap()
+                .at,
+            1.0
+        );
+        assert_eq!(
+            clips[1]
+                .keyframes
+                .track(KeyframeProperty::Scale)
+                .first()
+                .unwrap()
+                .at,
+            0.0
+        );
     }
 
     #[test]
@@ -215,6 +348,47 @@ mod tests {
             })
             .expect("ok");
         assert_eq!(editor.project().active().clips[0].speed, 0.0625);
+    }
+
+    #[test]
+    fn a_speed_graph_preserves_source_coverage_and_is_undoable() {
+        let (mut editor, _, clip_id) = fixture();
+        let before = editor.project().active().clip(&clip_id).unwrap();
+        let covered = before.duration * before.speed;
+        let curve = vec![
+            SpeedPoint {
+                at: 0.0,
+                speed: 1.0,
+            },
+            SpeedPoint {
+                at: 0.5,
+                speed: 4.0,
+            },
+            SpeedPoint {
+                at: 1.0,
+                speed: 1.0,
+            },
+        ];
+        editor
+            .apply(Command::SetClipSpeedCurve {
+                clip_id: clip_id.clone(),
+                curve: Some(curve.clone()),
+            })
+            .expect("sets curve");
+        let changed = editor.project().active().clip(&clip_id).unwrap();
+        assert_eq!(changed.speed_curve.as_deref(), Some(curve.as_slice()));
+        assert!((changed.duration * changed.speed - covered).abs() < 1e-9);
+
+        editor.undo();
+        assert!(
+            editor
+                .project()
+                .active()
+                .clip(&clip_id)
+                .unwrap()
+                .speed_curve
+                .is_none()
+        );
     }
 
     #[test]
@@ -383,6 +557,19 @@ mod tests {
                 clip_id: clip_id.clone(),
                 patch: ClipPatch {
                     volume: Some(0.5),
+                    keyframes: Some(ClipKeyframes::from_tracks([
+                        (
+                            KeyframeProperty::Scale,
+                            vec![
+                                ClipKeyframe::linear(0.0, 1.0),
+                                ClipKeyframe::linear(0.75, 1.5),
+                            ],
+                        ),
+                        (
+                            KeyframeProperty::OffsetY,
+                            vec![ClipKeyframe::linear(0.25, -0.2)],
+                        ),
+                    ])),
                     transition_in: Some(Some(crate::model::Transition {
                         id: "cross-fade".to_owned(),
                         duration: 1.5,
