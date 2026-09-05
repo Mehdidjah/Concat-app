@@ -7540,6 +7540,376 @@ impl Studio {
         }
     }
 
+    pub fn graph_property_changed(&mut self, index: i32) {
+        if self.echo.is_some() {
+            self.finish_graph_preview();
+        }
+        if let Some(graph) = self.keyframe_graph.as_mut() {
+            graph.property = GraphProperty::from_index(index);
+            graph.selected = None;
+        }
+    }
+
+    pub fn graph_point_pressed(&mut self, index: i32) {
+        let Some(graph) = self.keyframe_graph.clone() else {
+            return;
+        };
+        let Ok(index) = usize::try_from(index) else {
+            return;
+        };
+        self.selection = vec![graph.clip.clone()];
+        self.begin_graph_preview();
+        self.begin_echo();
+        if let Some(state) = self.keyframe_graph.as_mut() {
+            state.selected = Some(index);
+        }
+        self.schedule_preview_frame();
+    }
+
+    pub fn graph_point_dragged(&mut self, index: i32, at: f32, value: f32) {
+        let Some(graph) = self.keyframe_graph.clone() else {
+            return;
+        };
+        let Ok(index) = usize::try_from(index) else {
+            return;
+        };
+        let frame_rate = self.frame_rate();
+        self.selection = vec![graph.clip.clone()];
+        self.begin_graph_preview();
+        self.begin_echo();
+        if let Some(clip) = self.echo_clip_mut(&graph.clip) {
+            update_graph_point(
+                clip,
+                graph.property,
+                index,
+                f64::from(at),
+                f64::from(value),
+                frame_rate,
+            );
+        }
+        if let Some(state) = self.keyframe_graph.as_mut() {
+            state.selected = Some(index);
+        }
+        self.schedule_preview_frame();
+    }
+
+    pub fn graph_point_released(&mut self) {
+        self.finish_graph_preview();
+    }
+
+    pub fn graph_point_added(&mut self, at: f32, value: f32) {
+        let Some(graph) = self.keyframe_graph.clone() else {
+            return;
+        };
+        let frame_rate = self.frame_rate();
+        self.selection = vec![graph.clip.clone()];
+        self.begin_echo();
+        let Some(clip) = self.echo_clip_mut(&graph.clip) else {
+            return;
+        };
+        let at = snap_graph_at(clip.duration, frame_rate, f64::from(at));
+        let tolerance =
+            (0.5 / (clip.duration.max(1e-6) * f64::from(frame_rate.max(1.0)))).max(1e-9);
+        let value = f64::from(value);
+        let selected = if let Some(property) = graph.property.keyframe() {
+            let covered = clip.duration * clip.speed;
+            let rest = clip.speed;
+            if property == KeyframeProperty::TimeRemap {
+                migrate_time_remap(clip);
+            }
+            clip.keyframes.set_at(
+                property,
+                at,
+                clamp_keyframe_value(property, value),
+                tolerance,
+            );
+            let selected = clip
+                .keyframes
+                .track(property)
+                .iter()
+                .position(|point| (point.at - at).abs() <= tolerance)
+                .unwrap_or(0);
+            if property == KeyframeProperty::TimeRemap {
+                sync_time_remap(clip, covered, rest);
+            }
+            selected
+        } else {
+            let covered = clip.duration * clip.speed;
+            let points = clip.speed_curve.get_or_insert_default();
+            if let Some(point) = points
+                .iter_mut()
+                .find(|point| (point.at - at).abs() <= tolerance)
+            {
+                point.at = at;
+                point.speed = value.clamp(0.0625, 16.0);
+            } else {
+                points.push(model::SpeedPoint {
+                    at,
+                    speed: value.clamp(0.0625, 16.0),
+                });
+            }
+            points.sort_by(|left, right| left.at.total_cmp(&right.at));
+            let selected = points
+                .iter()
+                .position(|point| (point.at - at).abs() <= tolerance)
+                .unwrap_or(0);
+            let mean = concat_project::speed::mean_of(points).clamp(0.0625, 16.0);
+            clip.speed = mean;
+            clip.duration = (covered / mean).max(f64::from(MIN_DURATION));
+            selected
+        };
+        if let Some(state) = self.keyframe_graph.as_mut() {
+            state.selected = Some(selected);
+        }
+        self.clip_commit();
+    }
+
+    pub fn graph_point_removed(&mut self, index: i32) {
+        let Some(graph) = self.keyframe_graph.clone() else {
+            return;
+        };
+        let Ok(index) = usize::try_from(index) else {
+            return;
+        };
+        self.selection = vec![graph.clip.clone()];
+        self.begin_echo();
+        let Some(clip) = self.echo_clip_mut(&graph.clip) else {
+            return;
+        };
+        if let Some(property) = graph.property.keyframe() {
+            let covered = clip.duration * clip.speed;
+            let rest = clip.speed;
+            if property == KeyframeProperty::TimeRemap {
+                migrate_time_remap(clip);
+            }
+            let keys = clip.keyframes.track_mut(property);
+            let removed = (index < keys.len()).then(|| keys.remove(index));
+            let empty = keys.is_empty();
+            if empty && let Some(removed) = removed {
+                set_clip_property(clip, property, removed.value);
+                if property == KeyframeProperty::TimeRemap {
+                    clip.duration = (covered / clip.speed.max(0.0625)).max(f64::from(MIN_DURATION));
+                }
+            }
+            if property == KeyframeProperty::TimeRemap && !empty {
+                sync_time_remap(clip, covered, rest);
+            }
+        } else {
+            let covered = clip.duration * clip.speed;
+            if let Some(points) = clip.speed_curve.as_mut() {
+                if index < points.len() {
+                    points.remove(index);
+                }
+                if points.is_empty() {
+                    clip.speed_curve = None;
+                } else {
+                    let mean = concat_project::speed::mean_of(points).clamp(0.0625, 16.0);
+                    clip.speed = mean;
+                    clip.duration = (covered / mean).max(f64::from(MIN_DURATION));
+                }
+            }
+        }
+        if let Some(state) = self.keyframe_graph.as_mut() {
+            state.selected = None;
+        }
+        self.clip_commit();
+    }
+
+    pub fn graph_ease_changed(&mut self, index: i32) {
+        let Some(graph) = self.keyframe_graph.clone() else {
+            return;
+        };
+        let (Some(property), Some(selected)) = (graph.property.keyframe(), graph.selected) else {
+            return;
+        };
+        self.selection = vec![graph.clip.clone()];
+        self.begin_echo();
+        if let Some(clip) = self.echo_clip_mut(&graph.clip) {
+            let covered = clip.duration * clip.speed;
+            let rest = clip.speed;
+            if property == KeyframeProperty::TimeRemap {
+                migrate_time_remap(clip);
+            }
+            if let Some(key) = clip.keyframes.track_mut(property).get_mut(selected) {
+                key.ease = match index {
+                    1 => KeyframeEase::In,
+                    2 => KeyframeEase::Out,
+                    3 => KeyframeEase::InOut,
+                    _ => KeyframeEase::Linear,
+                };
+                key.temporal_curve = None;
+                if property == KeyframeProperty::TimeRemap {
+                    sync_time_remap(clip, covered, rest);
+                }
+            }
+        }
+        self.clip_commit();
+    }
+
+    pub fn graph_curve_pressed(&mut self) {
+        let Some(graph) = self.keyframe_graph.clone() else {
+            return;
+        };
+        if graph.property.keyframe().is_none() || graph.selected.unwrap_or(0) == 0 {
+            return;
+        }
+        self.selection = vec![graph.clip];
+        self.begin_graph_preview();
+        self.begin_echo();
+    }
+
+    pub fn graph_curve_changed(&mut self, x1: f32, y1: f32, x2: f32, y2: f32) {
+        let Some(graph) = self.keyframe_graph.clone() else {
+            return;
+        };
+        let (Some(property), Some(selected)) = (graph.property.keyframe(), graph.selected) else {
+            return;
+        };
+        if selected == 0 {
+            return;
+        }
+        self.selection = vec![graph.clip.clone()];
+        self.begin_graph_preview();
+        self.begin_echo();
+        if let Some(clip) = self.echo_clip_mut(&graph.clip) {
+            let covered = clip.duration * clip.speed;
+            let rest = clip.speed;
+            if property == KeyframeProperty::TimeRemap {
+                migrate_time_remap(clip);
+            }
+            if let Some(key) = clip.keyframes.track_mut(property).get_mut(selected) {
+                key.temporal_curve = Some(
+                    TemporalCurve {
+                        x1: f64::from(x1),
+                        y1: f64::from(y1),
+                        x2: f64::from(x2),
+                        y2: f64::from(y2),
+                    }
+                    .tidy(),
+                );
+                if property == KeyframeProperty::TimeRemap {
+                    sync_time_remap(clip, covered, rest);
+                }
+            }
+        }
+        self.schedule_preview_frame();
+    }
+
+    pub fn graph_curve_released(&mut self) {
+        self.finish_graph_preview();
+    }
+
+    pub fn graph_post_changed(&mut self, index: i32) {
+        let Some(graph) = self.keyframe_graph.clone() else {
+            return;
+        };
+        let Some(property) = graph.property.keyframe() else {
+            return;
+        };
+        self.selection = vec![graph.clip.clone()];
+        self.begin_echo();
+        if let Some(clip) = self.echo_clip_mut(&graph.clip) {
+            let covered = clip.duration * clip.speed;
+            let rest = clip.speed;
+            if property == KeyframeProperty::TimeRemap {
+                migrate_time_remap(clip);
+            }
+            clip.keyframes.set_post_behavior(
+                property,
+                match index {
+                    1 => PostKeyBehavior::Reset,
+                    2 => PostKeyBehavior::Loop,
+                    3 => PostKeyBehavior::Extrapolate,
+                    _ => PostKeyBehavior::Hold,
+                },
+            );
+            if property == KeyframeProperty::TimeRemap {
+                sync_time_remap(clip, covered, rest);
+            }
+        }
+        self.clip_commit();
+    }
+
+    pub fn keyframe_marker_selected(&mut self, clip_id: &str, seconds: f32) {
+        let Some(clip) = self.timeline().clip(clip_id).cloned() else {
+            return;
+        };
+        let at = ((f64::from(seconds) - clip.start) / clip.duration.max(1e-6)).clamp(0.0, 1.0);
+        let tolerance =
+            (0.5 / f64::from(self.frame_rate().max(1.0)) / clip.duration.max(1e-6)).max(1e-7);
+        let current = self
+            .keyframe_graph
+            .as_ref()
+            .filter(|graph| graph.clip == clip_id)
+            .map(|graph| graph.property);
+        let properties = current.into_iter().chain([
+            GraphProperty::Scale,
+            GraphProperty::OffsetX,
+            GraphProperty::OffsetY,
+            GraphProperty::Rotation,
+            GraphProperty::AnchorX,
+            GraphProperty::AnchorY,
+            GraphProperty::RotationX,
+            GraphProperty::RotationY,
+            GraphProperty::PositionZ,
+            GraphProperty::StretchX,
+            GraphProperty::StretchY,
+            GraphProperty::Opacity,
+            GraphProperty::LayerOrder,
+            GraphProperty::Speed,
+        ]);
+        let mut found = None;
+        for property in properties {
+            if let Some(index) = graph_points(&clip, property)
+                .iter()
+                .position(|point| (point.0 - at).abs() <= tolerance)
+            {
+                found = Some((property, index));
+                break;
+            }
+        }
+        let Some((property, selected)) = found else {
+            return;
+        };
+        self.selection = vec![clip_id.to_owned()];
+        self.playhead = seconds.max(0.0);
+        self.keyframe_graph = Some(KeyframeGraphState {
+            clip: clip_id.to_owned(),
+            property,
+            selected: Some(selected),
+        });
+        self.schedule_preview_frame();
+    }
+
+    pub fn graph_closed(&mut self) {
+        if self.echo.is_some() {
+            self.finish_graph_preview();
+        }
+        self.preview_interactive = false;
+        self.preview_flattened = None;
+        self.keyframe_graph = None;
+    }
+
+    fn begin_graph_preview(&mut self) {
+        if !self.preview_interactive {
+            self.preview_flattened = None;
+        }
+        self.preview_interactive = true;
+    }
+
+    fn finish_graph_preview(&mut self) {
+        self.preview_interactive = false;
+        self.preview_flattened = None;
+        let generation = self.preview_generation;
+        self.clip_commit();
+        // A real commit calls after_change, which already requests the final
+        // configured-quality frame. A click/no-op still needs to replace the
+        // reduced interactive frame.
+        if self.preview_generation == generation {
+            self.request_preview();
+        }
+    }
+
     /// Every clip on an unlocked lane.
     pub fn select_all(&mut self) {
         self.selection = self
@@ -7575,9 +7945,26 @@ impl Studio {
 
 #[cfg(test)]
 mod tests {
-    use super::{Footprint, Studio};
+    use super::{Footprint, Studio, moved_graph_at, snap_graph_at};
 
     const FRAME: (u32, u32) = (1920, 1080);
+
+    #[test]
+    fn graph_times_snap_to_frames_without_anchoring_endpoints() {
+        let snapped = snap_graph_at(2.0, 30.0, 0.413);
+        assert!((snapped - 25.0 / 60.0).abs() < 1e-12);
+
+        let first = moved_graph_at(0.1, None, Some(0.5), 0.2, 4.0, 30.0);
+        let last = moved_graph_at(0.9, Some(0.5), None, 0.8, 4.0, 30.0);
+        assert!((first - 0.2).abs() < 1e-12);
+        assert!((last - 0.8).abs() < 1e-12);
+    }
+
+    #[test]
+    fn graph_points_cannot_cross_a_neighbour() {
+        let moved = moved_graph_at(0.25, None, Some(0.5), 0.9, 4.0, 30.0);
+        assert!((moved - 59.0 / 120.0).abs() < 1e-12);
+    }
 
     /// A quarter turn swaps the bounds' pixel extents, which in fractions
     /// of a 16:9 frame is not a swap of the numbers.
