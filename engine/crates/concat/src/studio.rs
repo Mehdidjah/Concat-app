@@ -5852,6 +5852,196 @@ impl Studio {
         sync(&models.dividers, out.dividers);
     }
 
+    /// The only Slint property a successful monitor worker changes. Keeping
+    /// this separate prevents an image completion from rebuilding every lane,
+    /// clip, inspector row and dock model.
+    pub fn publish_preview(&self, app: &App) {
+        app.global::<Editor>()
+            .set_preview_frame(self.preview.clone());
+    }
+
+    /// The state that genuinely changes on a playback clock tick. Rebuilding
+    /// every timeline row and inspector control at 30 Hz steals the event loop
+    /// from the monitor; the playhead and selection overlay are sufficient.
+    pub fn publish_transport(&self, app: &App, models: &Models) {
+        let editor = app.global::<Editor>();
+        editor.set_playhead(self.playhead);
+        editor.set_playing(self.playing);
+
+        let playhead = f64::from(self.playhead);
+        let showing = self
+            .timeline()
+            .clips
+            .iter()
+            .filter(|clip| {
+                (clip.kind.is_visual() || clip.kind == model::ClipKind::Text)
+                    && clip.start <= playhead
+                    && playhead < clip.start + clip.duration
+            })
+            .max_by_key(|clip| {
+                let base = -self.row_of(&clip.track_id) * 256;
+                let at = ((playhead - clip.start) / clip.duration.max(1e-6)).clamp(0.0, 1.0);
+                let order = clip
+                    .keyframes
+                    .value_at(KeyframeProperty::LayerOrder, at, clip.layer_order)
+                    .round() as i32;
+                base + order
+            });
+        editor.set_has_picture(showing.is_some());
+        editor.set_preview_clip_name(
+            showing
+                .map(|clip| clip.name.as_str())
+                .unwrap_or_default()
+                .into(),
+        );
+        sync(&models.stage, self.stage_items());
+    }
+
+    /// The small surface a keyframe gesture changes: timeline diamonds and
+    /// the open graph. Pointer-rate handlers publish only this; release makes
+    /// the ordinary full lane publication once.
+    pub fn publish_keyframe_graph(&self, app: &App, models: &Models) {
+        let editor = app.global::<Editor>();
+        let timeline = self.timeline();
+        let selected_marker = self.keyframe_graph.as_ref().and_then(|graph| {
+            let clip = timeline.clip(&graph.clip)?;
+            let at = graph_points(clip, graph.property)
+                .get(graph.selected?)
+                .map(|point| point.0)?;
+            Some((graph.clip.as_str(), at))
+        });
+        sync(
+            &models.keyframes,
+            timeline
+                .clips
+                .iter()
+                .flat_map(|clip| {
+                    let mut times: Vec<f64> = clip
+                        .keyframes
+                        .tracks
+                        .values()
+                        .flat_map(|track| track.keys.iter().map(|key| key.at))
+                        .collect();
+                    if let Some(points) = clip.speed_curve.as_ref() {
+                        times.extend(points.iter().map(|point| point.at));
+                    }
+                    times.sort_by(f64::total_cmp);
+                    times.dedup_by(|left, right| (*left - *right).abs() <= 1e-9);
+                    times.into_iter().map(|at| KeyframeMarkerData {
+                        clip_id: clip.id.as_str().into(),
+                        time: (clip.start + at * clip.duration) as f32,
+                        row: self.row_of(&clip.track_id),
+                        selected: selected_marker.is_some_and(|(id, selected_at)| {
+                            id == clip.id && (selected_at - at).abs() <= 1e-9
+                        }),
+                    })
+                })
+                .collect(),
+        );
+
+        if let Some((graph, clip)) = self
+            .keyframe_graph
+            .as_ref()
+            .and_then(|graph| timeline.clip(&graph.clip).map(|clip| (graph, clip)))
+        {
+            let points = graph_points(clip, graph.property);
+            let display_points = graph_display_points(clip, graph.property, &points);
+            let (min, max) = graph_range(graph.property, &display_points);
+            let (group, label) = graph_labels(graph.property);
+            let ease = graph
+                .selected
+                .and_then(|index| points.get(index))
+                .map_or(0, |point| match point.2 {
+                    KeyframeEase::Linear => 0,
+                    KeyframeEase::In => 1,
+                    KeyframeEase::Out => 2,
+                    KeyframeEase::InOut => 3,
+                });
+            let selected = graph.selected.and_then(|index| points.get(index).copied());
+            let curve = selected.and_then(|point| point.3).unwrap_or_else(|| {
+                match selected.map_or(KeyframeEase::Linear, |point| point.2) {
+                    KeyframeEase::Linear => TemporalCurve {
+                        x1: 0.0,
+                        y1: 0.0,
+                        x2: 1.0,
+                        y2: 1.0,
+                    },
+                    KeyframeEase::In => TemporalCurve {
+                        x1: 0.42,
+                        y1: 0.0,
+                        x2: 1.0,
+                        y2: 1.0,
+                    },
+                    KeyframeEase::Out => TemporalCurve {
+                        x1: 0.0,
+                        y1: 0.0,
+                        x2: 0.58,
+                        y2: 1.0,
+                    },
+                    KeyframeEase::InOut => TemporalCurve {
+                        x1: 0.42,
+                        y1: 0.0,
+                        x2: 0.58,
+                        y2: 1.0,
+                    },
+                }
+            });
+            let segment = graph.selected.and_then(|right| {
+                right
+                    .checked_sub(1)
+                    .and_then(|left| Some((*points.get(left)?, *points.get(right)?)))
+            });
+            let post = graph.property.keyframe().map_or(0, |property| {
+                match clip.keyframes.post_behavior(property) {
+                    PostKeyBehavior::Hold => 0,
+                    PostKeyBehavior::Reset => 1,
+                    PostKeyBehavior::Loop => 2,
+                    PostKeyBehavior::Extrapolate => 3,
+                }
+            });
+            editor.set_keyframe_graph(KeyframeGraphData {
+                present: true,
+                clip_id: clip.id.as_str().into(),
+                row: self.row_of(&clip.track_id),
+                start: clip.start as f32,
+                duration: clip.duration as f32,
+                property: graph.property.index(),
+                group_label: t(group).into(),
+                label: t(label).into(),
+                min: min as f32,
+                max: max as f32,
+                path: graph_path(&display_points, min, max).into(),
+                selected: graph.selected.map_or(-1, |index| index as i32),
+                ease,
+                custom_curve: selected.is_some_and(|point| point.3.is_some()),
+                curve_x1: curve.x1 as f32,
+                curve_y1: curve.y1 as f32,
+                curve_x2: curve.x2 as f32,
+                curve_y2: curve.y2 as f32,
+                segment_left_at: segment.map_or(0.0, |pair| pair.0.0 as f32),
+                segment_left_value: segment.map_or(0.0, |pair| pair.0.1 as f32),
+                segment_right_at: segment.map_or(0.0, |pair| pair.1.0 as f32),
+                segment_right_value: segment.map_or(0.0, |pair| pair.1.1 as f32),
+                post,
+            });
+            sync(
+                &models.graph_points,
+                points
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, (at, value, _, _))| KeyframeGraphPointData {
+                        at: at as f32,
+                        value: value as f32,
+                        selected: graph.selected == Some(index),
+                    })
+                    .collect(),
+            );
+        } else {
+            editor.set_keyframe_graph(KeyframeGraphData::default());
+            sync(&models.graph_points, Vec::new());
+        }
+    }
+
     pub fn dock_layout(&self) -> DockLayout {
         let mut out = DockLayout::default();
         let (width, height) = self.workspace;
@@ -5957,6 +6147,143 @@ impl Studio {
                 })
                 .collect(),
         );
+        let selected_marker = self.keyframe_graph.as_ref().and_then(|graph| {
+            let clip = timeline.clip(&graph.clip)?;
+            let at = graph_points(clip, graph.property)
+                .get(graph.selected?)
+                .map(|point| point.0)?;
+            Some((graph.clip.as_str(), at))
+        });
+        sync(
+            &models.keyframes,
+            timeline
+                .clips
+                .iter()
+                .flat_map(|clip| {
+                    let mut times: Vec<f64> = clip
+                        .keyframes
+                        .tracks
+                        .values()
+                        .flat_map(|track| track.keys.iter().map(|key| key.at))
+                        .collect();
+                    if let Some(points) = clip.speed_curve.as_ref() {
+                        times.extend(points.iter().map(|point| point.at));
+                    }
+                    times.sort_by(f64::total_cmp);
+                    times.dedup_by(|left, right| (*left - *right).abs() <= 1e-9);
+                    times.into_iter().map(|at| KeyframeMarkerData {
+                        clip_id: clip.id.as_str().into(),
+                        time: (clip.start + at * clip.duration) as f32,
+                        row: self.row_of(&clip.track_id),
+                        selected: selected_marker.is_some_and(|(id, selected_at)| {
+                            id == clip.id && (selected_at - at).abs() <= 1e-9
+                        }),
+                    })
+                })
+                .collect(),
+        );
+
+        if let Some((graph, clip)) = self
+            .keyframe_graph
+            .as_ref()
+            .and_then(|graph| timeline.clip(&graph.clip).map(|clip| (graph, clip)))
+        {
+            let points = graph_points(clip, graph.property);
+            let display_points = graph_display_points(clip, graph.property, &points);
+            let (min, max) = graph_range(graph.property, &display_points);
+            let (group, label) = graph_labels(graph.property);
+            let ease = graph
+                .selected
+                .and_then(|index| points.get(index))
+                .map_or(0, |point| match point.2 {
+                    KeyframeEase::Linear => 0,
+                    KeyframeEase::In => 1,
+                    KeyframeEase::Out => 2,
+                    KeyframeEase::InOut => 3,
+                });
+            let selected = graph.selected.and_then(|index| points.get(index).copied());
+            let curve = selected.and_then(|point| point.3).unwrap_or_else(|| {
+                match selected.map_or(KeyframeEase::Linear, |point| point.2) {
+                    KeyframeEase::Linear => TemporalCurve {
+                        x1: 0.0,
+                        y1: 0.0,
+                        x2: 1.0,
+                        y2: 1.0,
+                    },
+                    KeyframeEase::In => TemporalCurve {
+                        x1: 0.42,
+                        y1: 0.0,
+                        x2: 1.0,
+                        y2: 1.0,
+                    },
+                    KeyframeEase::Out => TemporalCurve {
+                        x1: 0.0,
+                        y1: 0.0,
+                        x2: 0.58,
+                        y2: 1.0,
+                    },
+                    KeyframeEase::InOut => TemporalCurve {
+                        x1: 0.42,
+                        y1: 0.0,
+                        x2: 0.58,
+                        y2: 1.0,
+                    },
+                }
+            });
+            let segment = graph.selected.and_then(|right| {
+                right
+                    .checked_sub(1)
+                    .and_then(|left| Some((*points.get(left)?, *points.get(right)?)))
+            });
+            let post = graph.property.keyframe().map_or(0, |property| {
+                match clip.keyframes.post_behavior(property) {
+                    PostKeyBehavior::Hold => 0,
+                    PostKeyBehavior::Reset => 1,
+                    PostKeyBehavior::Loop => 2,
+                    PostKeyBehavior::Extrapolate => 3,
+                }
+            });
+            editor.set_keyframe_graph(KeyframeGraphData {
+                present: true,
+                clip_id: clip.id.as_str().into(),
+                row: self.row_of(&clip.track_id),
+                start: clip.start as f32,
+                duration: clip.duration as f32,
+                property: graph.property.index(),
+                group_label: t(group).into(),
+                label: t(label).into(),
+                min: min as f32,
+                max: max as f32,
+                path: graph_path(&display_points, min, max).into(),
+                selected: graph.selected.map_or(-1, |index| index as i32),
+                ease,
+                custom_curve: selected.is_some_and(|point| point.3.is_some()),
+                curve_x1: curve.x1 as f32,
+                curve_y1: curve.y1 as f32,
+                curve_x2: curve.x2 as f32,
+                curve_y2: curve.y2 as f32,
+                segment_left_at: segment.map_or(0.0, |pair| pair.0.0 as f32),
+                segment_left_value: segment.map_or(0.0, |pair| pair.0.1 as f32),
+                segment_right_at: segment.map_or(0.0, |pair| pair.1.0 as f32),
+                segment_right_value: segment.map_or(0.0, |pair| pair.1.1 as f32),
+                post,
+            });
+            sync(
+                &models.graph_points,
+                points
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, (at, value, _, _))| KeyframeGraphPointData {
+                        at: at as f32,
+                        value: value as f32,
+                        selected: graph.selected == Some(index),
+                    })
+                    .collect(),
+            );
+        } else {
+            editor.set_keyframe_graph(KeyframeGraphData::default());
+            sync(&models.graph_points, Vec::new());
+        }
 
         // What is under the playhead. The topmost picture wins, the way the
         // compositor stacks them.
@@ -5969,7 +6296,15 @@ impl Studio {
                     && clip.start <= playhead
                     && playhead < clip.start + clip.duration
             })
-            .max_by_key(|clip| -self.row_of(&clip.track_id));
+            .max_by_key(|clip| {
+                let base = -self.row_of(&clip.track_id) * 256;
+                let at = ((playhead - clip.start) / clip.duration.max(1e-6)).clamp(0.0, 1.0);
+                let order = clip
+                    .keyframes
+                    .value_at(KeyframeProperty::LayerOrder, at, clip.layer_order)
+                    .round() as i32;
+                base + order
+            });
         editor.set_has_picture(showing.is_some());
         editor.set_preview_clip_name(
             showing
@@ -5989,6 +6324,28 @@ impl Studio {
         editor.set_brush_tool(self.brush as i32);
         editor.set_brush_size(self.brush_size as f32);
         editor.set_painting(self.painting);
+
+        sync(
+            &models.masks,
+            self.sole_selection()
+                .and_then(|id| self.clip(&id))
+                .map(|clip| {
+                    clip.masks
+                        .iter()
+                        .enumerate()
+                        .map(|(index, mask)| MaskChipData {
+                            id: mask.id.as_str().into(),
+                            label: format!("Mask{} {}", index + 1, t(mask.shape.name())).into(),
+                            shape: model::MaskShape::ALL
+                                .iter()
+                                .position(|shape| *shape == mask.shape)
+                                .unwrap_or(3) as i32,
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+        );
+        editor.set_mask(self.selected_mask_data());
 
         editor.set_drop(match &self.drop {
             Some(plan) => DropData {
@@ -6061,8 +6418,9 @@ impl Studio {
         let (visual, visual_params, sound, sound_params) =
             match self.sole_selection().and_then(|id| self.clip(&id)) {
                 Some(clip) => {
-                    let (visual, visual_params) = chain_rows(&clip.video_effects);
-                    let (sound, sound_params) = chain_rows(&clip.filters);
+                    let (at, tolerance) = keyframe_time(clip, self.playhead, self.frame_rate());
+                    let (visual, visual_params) = chain_rows(clip, false, at, tolerance);
+                    let (sound, sound_params) = chain_rows(clip, true, at, tolerance);
                     (visual, visual_params, sound, sound_params)
                 }
                 None => (Vec::new(), Vec::new(), Vec::new(), Vec::new()),
@@ -6090,27 +6448,102 @@ impl Studio {
         let fill = colour_of(&text.color);
         let stroke = colour_of(&text.stroke_color);
         let plate = colour_of(&text.background);
+        let (key_at, key_tolerance) = keyframe_time(clip, self.playhead, self.frame_rate());
+        let animated = |property, base| clip.keyframes.value_at(property, key_at, base) as f32;
         SelectedClipData {
             present: true,
             id: clip.id.as_str().into(),
             name: clip.name.as_str().into(),
             kind: kind_of(clip),
             duration: clip.duration as f32,
-            scale: clip.scale as f32,
-            offset_x: clip.offset_x as f32,
-            offset_y: clip.offset_y as f32,
-            rotation: clip.rotation as f32,
-            stretch_x: clip.stretch_x as f32,
-            stretch_y: clip.stretch_y as f32,
-            opacity: clip.opacity as f32,
+            scale: animated(KeyframeProperty::Scale, clip.scale),
+            offset_x: animated(KeyframeProperty::OffsetX, clip.offset_x),
+            offset_y: animated(KeyframeProperty::OffsetY, clip.offset_y),
+            anchor_x: animated(KeyframeProperty::AnchorX, clip.anchor_x),
+            anchor_y: animated(KeyframeProperty::AnchorY, clip.anchor_y),
+            rotation: animated(KeyframeProperty::Rotation, clip.rotation),
+            rotation_x: animated(KeyframeProperty::RotationX, clip.rotation_x),
+            rotation_y: animated(KeyframeProperty::RotationY, clip.rotation_y),
+            position_z: animated(KeyframeProperty::PositionZ, clip.position_z),
+            stretch_x: animated(KeyframeProperty::StretchX, clip.stretch_x),
+            stretch_y: animated(KeyframeProperty::StretchY, clip.stretch_y),
+            opacity: animated(KeyframeProperty::Opacity, clip.opacity),
+            layer_order: animated(KeyframeProperty::LayerOrder, clip.layer_order),
+            scale_keyframed: clip
+                .keyframes
+                .has_at(KeyframeProperty::Scale, key_at, key_tolerance),
+            offset_x_keyframed: clip.keyframes.has_at(
+                KeyframeProperty::OffsetX,
+                key_at,
+                key_tolerance,
+            ),
+            offset_y_keyframed: clip.keyframes.has_at(
+                KeyframeProperty::OffsetY,
+                key_at,
+                key_tolerance,
+            ),
+            anchor_x_keyframed: clip.keyframes.has_at(
+                KeyframeProperty::AnchorX,
+                key_at,
+                key_tolerance,
+            ),
+            anchor_y_keyframed: clip.keyframes.has_at(
+                KeyframeProperty::AnchorY,
+                key_at,
+                key_tolerance,
+            ),
+            rotation_keyframed: clip.keyframes.has_at(
+                KeyframeProperty::Rotation,
+                key_at,
+                key_tolerance,
+            ),
+            rotation_x_keyframed: clip.keyframes.has_at(
+                KeyframeProperty::RotationX,
+                key_at,
+                key_tolerance,
+            ),
+            rotation_y_keyframed: clip.keyframes.has_at(
+                KeyframeProperty::RotationY,
+                key_at,
+                key_tolerance,
+            ),
+            position_z_keyframed: clip.keyframes.has_at(
+                KeyframeProperty::PositionZ,
+                key_at,
+                key_tolerance,
+            ),
+            stretch_x_keyframed: clip.keyframes.has_at(
+                KeyframeProperty::StretchX,
+                key_at,
+                key_tolerance,
+            ),
+            stretch_y_keyframed: clip.keyframes.has_at(
+                KeyframeProperty::StretchY,
+                key_at,
+                key_tolerance,
+            ),
+            opacity_keyframed: clip.keyframes.has_at(
+                KeyframeProperty::Opacity,
+                key_at,
+                key_tolerance,
+            ),
+            layer_order_keyframed: clip.keyframes.has_at(
+                KeyframeProperty::LayerOrder,
+                key_at,
+                key_tolerance,
+            ),
             volume: clip.volume as f32,
-            speed: clip.speed as f32,
+            speed: animated(KeyframeProperty::TimeRemap, clip.speed),
             preserve_pitch: clip.preserve_pitch,
-            speed_curve: match &clip.speed_curve {
-                None => -1,
-                Some(points) => concat_project::speed::preset_of(points)
-                    .map(|index| index as i32)
-                    .unwrap_or(concat_project::speed::PRESETS.len() as i32),
+            speed_curve: if !clip.keyframes.track(KeyframeProperty::TimeRemap).is_empty() {
+                concat_project::speed::PRESETS.len() as i32
+            } else {
+                match &clip.speed_curve {
+                    None => -1,
+                    Some(points) => concat_project::speed::preset_of(points)
+                        .map(|index| index as i32)
+                        .unwrap_or(concat_project::speed::PRESETS.len() as i32),
+                }
             },
             reverse: clip.reverse,
             anim_in: slot_index(concat_project::model::AnimationSlot::In, &clip.animation_in),
@@ -6182,6 +6615,60 @@ impl Studio {
                 .get(&clip.media_id)
                 .copied()
                 .unwrap_or(-1.0),
+        }
+    }
+
+    fn selected_mask_data(&self) -> MaskInspectorData {
+        let Some(clip) = self.sole_selection().and_then(|id| self.clip(&id)) else {
+            return MaskInspectorData::default();
+        };
+        let Some(mask_id) = self.active_mask_id() else {
+            return MaskInspectorData::default();
+        };
+        let Some(mask) = clip.masks.iter().find(|mask| mask.id == mask_id) else {
+            return MaskInspectorData::default();
+        };
+        let (at, tolerance) = keyframe_time(clip, self.playhead, self.frame_rate());
+        let value = |property: model::MaskProperty| {
+            clip.keyframes
+                .named_value_at(&property.id(&mask.id), at, mask.value(property)) as f32
+        };
+        let keyed = |property: model::MaskProperty| {
+            clip.keyframes
+                .named_has_at(&property.id(&mask.id), at, tolerance)
+        };
+        MaskInspectorData {
+            present: true,
+            id: mask.id.as_str().into(),
+            enabled: clip.masks_enabled,
+            inverted: mask.inverted,
+            shape: model::MaskShape::ALL
+                .iter()
+                .position(|shape| *shape == mask.shape)
+                .unwrap_or(3) as i32,
+            position_x: value(model::MaskProperty::PositionX),
+            position_y: value(model::MaskProperty::PositionY),
+            rotation: value(model::MaskProperty::Rotation),
+            width: value(model::MaskProperty::Width),
+            height: value(model::MaskProperty::Height),
+            feather: value(model::MaskProperty::Feather),
+            roundness: value(model::MaskProperty::Roundness),
+            linked: mask.linked,
+            text: mask.text.as_str().into(),
+            brush_size: mask.brush_size as f32,
+            points: mask.points.len() as i32,
+            position_x_keyframed: keyed(model::MaskProperty::PositionX),
+            position_y_keyframed: keyed(model::MaskProperty::PositionY),
+            rotation_keyframed: keyed(model::MaskProperty::Rotation),
+            width_keyframed: keyed(model::MaskProperty::Width),
+            height_keyframed: keyed(model::MaskProperty::Height),
+            feather_keyframed: keyed(model::MaskProperty::Feather),
+            roundness_keyframed: keyed(model::MaskProperty::Roundness),
+            drawing: self.mask_drawing
+                && matches!(mask.shape, model::MaskShape::Brush | model::MaskShape::Pen),
+            tracking: self.mask_track_progress.is_some(),
+            track_progress: self.mask_track_progress.unwrap_or(-1.0),
+            track_direction: self.mask_track_direction as i32,
         }
     }
 
@@ -6627,6 +7114,16 @@ impl Studio {
                 straddled && !locked,
             ),
             rule(),
+            check(
+                "keyframe-graph",
+                &t("Show keyframe graph"),
+                "",
+                self.keyframe_graph
+                    .as_ref()
+                    .is_some_and(|graph| graph.clip == clip.id),
+                !locked,
+            ),
+            rule(),
         ];
         let audible = clip.kind != model::ClipKind::Image;
         rows.push(check(
@@ -6862,6 +7359,7 @@ impl Studio {
         if let Some(session) = self.session.as_mut() {
             session.prepare_save(None, Some(width as u32), Some(height as u32));
             self.dirty = true;
+            self.preview_flattened = None;
             self.schedule_autosave();
             self.request_preview();
         }
@@ -6913,6 +7411,7 @@ impl Studio {
             self.project_name = name;
         }
         self.dirty = true;
+        self.preview_flattened = None;
         self.schedule_autosave();
         self.request_preview();
     }
@@ -6993,6 +7492,26 @@ impl Studio {
                 self.selection = vec![id.to_owned()];
                 self.split_at(at, true);
             }
+            "keyframe-graph" => {
+                if self
+                    .keyframe_graph
+                    .as_ref()
+                    .is_some_and(|graph| graph.clip == id)
+                {
+                    self.keyframe_graph = None;
+                } else {
+                    self.selection = vec![id.to_owned()];
+                    self.keyframe_graph = Some(KeyframeGraphState {
+                        clip: id.to_owned(),
+                        property: if clip.kind == model::ClipKind::Audio {
+                            GraphProperty::Speed
+                        } else {
+                            GraphProperty::Scale
+                        },
+                        selected: None,
+                    });
+                }
+            }
             "mute" => {
                 let volume = if clip.volume <= 0.0 { 1.0 } else { 0.0 };
                 self.apply(Command::UpdateClip {
@@ -7009,6 +7528,13 @@ impl Studio {
                     clip_ids: vec![id.to_owned()],
                 });
                 self.menu_target = None;
+                if self
+                    .keyframe_graph
+                    .as_ref()
+                    .is_some_and(|graph| graph.clip == id)
+                {
+                    self.keyframe_graph = None;
+                }
             }
             _ => {}
         }
