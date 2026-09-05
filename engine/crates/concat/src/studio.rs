@@ -2830,10 +2830,22 @@ impl Studio {
         let Some(id) = self.sole_selection() else {
             return;
         };
+        let playhead = self.playhead;
+        let frame_rate = self.frame_rate();
         self.begin_echo();
         let Some(clip) = self.echo_clip_mut(&id) else {
             return;
         };
+        if !audio {
+            let track_id = format!("effect:{index}:{key}");
+            if !clip.keyframes.named_track(&track_id).is_empty() {
+                let (at, tolerance) = keyframe_time(clip, playhead, frame_rate);
+                clip.keyframes
+                    .set_named_at(&track_id, at, f64::from(value), tolerance);
+                self.schedule_preview_frame();
+                return;
+            }
+        }
         let chain = if audio {
             &mut clip.filters
         } else {
@@ -2842,6 +2854,56 @@ impl Studio {
         if let Some(entry) = usize::try_from(index).ok().and_then(|i| chain.get_mut(i)) {
             entry.params.insert(key.to_owned(), f64::from(value));
         }
+    }
+
+    pub fn chain_keyframe_param(&mut self, audio: bool, index: i32, key: &str, on: bool) {
+        if audio {
+            return;
+        }
+        let Some(id) = self.sole_selection() else {
+            return;
+        };
+        let playhead = self.playhead;
+        let frame_rate = self.frame_rate();
+        self.begin_echo();
+        let Some(clip) = self.echo_clip_mut(&id) else {
+            return;
+        };
+        let Ok(entry_index) = usize::try_from(index) else {
+            return;
+        };
+        let Some(entry) = clip.video_effects.get(entry_index) else {
+            return;
+        };
+        let fallback = entry.params.get(key).copied().unwrap_or_else(|| {
+            Catalogue::builtin()
+                .packages()
+                .find(|package| package.answers_to(&entry.id))
+                .and_then(|package| {
+                    package
+                        .manifest
+                        .params
+                        .iter()
+                        .find(|param| param.key == key)
+                })
+                .map_or(0.0, |param| param.default)
+        });
+        let track_id = format!("effect:{index}:{key}");
+        let (at, tolerance) = keyframe_time(clip, playhead, frame_rate);
+        let current = clip.keyframes.named_value_at(&track_id, at, fallback);
+        if on {
+            clip.keyframes
+                .set_named_at(&track_id, at, current, tolerance);
+        } else {
+            clip.keyframes.remove_named_at(&track_id, at, tolerance);
+            if clip.keyframes.named_track(&track_id).is_empty() {
+                clip.keyframes.tracks.remove(&track_id);
+                if let Some(entry) = clip.video_effects.get_mut(entry_index) {
+                    entry.params.insert(key.to_owned(), current);
+                }
+            }
+        }
+        self.clip_commit();
     }
 
     /// One knob of the colour panel, on the echo. The adjust package joins
@@ -3021,7 +3083,8 @@ impl Studio {
             | Gesture::StageScale { .. }
             | Gesture::StageRotate { .. }
             | Gesture::StageStretch { .. }
-            | Gesture::Paint { .. } => {}
+            | Gesture::Paint { .. }
+            | Gesture::MaskPaint { .. } => {}
         }
         self.gesture = gesture;
     }
@@ -3083,7 +3146,8 @@ impl Studio {
             | Gesture::StageScale { .. }
             | Gesture::StageRotate { .. }
             | Gesture::StageStretch { .. }
-            | Gesture::Paint { .. }) => {
+            | Gesture::Paint { .. }
+            | Gesture::MaskPaint { .. }) => {
                 self.gesture = other;
             }
         }
@@ -3097,11 +3161,17 @@ impl Studio {
         let Some(id) = self.sole_selection() else {
             return;
         };
+        let playhead = self.playhead;
+        let frame_rate = self.frame_rate();
         self.begin_echo();
         let value = f64::from(value);
         let Some(clip) = self.echo_clip_mut(&id) else {
             return;
         };
+        if let Some(property) = keyframe_property(field) {
+            set_clip_property_at(clip, property, value, playhead, frame_rate);
+            return;
+        }
         let text = clip.text.get_or_insert_with(TextStyle::default);
         match field {
             ClipField::Scale => clip.scale = value.clamp(0.05, 8.0),
@@ -3109,8 +3179,14 @@ impl Studio {
             ClipField::StretchY => clip.stretch_y = value.clamp(0.1, 10.0),
             ClipField::OffsetX => clip.offset_x = value.clamp(-1.0, 1.0),
             ClipField::OffsetY => clip.offset_y = value.clamp(-1.0, 1.0),
+            ClipField::AnchorX => clip.anchor_x = value.clamp(-3.0, 3.0),
+            ClipField::AnchorY => clip.anchor_y = value.clamp(-3.0, 3.0),
             ClipField::Rotation => clip.rotation = value.clamp(-180.0, 180.0),
+            ClipField::RotationX => clip.rotation_x = value.clamp(-3600.0, 3600.0),
+            ClipField::RotationY => clip.rotation_y = value.clamp(-3600.0, 3600.0),
+            ClipField::PositionZ => clip.position_z = value.clamp(-10.0, 10.0),
             ClipField::Opacity => clip.opacity = value.clamp(0.0, 1.0),
+            ClipField::LayerOrder => clip.layer_order = value.clamp(-128.0, 128.0).round(),
             ClipField::CutoutFeather => {
                 clip.cutout.get_or_insert_with(model::Cutout::auto).feather =
                     value.clamp(0.0, model::MAX_FEATHER);
@@ -3118,8 +3194,21 @@ impl Studio {
             ClipField::Volume => clip.volume = value.max(0.0),
             ClipField::Speed => {
                 let speed = value.clamp(0.0625, 16.0);
-                clip.duration = (clip.duration * clip.speed / speed).max(f64::from(MIN_DURATION));
-                clip.speed = speed;
+                let covered = clip.duration * clip.speed;
+                let track = clip
+                    .keyframes
+                    .named_track_mut(KeyframeProperty::TimeRemap.id());
+                if track.keys.is_empty() {
+                    clip.duration = (covered / speed).max(f64::from(MIN_DURATION));
+                    clip.speed = speed;
+                } else {
+                    let factor = speed / clip.speed.max(0.0625);
+                    for key in &mut track.keys {
+                        key.value = (key.value * factor).clamp(0.0625, 16.0);
+                    }
+                    let rest = clip.speed * factor;
+                    sync_time_remap(clip, covered, rest);
+                }
             }
             ClipField::PreservePitch => clip.preserve_pitch = value != 0.0,
             ClipField::Reverse => clip.reverse = value != 0.0,
@@ -3188,6 +3277,9 @@ impl Studio {
                     concat_project::speed::preset(value as usize)
                 };
                 let covered = clip.duration * clip.speed;
+                clip.keyframes
+                    .tracks
+                    .remove(KeyframeProperty::TimeRemap.id());
                 let mean = curve
                     .as_ref()
                     .map(|points| concat_project::speed::mean_of(points))
@@ -3246,6 +3338,45 @@ impl Studio {
             ClipTextField::FontFamily => text.font_family = value.to_owned(),
             _ => {}
         }
+    }
+
+    /// Add or remove the selected property's key on the current playhead
+    /// frame. Each property owns its own track; toggling X never changes Y.
+    pub fn clip_keyframe_toggle(&mut self, field: ClipField, on: bool) {
+        let Some(property) = keyframe_property(field) else {
+            return;
+        };
+        let Some(id) = self.sole_selection() else {
+            return;
+        };
+        let playhead = self.playhead;
+        let frame_rate = self.frame_rate();
+        self.begin_echo();
+        let Some(clip) = self.echo_clip_mut(&id) else {
+            return;
+        };
+        let (at, tolerance) = keyframe_time(clip, playhead, frame_rate);
+        let base = clip_property(clip, property);
+        let current = clip.keyframes.value_at(property, at, base);
+        if on {
+            // Relative opacity cannot animate away from a zero base. Once it
+            // has a custom track, keep the base at unity and let the absolute
+            // keys carry the visible value.
+            if property == KeyframeProperty::Opacity
+                && clip.keyframes.track(property).is_empty()
+                && clip.opacity <= 1e-6
+            {
+                clip.opacity = 1.0;
+            }
+            clip.keyframes.set_at(property, at, current, tolerance);
+        } else if clip.keyframes.remove_at(property, at, tolerance)
+            && clip.keyframes.track(property).is_empty()
+        {
+            // Removing the last key turns the value under the playhead back
+            // into the static property, so the picture does not jump.
+            set_clip_property(clip, property, current);
+        }
+        self.clip_commit();
     }
 
     pub fn clip_set_colour(&mut self, field: ClipTextField, value: slint::Color) {
@@ -3312,6 +3443,20 @@ impl Studio {
                 cutout: after.cutout.clone(),
             });
         }
+        if after.masks_enabled != before.masks_enabled {
+            commands.push(Command::SetClipMasksEnabled {
+                clip_id: id.clone(),
+                enabled: after.masks_enabled,
+            });
+        }
+        for mask in &after.masks {
+            if before.masks.iter().find(|held| held.id == mask.id) != Some(mask) {
+                commands.push(Command::UpdateClipMask {
+                    clip_id: id.clone(),
+                    mask: mask.clone(),
+                });
+            }
+        }
         if after.speed_curve != before.speed_curve {
             commands.push(Command::SetClipSpeedCurve {
                 clip_id: id.clone(),
@@ -3338,6 +3483,27 @@ impl Studio {
         }
         if after.opacity != before.opacity {
             patch.opacity = Some(after.opacity);
+        }
+        if after.anchor_x != before.anchor_x {
+            patch.anchor_x = Some(after.anchor_x);
+        }
+        if after.anchor_y != before.anchor_y {
+            patch.anchor_y = Some(after.anchor_y);
+        }
+        if after.rotation_x != before.rotation_x {
+            patch.rotation_x = Some(after.rotation_x);
+        }
+        if after.rotation_y != before.rotation_y {
+            patch.rotation_y = Some(after.rotation_y);
+        }
+        if after.position_z != before.position_z {
+            patch.position_z = Some(after.position_z);
+        }
+        if after.layer_order != before.layer_order {
+            patch.layer_order = Some(after.layer_order);
+        }
+        if after.keyframes != before.keyframes {
+            patch.keyframes = Some(after.keyframes.clone());
         }
         if after.preserve_pitch != before.preserve_pitch {
             patch.preserve_pitch = Some(after.preserve_pitch);
@@ -3507,7 +3673,12 @@ impl Studio {
             scale: clip.scale,
             offset_x: clip.offset_x,
             offset_y: clip.offset_y,
+            anchor_x: clip.anchor_x,
+            anchor_y: clip.anchor_y,
             rotation: clip.rotation,
+            rotation_x: clip.rotation_x,
+            rotation_y: clip.rotation_y,
+            position_z: clip.position_z,
             stretch_x: clip.stretch_x,
             stretch_y: clip.stretch_y,
         };
@@ -3591,6 +3762,17 @@ impl Studio {
     /// of everything selected that is under the playhead. Empty stage
     /// clears the selection, as an empty lane does.
     pub fn stage_pressed(&mut self, x: f32, y: f32, additive: bool) {
+        if let Some((clip, mask)) = self.mask_paint_target() {
+            let point = self.stage_to_source(&clip, f64::from(x), f64::from(y));
+            self.gesture = Gesture::MaskPaint {
+                clip: clip.id.clone(),
+                mask: mask.id,
+                size: mask.brush_size,
+                points: vec![point],
+                screen: vec![(x, y)],
+            };
+            return;
+        }
         if let Some(clip) = self.paint_target() {
             let point = self.stage_to_source(&clip, f64::from(x), f64::from(y));
             self.gesture = Gesture::Paint {
@@ -3632,8 +3814,8 @@ impl Studio {
             })
             .map(|clip| StageOrigin {
                 clip: clip.id.clone(),
-                offset_x: clip.offset_x,
-                offset_y: clip.offset_y,
+                offset_x: clip_property_at(clip, KeyframeProperty::OffsetX, self.playhead),
+                offset_y: clip_property_at(clip, KeyframeProperty::OffsetY, self.playhead),
             })
             .collect();
         self.begin_echo();
@@ -3681,11 +3863,13 @@ impl Studio {
         let dx = f64::from(x) * f64::from(width) - centre.0;
         let dy = f64::from(y) * f64::from(height) - centre.1;
         let half = footprint.half_bounds((width, height));
+        let scale = clip_property_at(&clip, KeyframeProperty::Scale, self.playhead);
+        let rotation = clip_property_at(&clip, KeyframeProperty::Rotation, self.playhead);
         self.begin_echo();
         self.gesture = if grip == 4 {
             Gesture::StageRotate {
                 clip: id.to_owned(),
-                rotation: clip.rotation,
+                rotation,
                 centre,
                 from: dy.atan2(dx),
             }
@@ -3693,7 +3877,7 @@ impl Studio {
             // 5 top, 6 right, 7 bottom, 8 left: the pointer's offset from
             // the centre, turned back into the box's own frame.
             let across = grip == 6 || grip == 8;
-            let (sin, cos) = clip.rotation.to_radians().sin_cos();
+            let (sin, cos) = rotation.to_radians().sin_cos();
             let along = if across {
                 dx * cos + dy * sin
             } else {
@@ -3709,12 +3893,12 @@ impl Studio {
                 },
                 centre,
                 from: along.abs().max(1.0),
-                rotation: clip.rotation,
+                rotation,
             }
         } else {
             Gesture::StageScale {
                 clip: id.to_owned(),
-                scale: clip.scale,
+                scale,
                 centre,
                 from: dx.hypot(dy).max(1.0),
                 half,
@@ -3726,7 +3910,15 @@ impl Studio {
     /// the monitor composites it.
     pub fn stage_dragged(&mut self, x: f32, y: f32, snap: bool) {
         let mut gesture = std::mem::replace(&mut self.gesture, Gesture::None);
+        let playhead = self.playhead;
+        let frame_rate = self.frame_rate();
         if let Gesture::Paint {
+            clip,
+            points,
+            screen,
+            ..
+        }
+        | Gesture::MaskPaint {
             clip,
             points,
             screen,
@@ -3808,8 +4000,20 @@ impl Studio {
                 }
                 for origin in origins {
                     if let Some(clip) = self.echo_clip_mut(&origin.clip) {
-                        clip.offset_x = (origin.offset_x + dx).clamp(-1.0, 1.0);
-                        clip.offset_y = (origin.offset_y + dy).clamp(-1.0, 1.0);
+                        set_clip_property_at(
+                            clip,
+                            KeyframeProperty::OffsetX,
+                            origin.offset_x + dx,
+                            playhead,
+                            frame_rate,
+                        );
+                        set_clip_property_at(
+                            clip,
+                            KeyframeProperty::OffsetY,
+                            origin.offset_y + dy,
+                            playhead,
+                            frame_rate,
+                        );
                     }
                 }
             }
@@ -3880,7 +4084,7 @@ impl Studio {
                     }
                 }
                 if let Some(clip) = self.echo_clip_mut(clip) {
-                    clip.scale = next.clamp(0.05, 8.0);
+                    set_clip_property_at(clip, KeyframeProperty::Scale, next, playhead, frame_rate);
                 }
             }
             Gesture::StageStretch {
@@ -3928,7 +4132,13 @@ impl Studio {
                 // stopping: a turn through the bottom carries on.
                 next = (next + 180.0).rem_euclid(360.0) - 180.0;
                 if let Some(clip) = self.echo_clip_mut(clip) {
-                    clip.rotation = next;
+                    set_clip_property_at(
+                        clip,
+                        KeyframeProperty::Rotation,
+                        next,
+                        playhead,
+                        frame_rate,
+                    );
                 }
             }
             _ => {
@@ -3966,6 +4176,30 @@ impl Studio {
                 });
                 return;
             }
+            Gesture::MaskPaint {
+                clip, mask, points, ..
+            } => {
+                let Some(mut current) = self
+                    .clip(&clip)
+                    .and_then(|clip| clip.masks.iter().find(|held| held.id == mask))
+                    .cloned()
+                else {
+                    return;
+                };
+                if current.shape == model::MaskShape::Brush {
+                    if !current.points.is_empty() && !points.is_empty() {
+                        current.points.push([-1.0, -1.0]);
+                    }
+                    current.points.extend(points);
+                } else {
+                    current.points.extend(points);
+                }
+                self.apply(Command::UpdateClipMask {
+                    clip_id: clip,
+                    mask: current,
+                });
+                return;
+            }
             other => {
                 // Not ours to end; a lane gesture is still live.
                 self.gesture = other;
@@ -3993,13 +4227,22 @@ impl Studio {
                 || after.stretch_y != before.stretch_y
             {
                 commands.push(Command::SetClipTransform {
-                    clip_id: id,
+                    clip_id: id.clone(),
                     scale: Some(after.scale),
                     offset_x: Some(after.offset_x),
                     offset_y: Some(after.offset_y),
                     rotation: Some(after.rotation),
                     stretch_x: Some(after.stretch_x),
                     stretch_y: Some(after.stretch_y),
+                });
+            }
+            if after.keyframes != before.keyframes {
+                commands.push(Command::UpdateClip {
+                    clip_id: id,
+                    patch: ClipPatch {
+                        keyframes: Some(after.keyframes.clone()),
+                        ..ClipPatch::default()
+                    },
                 });
             }
         }

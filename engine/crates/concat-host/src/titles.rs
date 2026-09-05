@@ -96,6 +96,7 @@ impl Titles {
             out.push(TitleClip {
                 clip_id: clip.id.clone(),
                 clip: ExportClip {
+                    source_id: clip.id.clone(),
                     path: path.to_string_lossy().into_owned(),
                     kind: ClipKind::Image,
                     start: clip.start,
@@ -122,12 +123,18 @@ impl Titles {
                     scale: clip.scale,
                     offset_x: clip.offset_x,
                     offset_y: clip.offset_y,
+                    anchor_x: clip.anchor_x,
+                    anchor_y: clip.anchor_y,
                     rotation: clip.rotation,
+                    rotation_x: clip.rotation_x,
+                    rotation_y: clip.rotation_y,
+                    position_z: clip.position_z,
                     stretch_x: clip.stretch_x,
                     stretch_y: clip.stretch_y,
                     // The style's own opacity multiplies the clip's: a
                     // half-transparent title fades to half, not to solid.
                     opacity: (clip.opacity * text.opacity).clamp(0.0, 1.0),
+                    layer_order: clip.layer_order,
                     video_filter_chain: video_effect_chain(&clip.video_effects),
                     transition: None,
                     video_fade_in: 0.0,
@@ -136,6 +143,8 @@ impl Titles {
                     has_audio: Some(false),
                     cutout: None,
                     mask_dir: String::new(),
+                    masks: clip.masks.clone(),
+                    masks_enabled: clip.masks_enabled,
                 },
                 block,
             });
