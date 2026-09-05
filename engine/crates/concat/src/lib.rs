@@ -82,6 +82,9 @@ pub fn run() -> Result<(), slint::PlatformError> {
         editor.set_timeline_tabs(ModelRc::from(models.tabs.clone()));
         editor.set_tracks(ModelRc::from(models.tracks.clone()));
         editor.set_clips(ModelRc::from(models.clips.clone()));
+        editor.set_keyframes(ModelRc::from(models.keyframes.clone()));
+        editor.set_masks(ModelRc::from(models.masks.clone()));
+        editor.set_keyframe_graph_points(ModelRc::from(models.graph_points.clone()));
         editor.set_stage_items(ModelRc::from(models.stage.clone()));
         editor.set_stage_guides(ModelRc::from(models.guides.clone()));
         editor.set_media(ModelRc::from(models.media.clone()));
@@ -209,6 +212,22 @@ pub fn run() -> Result<(), slint::PlatformError> {
     }
     macro_rules! on_lanes {
         ($($handler:tt)*) => { handler!(publish_lanes, $($handler)*) };
+    }
+    macro_rules! on_graph {
+        (|$state:ident $(, $arg:ident : $ty:ty)*| $body:block) => {{
+            move |$($arg : $ty),*| {
+                Shell::with(|shell, app| {
+                    {
+                        let mut $state = shell.studio.borrow_mut();
+                        $body
+                    }
+                    shell
+                        .studio
+                        .borrow()
+                        .publish_keyframe_graph(&app, &shell.models);
+                });
+            }
+        }};
     }
     macro_rules! on_dock {
         ($($handler:tt)*) => { handler!(publish_dock, $($handler)*) };
@@ -619,6 +638,9 @@ pub fn run() -> Result<(), slint::PlatformError> {
     editor.on_clip_set(on_lanes!(|state, field: ClipField, value: f32| {
         state.clip_set(field, value);
     }));
+    editor.on_clip_keyframe_toggle(on_lanes!(|state, field: ClipField, on: bool| {
+        state.clip_keyframe_toggle(field, on);
+    }));
     editor.on_clip_set_text(on_lanes!(
         |state, field: ClipTextField, value: SharedString| {
             state.clip_set_text(field, value.as_str());
@@ -649,6 +671,11 @@ pub fn run() -> Result<(), slint::PlatformError> {
     editor.on_chain_set_param(on_lanes!(
         |state, audio: bool, index: i32, key: SharedString, value: f32| {
             state.chain_set_param(audio, index, key.as_str(), value);
+        }
+    ));
+    editor.on_chain_keyframe_param(on_window!(
+        |state, audio: bool, index: i32, key: SharedString, on: bool| {
+            state.chain_keyframe_param(audio, index, key.as_str(), on);
         }
     ));
 
@@ -711,6 +738,56 @@ pub fn run() -> Result<(), slint::PlatformError> {
         state.cutout_clear();
     }));
 
+    // ── geometric masks ──
+    editor.on_mask_add(on_window!(|state, shape: i32| {
+        state.mask_add(shape);
+    }));
+    editor.on_mask_shape(on_window!(|state, shape: i32| {
+        state.mask_shape(shape);
+    }));
+    editor.on_mask_select(on_lanes!(|state, id: SharedString| {
+        state.mask_select(id.as_str());
+    }));
+    editor.on_mask_remove(on_window!(|state| {
+        state.mask_remove();
+    }));
+    editor.on_mask_enabled(on_window!(|state, on: bool| {
+        state.mask_enabled(on);
+    }));
+    editor.on_mask_inverted(on_window!(|state, on: bool| {
+        state.mask_inverted(on);
+    }));
+    editor.on_mask_linked(on_window!(|state, on: bool| {
+        state.mask_linked(on);
+    }));
+    editor.on_mask_set(on_lanes!(|state, field: i32, value: f32| {
+        state.mask_set(field, value);
+    }));
+    editor.on_mask_commit(on_window!(|state| {
+        state.mask_commit();
+    }));
+    editor.on_mask_keyframe_toggle(on_window!(|state, field: i32, on: bool| {
+        state.mask_keyframe_toggle(field, on);
+    }));
+    editor.on_mask_text(on_window!(|state, value: SharedString| {
+        state.mask_text(value.as_str());
+    }));
+    editor.on_mask_drawing(on_window!(|state, on: bool| {
+        state.mask_drawing(on);
+    }));
+    editor.on_mask_clear_points(on_window!(|state| {
+        state.mask_clear_points();
+    }));
+    editor.on_mask_reset(on_window!(|state| {
+        state.mask_reset();
+    }));
+    editor.on_mask_track_direction(on_lanes!(|state, index: i32| {
+        state.mask_track_direction(index);
+    }));
+    editor.on_mask_track(on_window!(|state| {
+        state.mask_track();
+    }));
+
     // ── the context menu ──
     editor.on_clip_context(on_window!(|state, id: SharedString| {
         state.menu_token += 1;
@@ -730,6 +807,47 @@ pub fn run() -> Result<(), slint::PlatformError> {
         if let Some(id) = target {
             state.clip_action(&id, action.as_str());
         }
+    }));
+    editor.on_keyframe_graph_property_changed(on_graph!(|state, index: i32| {
+        state.graph_property_changed(index);
+    }));
+    editor.on_keyframe_graph_point_pressed(on_graph!(|state, index: i32| {
+        state.graph_point_pressed(index);
+    }));
+    editor.on_keyframe_graph_point_dragged(on_graph!(|state, index: i32, at: f32, value: f32| {
+        state.graph_point_dragged(index, at, value);
+    }));
+    editor.on_keyframe_graph_point_released(on_window!(|state| {
+        state.graph_point_released();
+    }));
+    editor.on_keyframe_graph_point_added(on_window!(|state, at: f32, value: f32| {
+        state.graph_point_added(at, value);
+    }));
+    editor.on_keyframe_graph_point_removed(on_window!(|state, index: i32| {
+        state.graph_point_removed(index);
+    }));
+    editor.on_keyframe_graph_ease_changed(on_window!(|state, index: i32| {
+        state.graph_ease_changed(index);
+    }));
+    editor.on_keyframe_graph_curve_pressed(on_graph!(|state| {
+        state.graph_curve_pressed();
+    }));
+    editor.on_keyframe_graph_curve_changed(on_graph!(
+        |state, x1: f32, y1: f32, x2: f32, y2: f32| {
+            state.graph_curve_changed(x1, y1, x2, y2);
+        }
+    ));
+    editor.on_keyframe_graph_curve_released(on_window!(|state| {
+        state.graph_curve_released();
+    }));
+    editor.on_keyframe_graph_post_changed(on_window!(|state, index: i32| {
+        state.graph_post_changed(index);
+    }));
+    editor.on_keyframe_marker_selected(on_window!(|state, clip_id: SharedString, seconds: f32| {
+        state.keyframe_marker_selected(clip_id.as_str(), seconds);
+    }));
+    editor.on_keyframe_graph_closed(on_window!(|state| {
+        state.graph_closed();
     }));
 
     // ── the keyboard ──

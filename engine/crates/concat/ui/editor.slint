@@ -10,7 +10,8 @@ import { DockDivider, DockSide, SeatBox } from "dock.slint";
 import { PaneKind } from "workspace/pane-switcher.slint";
 import { MenuItemData } from "primitives/context-menu.slint";
 import {
-    ClipData, ClipField, ClipTextField, DropData, SelectedClipData,
+    ClipData, ClipField, ClipTextField, DropData, KeyframeGraphData,
+    KeyframeGraphPointData, KeyframeMarkerData, MaskChipData, MaskInspectorData, SelectedClipData,
     StageGuideData, StageItemData, TimelineTabData, TimelineTool, TrackData,
     TrackSize,
 } from "timeline/model.slint";
@@ -100,6 +101,7 @@ export global Editor {
     // ── the inspector ──
     in-out property <SelectedClipData> selected-clip;
     callback clip-set(field: ClipField, value: float);
+    callback clip-keyframe-toggle(field: ClipField, on: bool);
     callback clip-set-text(field: ClipTextField, value: string);
     callback clip-set-colour(field: ClipTextField, value: color);
     callback clip-commit();
@@ -135,6 +137,7 @@ export global Editor {
     callback chain-move-by(audio: bool, index: int, delta: int);
     callback chain-remove(audio: bool, index: int);
     callback chain-set-param(audio: bool, index: int, key: string, value: float);
+    callback chain-keyframe-param(audio: bool, index: int, key: string, on: bool);
 
     in-out property <[EffectData]> video-effects;
     in-out property <[EffectData]> audio-effects;
@@ -203,11 +206,35 @@ export global Editor {
     callback cutout-painting(on: bool);
     callback cutout-clear();
 
+    // Source-space masks. The shape and property ordinals are documented in
+    // MaskInspectorData and mirrored by Rust's MaskShape/MaskProperty enums.
+    in-out property <[MaskChipData]> masks;
+    in-out property <MaskInspectorData> mask;
+    callback mask-add(shape: int);
+    callback mask-shape(shape: int);
+    callback mask-select(id: string);
+    callback mask-remove();
+    callback mask-enabled(on: bool);
+    callback mask-inverted(on: bool);
+    callback mask-linked(on: bool);
+    callback mask-set(field: int, value: float);
+    callback mask-commit();
+    callback mask-keyframe-toggle(field: int, on: bool);
+    callback mask-text(value: string);
+    callback mask-drawing(on: bool);
+    callback mask-clear-points();
+    callback mask-reset();
+    callback mask-track-direction(index: int);
+    callback mask-track();
+
     // ── the timeline ──
     in-out property <[TimelineTabData]> timeline-tabs;
     in-out property <int> timeline-current-tab;
     in-out property <[TrackData]> tracks;
     in-out property <[ClipData]> clips;
+    in-out property <[KeyframeMarkerData]> keyframes;
+    in-out property <KeyframeGraphData> keyframe-graph;
+    in-out property <[KeyframeGraphPointData]> keyframe-graph-points;
     in-out property <TimelineTool> tool;
     in-out property <bool> snap;
     in-out property <int> selected-count;
@@ -252,6 +279,19 @@ export global Editor {
     in-out property <int> menu-token;
     callback clip-context(id: string);
     callback menu-selected(id: string);
+    callback keyframe-graph-property-changed(index: int);
+    callback keyframe-graph-point-pressed(index: int);
+    callback keyframe-graph-point-dragged(index: int, at: float, value: float);
+    callback keyframe-graph-point-released();
+    callback keyframe-graph-point-added(at: float, value: float);
+    callback keyframe-graph-point-removed(index: int);
+    callback keyframe-graph-ease-changed(index: int);
+    callback keyframe-graph-curve-pressed();
+    callback keyframe-graph-curve-changed(x1: float, y1: float, x2: float, y2: float);
+    callback keyframe-graph-curve-released();
+    callback keyframe-graph-post-changed(index: int);
+    callback keyframe-marker-selected(clip-id: string, seconds: float);
+    callback keyframe-graph-closed();
 
     callback band-selected(from-seconds: float, to-seconds: float,
         from-y: length, to-y: length, additive: bool);
