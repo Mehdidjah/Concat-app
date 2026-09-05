@@ -4261,6 +4261,394 @@ impl Studio {
         }
     }
 
+    // ── geometric masks ──
+
+    fn active_mask_id(&self) -> Option<String> {
+        let clip = self.sole_selection().and_then(|id| self.clip(&id))?;
+        self.selected_mask
+            .as_ref()
+            .filter(|id| clip.masks.iter().any(|mask| mask.id == **id))
+            .cloned()
+            .or_else(|| clip.masks.first().map(|mask| mask.id.clone()))
+    }
+
+    pub fn mask_add(&mut self, shape: i32) {
+        let Some(clip_id) = self.sole_selection() else {
+            return;
+        };
+        let shape = mask_shape(shape);
+        if let Some(id) = self.apply(Command::AddClipMask { clip_id, shape }) {
+            self.selected_mask = Some(id);
+            self.mask_drawing = matches!(shape, model::MaskShape::Brush | model::MaskShape::Pen);
+        }
+    }
+
+    /// Changes the active mask preset. With no mask yet, choosing a preset
+    /// creates the first one; the adjacent plus button remains the explicit
+    /// way to build a compound mask stack.
+    pub fn mask_shape(&mut self, shape: i32) {
+        let shape_index = shape;
+        let shape = mask_shape(shape);
+        if self.active_mask_id().is_none() {
+            self.mask_add(shape_index);
+            return;
+        }
+        self.edit_active_mask(|mask| {
+            mask.shape = shape;
+            if !matches!(shape, model::MaskShape::Brush | model::MaskShape::Pen) {
+                mask.points.clear();
+            }
+        });
+        self.mask_drawing = matches!(shape, model::MaskShape::Brush | model::MaskShape::Pen);
+    }
+
+    pub fn mask_select(&mut self, id: &str) {
+        let valid = self
+            .sole_selection()
+            .and_then(|clip| self.clip(&clip))
+            .is_some_and(|clip| clip.masks.iter().any(|mask| mask.id == id));
+        if valid {
+            self.selected_mask = Some(id.to_owned());
+            self.mask_drawing = false;
+        }
+    }
+
+    pub fn mask_remove(&mut self) {
+        let (Some(clip_id), Some(mask_id)) = (self.sole_selection(), self.active_mask_id()) else {
+            return;
+        };
+        self.apply(Command::RemoveClipMask { clip_id, mask_id });
+        self.selected_mask = self
+            .sole_selection()
+            .and_then(|id| self.clip(&id))
+            .and_then(|clip| clip.masks.first())
+            .map(|mask| mask.id.clone());
+        self.mask_drawing = false;
+    }
+
+    pub fn mask_enabled(&mut self, enabled: bool) {
+        let Some(clip_id) = self.sole_selection() else {
+            return;
+        };
+        self.apply(Command::SetClipMasksEnabled { clip_id, enabled });
+    }
+
+    pub fn mask_set(&mut self, field: i32, value: f32) {
+        let (Some(clip_id), Some(mask_id)) = (self.sole_selection(), self.active_mask_id()) else {
+            return;
+        };
+        let playhead = self.playhead;
+        let frame_rate = self.frame_rate();
+        self.begin_echo();
+        let Some(clip) = self.echo_clip_mut(&clip_id) else {
+            return;
+        };
+        let Some(index) = clip.masks.iter().position(|mask| mask.id == mask_id) else {
+            return;
+        };
+        if field == 7 {
+            clip.masks[index].brush_size = f64::from(value).clamp(0.002, 1.0);
+            return;
+        }
+        let Some(property) = mask_property(field) else {
+            return;
+        };
+        let value = f64::from(value);
+        let track_id = property.id(&mask_id);
+        if clip.keyframes.named_track(&track_id).is_empty() {
+            clip.masks[index].set_value(property, value);
+        } else {
+            let (at, tolerance) = keyframe_time(clip, playhead, frame_rate);
+            clip.keyframes.set_named_at(&track_id, at, value, tolerance);
+        }
+    }
+
+    pub fn mask_commit(&mut self) {
+        self.clip_commit();
+    }
+
+    pub fn mask_keyframe_toggle(&mut self, field: i32, on: bool) {
+        let Some(property) = mask_property(field) else {
+            return;
+        };
+        let (Some(clip_id), Some(mask_id)) = (self.sole_selection(), self.active_mask_id()) else {
+            return;
+        };
+        let playhead = self.playhead;
+        let frame_rate = self.frame_rate();
+        self.begin_echo();
+        let Some(clip) = self.echo_clip_mut(&clip_id) else {
+            return;
+        };
+        let Some(index) = clip.masks.iter().position(|mask| mask.id == mask_id) else {
+            return;
+        };
+        let track_id = property.id(&mask_id);
+        let (at, tolerance) = keyframe_time(clip, playhead, frame_rate);
+        let rest = clip.masks[index].value(property);
+        let current = clip.keyframes.named_value_at(&track_id, at, rest);
+        if on {
+            clip.keyframes
+                .set_named_at(&track_id, at, current, tolerance);
+        } else {
+            clip.keyframes.remove_named_at(&track_id, at, tolerance);
+            if clip.keyframes.named_track(&track_id).is_empty() {
+                clip.keyframes.tracks.remove(&track_id);
+                clip.masks[index].set_value(property, current);
+            }
+        }
+        self.clip_commit();
+    }
+
+    fn edit_active_mask(&mut self, change: impl FnOnce(&mut model::ClipMask)) {
+        let (Some(clip_id), Some(mask_id)) = (self.sole_selection(), self.active_mask_id()) else {
+            return;
+        };
+        self.begin_echo();
+        if let Some(mask) = self
+            .echo_clip_mut(&clip_id)
+            .and_then(|clip| clip.masks.iter_mut().find(|mask| mask.id == mask_id))
+        {
+            change(mask);
+            self.clip_commit();
+        }
+    }
+
+    pub fn mask_inverted(&mut self, inverted: bool) {
+        self.edit_active_mask(|mask| mask.inverted = inverted);
+    }
+
+    pub fn mask_linked(&mut self, linked: bool) {
+        self.edit_active_mask(|mask| mask.linked = linked);
+    }
+
+    pub fn mask_text(&mut self, text: &str) {
+        let text: String = text.trim().chars().take(120).collect();
+        self.edit_active_mask(|mask| {
+            if mask.shape == model::MaskShape::Text {
+                mask.text = if text.is_empty() {
+                    "TEXT".to_owned()
+                } else {
+                    text
+                };
+            }
+        });
+    }
+
+    pub fn mask_drawing(&mut self, on: bool) {
+        let drawable = self
+            .sole_selection()
+            .and_then(|id| self.clip(&id))
+            .and_then(|clip| {
+                let id = self.active_mask_id()?;
+                clip.masks.iter().find(|mask| mask.id == id)
+            })
+            .is_some_and(|mask| {
+                matches!(mask.shape, model::MaskShape::Brush | model::MaskShape::Pen)
+            });
+        self.mask_drawing = on && drawable;
+    }
+
+    pub fn mask_clear_points(&mut self) {
+        self.edit_active_mask(|mask| mask.points.clear());
+    }
+
+    pub fn mask_reset(&mut self) {
+        self.edit_active_mask(|mask| {
+            *mask = model::ClipMask::new(mask.id.clone(), mask.shape);
+        });
+    }
+
+    pub fn mask_track_direction(&mut self, index: i32) {
+        self.mask_track_direction = index.clamp(0, 2) as usize;
+    }
+
+    /// Tracks the selected mask's centre through the clip and writes linear
+    /// Position X/Y keys. The image work stays off the event loop; changing
+    /// shape, feather or rotation while it runs is preserved on completion.
+    pub fn mask_track(&mut self) {
+        if self.mask_track_progress.is_some() {
+            return;
+        }
+        let Some(clip_id) = self.sole_selection() else {
+            return;
+        };
+        let Some(clip) = self.clip(&clip_id).cloned() else {
+            return;
+        };
+        let Some(mask_id) = self.active_mask_id() else {
+            return;
+        };
+        let Some(mask) = clip.masks.iter().find(|mask| mask.id == mask_id).cloned() else {
+            return;
+        };
+        let Some(media) = self.project().media_by_id(&clip.media_id).cloned() else {
+            self.notify(&t("Mask tracking needs a source file"), true);
+            return;
+        };
+        if media.kind == model::MediaKind::Image {
+            self.notify(&t("A still image does not need mask tracking"), false);
+            return;
+        }
+        let (current_at, _) = keyframe_time(&clip, self.playhead, self.frame_rate());
+        let px_id = model::MaskProperty::PositionX.id(&mask.id);
+        let py_id = model::MaskProperty::PositionY.id(&mask.id);
+        let position = (
+            clip.keyframes
+                .named_value_at(&px_id, current_at, mask.position_x),
+            clip.keyframes
+                .named_value_at(&py_id, current_at, mask.position_y),
+        );
+        let size = (
+            clip.keyframes.named_value_at(
+                &model::MaskProperty::Width.id(&mask.id),
+                current_at,
+                mask.width,
+            ),
+            clip.keyframes.named_value_at(
+                &model::MaskProperty::Height.id(&mask.id),
+                current_at,
+                mask.height,
+            ),
+        );
+        let direction = self.mask_track_direction;
+        self.mask_track_generation = self.mask_track_generation.wrapping_add(1);
+        let generation = self.mask_track_generation;
+        self.mask_track_progress = Some(0.0);
+
+        spawn(
+            move || {
+                let width = 320_u32;
+                let height = match (media.width, media.height) {
+                    (Some(w), Some(h)) if w > 0 && h > 0 => {
+                        (f64::from(width) * f64::from(h) / f64::from(w))
+                            .round()
+                            .clamp(96.0, 320.0) as u32
+                    }
+                    _ => 180,
+                };
+                let pool = concat_media::ReaderPool::with_defaults();
+                let source_at = |at: f64| {
+                    let covered = clip.duration * clip.speed.max(0.0625);
+                    clip.source_start
+                        + if clip.reverse {
+                            (1.0 - at) * covered
+                        } else {
+                            at * covered
+                        }
+                };
+                let decode = |at: f64| {
+                    let time = concat_core::Rational::approximate(source_at(at))
+                        .unwrap_or(concat_core::Rational::ZERO);
+                    pool.frame_at(
+                        std::path::Path::new(&media.path),
+                        time,
+                        width,
+                        height,
+                        false,
+                        None,
+                        None,
+                    )
+                    .map_err(|error| error.to_string())
+                };
+                let reference = decode(current_at)?;
+                let centre = (0.5 + position.0 * 0.5, 0.5 + position.1 * 0.5);
+                let samples = ((clip.duration * 10.0).ceil() as usize).clamp(2, 240);
+                let step = 1.0 / (samples - 1) as f64;
+                let forward: Vec<f64> = (0..samples)
+                    .map(|index| index as f64 * step)
+                    .filter(|at| *at > current_at + step * 0.25 && direction != 2)
+                    .collect();
+                let backward: Vec<f64> = (0..samples)
+                    .rev()
+                    .map(|index| index as f64 * step)
+                    .filter(|at| *at < current_at - step * 0.25 && direction != 1)
+                    .collect();
+                let total = (forward.len() + backward.len()).max(1);
+                let mut done = 0usize;
+                let mut points = vec![(current_at, position.0, position.1)];
+
+                if !forward.is_empty() {
+                    let mut tracker =
+                        concat_vision::TranslationTracker::new(&reference, centre, size)
+                            .ok_or_else(|| "could not initialise the mask tracker".to_owned())?;
+                    for at in forward {
+                        let frame = decode(at)?;
+                        let (x, y) = tracker.step(&frame);
+                        points.push((at, (x - 0.5) * 2.0, (y - 0.5) * 2.0));
+                        done += 1;
+                        if done % 6 == 0 {
+                            let progress = done as f32 / total as f32;
+                            on_ui(move |studio, _, _| {
+                                if studio.mask_track_generation == generation
+                                    && studio.mask_track_progress.is_some()
+                                {
+                                    studio.mask_track_progress = Some(progress);
+                                }
+                            });
+                        }
+                    }
+                }
+                if !backward.is_empty() {
+                    let mut tracker =
+                        concat_vision::TranslationTracker::new(&reference, centre, size)
+                            .ok_or_else(|| "could not initialise the mask tracker".to_owned())?;
+                    for at in backward {
+                        let frame = decode(at)?;
+                        let (x, y) = tracker.step(&frame);
+                        points.push((at, (x - 0.5) * 2.0, (y - 0.5) * 2.0));
+                        done += 1;
+                        if done % 6 == 0 {
+                            let progress = done as f32 / total as f32;
+                            on_ui(move |studio, _, _| {
+                                if studio.mask_track_generation == generation
+                                    && studio.mask_track_progress.is_some()
+                                {
+                                    studio.mask_track_progress = Some(progress);
+                                }
+                            });
+                        }
+                    }
+                }
+                points.sort_by(|left, right| left.0.total_cmp(&right.0));
+                Ok::<_, String>((clip_id, mask_id, points))
+            },
+            move |studio, _, _, result| {
+                if studio.mask_track_generation != generation {
+                    return;
+                }
+                studio.mask_track_progress = None;
+                match result {
+                    Ok((clip_id, mask_id, points)) => {
+                        let Some(clip) = studio.clip(&clip_id).cloned() else {
+                            return;
+                        };
+                        if !clip.masks.iter().any(|mask| mask.id == mask_id) {
+                            return;
+                        }
+                        let mut keyframes = clip.keyframes.clone();
+                        let x_id = model::MaskProperty::PositionX.id(&mask_id);
+                        let y_id = model::MaskProperty::PositionY.id(&mask_id);
+                        keyframes.tracks.remove(&x_id);
+                        keyframes.tracks.remove(&y_id);
+                        for (at, x, y) in points {
+                            keyframes.set_named_at(&x_id, at, x, 1e-8);
+                            keyframes.set_named_at(&y_id, at, y, 1e-8);
+                        }
+                        studio.apply(Command::UpdateClip {
+                            clip_id,
+                            patch: ClipPatch {
+                                keyframes: Some(keyframes),
+                                ..ClipPatch::default()
+                            },
+                        });
+                    }
+                    Err(error) => studio.notify(&tf("Mask tracking: {0}", &[&error]), true),
+                }
+            },
+        );
+    }
+
     // ── cutouts ──
     //
     // A cutout is a mask per source instant, found by the host's model and
@@ -4435,6 +4823,29 @@ impl Studio {
             .then(|| clip.clone())
     }
 
+    /// The selected Brush/Pen mask while draw mode is armed and its clip is
+    /// actually under the playhead.
+    fn mask_paint_target(&self) -> Option<(Clip, model::ClipMask)> {
+        if !self.mask_drawing {
+            return None;
+        }
+        let clip_id = self.sole_selection()?;
+        let clip = self.clip(&clip_id)?;
+        let mask_id = self.active_mask_id()?;
+        let mask = clip.masks.iter().find(|mask| mask.id == mask_id)?;
+        if !clip.masks_enabled
+            || !clip.kind.is_visual()
+            || self.locked(&clip.track_id)
+            || !matches!(mask.shape, model::MaskShape::Brush | model::MaskShape::Pen)
+        {
+            return None;
+        }
+        self.stage_clips()
+            .into_iter()
+            .any(|shown| shown.id == clip.id)
+            .then(|| (clip.clone(), mask.clone()))
+    }
+
     /// Where a stage point lands in the source picture, in the fractions a
     /// stroke is stored in: the footprint's turn undone, then the crop and
     /// the flips, the same way a decoded pixel finds its mask.
@@ -4472,15 +4883,26 @@ impl Studio {
     /// 1000 × 1000 viewbox, the line's width as a fraction of the stage,
     /// and whether it is taking away. Empty between strokes.
     fn stroke_overlay(&self) -> (String, f32, bool) {
-        let Gesture::Paint {
-            clip,
-            tool,
-            size,
-            screen,
-            ..
-        } = &self.gesture
-        else {
-            return (String::new(), 0.0, false);
+        let (clip, size, screen, erase) = match &self.gesture {
+            Gesture::Paint {
+                clip,
+                tool,
+                size,
+                screen,
+                ..
+            } => (
+                clip,
+                size,
+                screen,
+                matches!(
+                    tool,
+                    model::BrushTool::Eraser | model::BrushTool::SmartEraser
+                ),
+            ),
+            Gesture::MaskPaint {
+                clip, size, screen, ..
+            } => (clip, size, screen, false),
+            _ => return (String::new(), 0.0, false),
         };
         let Some((first, rest)) = screen.split_first() else {
             return (String::new(), 0.0, false);
@@ -4498,10 +4920,6 @@ impl Studio {
             .map(|clip| self.footprint(clip).w)
             .unwrap_or(1.0) as f32
             * *size as f32;
-        let erase = matches!(
-            tool,
-            model::BrushTool::Eraser | model::BrushTool::SmartEraser
-        );
         (path, width, erase)
     }
 
@@ -4663,6 +5081,8 @@ impl Studio {
                     eprintln!("concat: {error}");
                 }
                 self.pause();
+                self.mask_track_generation = self.mask_track_generation.wrapping_add(1);
+                self.mask_track_progress = None;
                 self.session = Some(session);
                 self.echo = None;
                 self.dirty = false;
@@ -4673,6 +5093,7 @@ impl Studio {
                 self.lane_view.clear();
                 self.playhead = 0.0;
                 self.scroll_left = 0.0;
+                self.preview_flattened = None;
                 self.on_start = false;
                 self.preview_failed = false;
                 self.start.busy = false;
@@ -4737,8 +5158,13 @@ impl Studio {
             }
         }
         self.autosave.stop();
+        self.mask_track_generation = self.mask_track_generation.wrapping_add(1);
+        self.mask_track_progress = None;
         self.session = None;
         self.echo = None;
+        self.preview_flattened = None;
+        self.preview_generation = self.preview_generation.wrapping_add(1);
+        self.preview_wanted = false;
         self.dirty = false;
         self.selection.clear();
         self.gesture = Gesture::None;
