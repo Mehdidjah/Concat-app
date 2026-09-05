@@ -19,6 +19,9 @@
 pub struct SpeedCurve {
     /// `(x, speed)` with `x` in `0..=1` ascending and speed positive.
     points: Vec<(f64, f64)>,
+    /// Area at each corresponding point, so source-time lookup remains
+    /// logarithmic even for a densely sampled temporal curve.
+    areas: Vec<f64>,
 }
 
 impl SpeedCurve {
@@ -52,7 +55,14 @@ impl SpeedCurve {
         if points[points.len() - 1].0 < 1.0 {
             points.push((1.0, points[points.len() - 1].1));
         }
-        Some(SpeedCurve { points })
+        let mut areas = Vec::with_capacity(points.len());
+        areas.push(0.0);
+        for pair in points.windows(2) {
+            let width = pair[1].0 - pair[0].0;
+            let area = areas.last().copied().unwrap_or(0.0) + width * (pair[0].1 + pair[1].1) / 2.0;
+            areas.push(area);
+        }
+        Some(SpeedCurve { points, areas })
     }
 
     /// The points, as tidied.
@@ -63,17 +73,19 @@ impl SpeedCurve {
     /// Speed at `x`, a fraction of the clip's length.
     pub fn speed_at(&self, x: f64) -> f64 {
         let x = x.clamp(0.0, 1.0);
-        for pair in self.points.windows(2) {
-            let (x0, v0) = pair[0];
-            let (x1, v1) = pair[1];
-            if x <= x1 {
-                if x1 <= x0 {
-                    return v1;
-                }
-                return v0 + (v1 - v0) * (x - x0) / (x1 - x0);
-            }
+        let right = self.points.partition_point(|point| point.0 < x);
+        if right == 0 {
+            return self.points[0].1;
         }
-        self.points[self.points.len() - 1].1
+        if right >= self.points.len() {
+            return self.points[self.points.len() - 1].1;
+        }
+        let (x0, v0) = self.points[right - 1];
+        let (x1, v1) = self.points[right];
+        if x1 <= x0 {
+            return v1;
+        }
+        v0 + (v1 - v0) * (x - x0) / (x1 - x0)
     }
 
     /// The area under the curve from the start to `x`: how much of the
@@ -81,21 +93,17 @@ impl SpeedCurve {
     /// by then. Each segment is a trapezoid, so this is exact.
     pub fn consumed(&self, x: f64) -> f64 {
         let x = x.clamp(0.0, 1.0);
-        let mut area = 0.0;
-        for pair in self.points.windows(2) {
-            let (x0, v0) = pair[0];
-            let x1 = pair[1].0;
-            if x <= x0 {
-                break;
-            }
-            let end = x.min(x1);
-            let v_end = self.speed_at(end);
-            area += (end - x0) * (v0 + v_end) / 2.0;
-            if x <= x1 {
-                break;
-            }
+        let right = self.points.partition_point(|point| point.0 < x);
+        if right == 0 {
+            return 0.0;
         }
-        area
+        if right >= self.points.len() {
+            return *self.areas.last().unwrap_or(&0.0);
+        }
+        let left = right - 1;
+        let (x0, v0) = self.points[left];
+        let v_end = self.speed_at(x);
+        self.areas[left] + (x - x0) * (v0 + v_end) / 2.0
     }
 
     /// The average speed: source seconds consumed per timeline second over

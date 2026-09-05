@@ -95,6 +95,8 @@ pub struct Clip {
     /// Keys over the clip's placement and opacity, when it has any. See
     /// [`Animation`].
     pub animation: Option<Animation>,
+    /// Base stacking offset from the lane order.
+    pub layer_order: i32,
     /// How the clip's colour meets what is beneath it.
     pub blend: Blend,
 }
@@ -170,8 +172,17 @@ pub struct Transform {
     pub offset_x: f64,
     /// Offset as a fraction of frame height.
     pub offset_y: f64,
+    /// Pivot from the picture centre, in frame fractions.
+    pub anchor_x: f64,
+    pub anchor_y: f64,
     /// Clockwise rotation about the picture's centre, in degrees.
     pub rotation: f64,
+    /// Rotation around the horizontal and vertical axes, in degrees.
+    pub rotation_x: f64,
+    pub rotation_y: f64,
+    /// Distance toward the camera in frame-depth units. Positive values move
+    /// closer; the compositor applies a bounded perspective projection.
+    pub position_z: f64,
     /// A multiplier on the fitted width beyond `scale`, for a picture
     /// pulled wider or narrower than its aspect. 1 keeps the aspect.
     pub stretch_x: f64,
@@ -185,7 +196,12 @@ impl Transform {
         scale: 1.0,
         offset_x: 0.0,
         offset_y: 0.0,
+        anchor_x: 0.0,
+        anchor_y: 0.0,
         rotation: 0.0,
+        rotation_x: 0.0,
+        rotation_y: 0.0,
+        position_z: 0.0,
         stretch_x: 1.0,
         stretch_y: 1.0,
     };
@@ -218,6 +234,7 @@ impl Clip {
             retime: None,
             reverse: false,
             animation: None,
+            layer_order: 0,
             blend: Blend::Normal,
         }
     }
@@ -247,6 +264,14 @@ impl Clip {
             Some(animation) => animation.opacity_at(self.opacity, self.fraction_at(time)),
             None => self.opacity,
         }
+    }
+
+    /// The animated stacking offset at `time`.
+    pub fn layer_order_at(&self, time: Rational) -> i32 {
+        self.layer_order
+            + self.animation.as_ref().map_or(0, |animation| {
+                animation.layer_order_at(self.fraction_at(time))
+            })
     }
 
     /// The opacity ramp factor at `time`, in `0.0..=1.0`.
