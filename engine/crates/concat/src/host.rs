@@ -41,6 +41,8 @@ pub struct Host {
     pub speech: Arc<Speech>,
     /// Titles painted to pictures, and the cache of them.
     pub titles: concat_host::Titles,
+    /// The cutout model, and the masks it finds for the project's media.
+    pub cutouts: Arc<concat_host::Cutouts>,
 }
 
 impl Host {
@@ -54,7 +56,7 @@ impl Host {
         Ok(Host {
             titles: concat_host::Titles::new(&dirs),
             dirs,
-            playback: Playback::start(Arc::new(Events)),
+            playback: Playback::start(Arc::new(Events))?,
             monitor: match gpu {
                 Some(gpu) => Monitor::with_gpu(gpu.device, gpu.queue),
                 None => Monitor::new(),
@@ -62,6 +64,7 @@ impl Host {
             exporter: Exporter::new(),
             transcriber: Arc::new(Transcriber::new()),
             speech: Arc::new(Speech::new()),
+            cutouts: Arc::new(concat_host::Cutouts::new()),
         })
     }
 }

@@ -5,7 +5,7 @@ import { EffectData } from "demo/effects-panel.slint";
 import {
     AppliedEntryData, AppliedParamData, CatalogueEntryData,
 } from "inspector/clip-inspector.slint";
-import { MediaFilter, MediaItemData } from "workspace/media-pane.slint";
+import { MediaFilter, MediaItemData, TextPresetData } from "workspace/media-pane.slint";
 import { DockDivider, DockSide, SeatBox } from "dock.slint";
 import { PaneKind } from "workspace/pane-switcher.slint";
 import { MenuItemData } from "primitives/context-menu.slint";
@@ -86,7 +86,11 @@ export global Editor {
     callback media-activate(id: int);
 
     // library catalogue pages
-    callback library-add-text();
+    /// The looks the Text page offers, published once.
+    in-out property <[TextPresetData]> text-presets;
+    /// A title placed at the playhead in the look `preset` names;
+    /// "default" is the plain title.
+    callback library-add-text(preset: string);
     callback library-apply-effect(effect-id: string);
     callback library-apply-transition(transition-id: string);
     callback library-apply-filter(filter-id: string, label: string);
@@ -170,12 +174,34 @@ export global Editor {
     /// selection — the way `clip-pressed` does for the lanes.
     callback stage-pressed(x: float, y: float, additive: bool);
     /// A press on one of a selected box's grips: 0..3 are its corners,
-    /// clockwise from top-left, and 4 is the rotation handle above it.
+    /// clockwise from top-left, 4 is the rotation handle above it, and
+    /// 5..8 are the edges' midpoints, top, right, bottom, left.
     callback stage-grip-pressed(id: string, grip: int, x: float, y: float);
     /// The pointer moved with a stage gesture live. `snap` is shift: an axis
     /// for a move, steps for a scale, fifteen degrees for a turn.
     callback stage-dragged(x: float, y: float, snap: bool);
     callback stage-released();
+
+    /// A custom cutout's brush, as the inspector set it: which of the four
+    /// tools, how wide as a fraction of the picture, and whether a press on
+    /// the stage paints at all rather than moving the picture.
+    in-out property <int> brush-tool;
+    in-out property <float> brush-size;
+    in-out property <bool> painting;
+    /// The stroke under the pointer, as path commands over a 1000 × 1000
+    /// viewbox of the stage; empty between strokes. The width is a fraction
+    /// of the stage's width; `erase` colours the line for a tool that takes
+    /// away.
+    in-out property <string> stroke-path;
+    in-out property <float> stroke-width;
+    in-out property <bool> stroke-erase;
+    /// The Remove background section's controls; see VideoPanel. `mode` is
+    /// 0 off, 1 automatic, 2 custom - the two screens are chain links.
+    callback cutout-mode(mode: int);
+    callback cutout-tool(index: int);
+    callback cutout-size(size: float);
+    callback cutout-painting(on: bool);
+    callback cutout-clear();
 
     // ── the timeline ──
     in-out property <[TimelineTabData]> timeline-tabs;
@@ -186,7 +212,13 @@ export global Editor {
     in-out property <bool> snap;
     in-out property <int> selected-count;
     in-out property <string> merge-blocked-because;
-    in-out property <bool> has-av-tools;
+    /// What the tray's sound and word tools may do to the selection: one
+    /// clip with sound to caption, one title to speak, one video clip whose
+    /// sound is on it to detach, or whose sound is off it to put back.
+    in-out property <bool> can-caption;
+    in-out property <bool> can-speak;
+    in-out property <bool> can-detach;
+    in-out property <bool> can-reattach;
     in-out property <float> playhead;
     in-out property <float> frame-rate;
     in-out property <float> scroll-left;
@@ -201,11 +233,12 @@ export global Editor {
     callback split();
     callback merge();
     callback delete-selected();
-    callback av-tools();
-    in-out property <[MenuItemData]> av-items;
-    in-out property <length> av-height;
-    in-out property <int> av-token;
-    callback av-selected(id: string);
+    /// The tray's tools for a clip's sound and words. The first two open a
+    /// sheet; the last two are the edit itself.
+    callback captions();
+    callback speak();
+    callback detach-audio();
+    callback reattach-audio();
     callback add-track();
     callback zoom-to-fit(width: length);
     callback zoom(factor: float, anchor-seconds: float);
@@ -233,4 +266,34 @@ export global Editor {
     callback track-sized(index: int, size: TrackSize);
     callback track-removed(index: int);
     callback track-renamed(index: int, name: string);
+    /// A tab dragged to a new place in the strip. `to` is counted with the
+    /// tab already out of its old slot, the way MoveTimeline counts.
+    callback tab-moved(from: int, to: int);
+
+    // ── the project's facts ──
+    //
+    // What the Details panel reads when nothing is selected. Strings rather
+    // than numbers where the panel would only format them: the panel is a
+    // readout, and Rust already knows how each fact is spelled.
+    in-out property <string> project-name;
+    in-out property <string> project-folder;
+    in-out property <string> project-output;
+    in-out property <string> project-rate;
+    in-out property <string> project-duration;
+    in-out property <int> count-media;
+    in-out property <int> count-tracks;
+    in-out property <int> count-clips;
+    /// The panel's Modify button: open the project sheet.
+    callback modify-project();
+
+    /// A press landed on a pane's floor - a lane, the stage, the bin's
+    /// gutter, a clip. Whatever field had focus gives it up, the way a
+    /// browser's does when you click beside it. Answered by the window,
+    /// which owns the scope the focus falls back to; see App.blur.
+    callback blur();
+
+    /// A keyboard chord that names an edit rather than a view change. One
+    /// callback with a verb rather than one per key, so the window's key
+    /// table and the state's answer to it stay in one place each.
+    callback shortcut(action: string);
 }

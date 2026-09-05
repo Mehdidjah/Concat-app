@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Jareer and Concat contributors
 
+import { I18n } from "../i18n.slint";
 import { Theme } from "../theme/theme.slint";
 import { Glyph, Icon } from "../icons.slint";
-import { IconButton, Row, Section, SectionHeader } from "../primitives/panel.slint";
+import { IconButton, Row, Section, SectionBody, SectionHeader } from "../primitives/panel.slint";
+import { Button } from "../primitives/modal.slint";
 import { SegmentedControl } from "../primitives/segmented-control.slint";
 import { Select } from "../primitives/select.slint";
 import {
@@ -64,8 +66,8 @@ export struct AppliedParamData {
 /// filters and audio alike — the data says which.
 export component PresetStack inherits VerticalLayout {
     /// lower-case singular, for labels and placeholders
-    in property <string> noun: "effect";
-    in property <string> library-title: "Effect library";
+    in property <string> noun: I18n.t("effect");
+    in property <string> library-title: I18n.t("Effect library");
     in property <[string]> group-labels;
     in property <[CatalogueEntryData]> catalogue;
     /// Owned by Rust: a chain is edited by index, and Slint models cannot be
@@ -110,7 +112,7 @@ export component PresetStack inherits VerticalLayout {
         first: true;
 
         SectionHeader {
-            title: "Applied";
+            title: I18n.t("Applied");
             HelpButton {
                 open: root.help;
                 toggled => { root.help = self.open; }
@@ -118,9 +120,7 @@ export component PresetStack inherits VerticalLayout {
         }
 
         if root.help: Note {
-            text: "The chain runs top to bottom — reorder it with the chevrons."
-                + " The eye bypasses one link without losing the values you"
-                + " dialled into it.";
+            text: I18n.t("The chain runs top to bottom — reorder it with the chevrons. The eye bypasses one link without losing the values you dialled into it.");
         }
 
         VerticalLayout {
@@ -157,7 +157,7 @@ export component PresetStack inherits VerticalLayout {
                         }
 
                         if !item.known: Text {
-                            text: "not installed";
+                            text: I18n.t("not installed");
                             color: Theme.fg-dim;
                             font-size: Theme.fs-xs;
                             vertical-alignment: center;
@@ -165,25 +165,25 @@ export component PresetStack inherits VerticalLayout {
 
                         IconButton {
                             glyph: Glyph.eye;
-                            label: item.on ? "Bypass \{item.name}" : "Enable \{item.name}";
+                            label: item.on ? I18n.t1("Bypass {0}", "\{item.name}") : I18n.t1("Enable {0}", "\{item.name}");
                             checked: item.on;
                             clicked => { root.toggle(index); }
                         }
                         IconButton {
                             glyph: Glyph.chevron-up;
-                            label: "Move \{item.name} up";
+                            label: I18n.t1("Move {0} up", "\{item.name}");
                             enabled: index > 0;
                             clicked => { root.move-by(index, -1); }
                         }
                         IconButton {
                             glyph: Glyph.chevron-down;
-                            label: "Move \{item.name} down";
+                            label: I18n.t1("Move {0} down", "\{item.name}");
                             enabled: index < root.applied.length - 1;
                             clicked => { root.move-by(index, 1); }
                         }
                         IconButton {
                             glyph: Glyph.close;
-                            label: "Remove \{item.name}";
+                            label: I18n.t1("Remove {0}", "\{item.name}");
                             clicked => { root.remove(index); }
                         }
                     }
@@ -227,7 +227,7 @@ export component PresetStack inherits VerticalLayout {
         Row {
             SearchField {
                 text <=> root.query;
-                placeholder: "Search \{root.noun}s";
+                placeholder: I18n.t1("Search {0}s", "\{root.noun}");
             }
         }
 
@@ -291,7 +291,7 @@ export component PresetStack inherits VerticalLayout {
                     }
 
                     if row.in-chain: Text {
-                        text: "in chain";
+                        text: I18n.t("in chain");
                         color: Theme.fg-dim;
                         font-size: Theme.fs-xs;
                         vertical-alignment: center;
@@ -319,29 +319,78 @@ export component PresetStack inherits VerticalLayout {
 // to `selected` would work exactly once and then go deaf to the model. They
 // are seeded instead, on init and whenever the selection changes under us.
 
-/// Video: how the picture sits in the frame, and how solid it is.
+/// Video: how the picture sits in the frame, how solid it is, and whether
+/// its background is keyed out.
 export component VideoPanel inherits VerticalLayout {
     in property <SelectedClipData> selected;
+    /// The picture's chain and its knobs, for the cutout section: keying is
+    /// a package on the chain like any effect, and this panel only gives
+    /// it a switch and a name.
+    in property <[AppliedEntryData]> applied;
+    in property <[AppliedParamData]> params;
+    /// The custom cutout's brush; see Editor.
+    in property <int> brush-tool;
+    in property <float> brush-size;
+    in property <bool> painting;
 
     callback set(field: ClipField, value: float);
     /// A control gesture finished: the accumulated change becomes one command.
     callback commit();
+    callback chain-add(id: string);
+    callback chain-remove(index: int);
+    callback chain-set-param(index: int, key: string, value: float);
+    /// The cutout: its mode (0 off, 1 automatic, 2 custom), and the brush.
+    callback cutout-mode(mode: int);
+    callback cutout-tool(index: int);
+    callback cutout-size(size: float);
+    callback cutout-painting(on: bool);
+    callback cutout-clear();
+
+    /// Which keyer is on the chain, and where: -1 for none. Scans the first
+    /// eight links, as PresetStack does, for want of a model lookup.
+    pure function keyer-at(id: string) -> int {
+        return root.applied.length > 0 && root.applied[0].id == id ? 0
+            : root.applied.length > 1 && root.applied[1].id == id ? 1
+            : root.applied.length > 2 && root.applied[2].id == id ? 2
+            : root.applied.length > 3 && root.applied[3].id == id ? 3
+            : root.applied.length > 4 && root.applied[4].id == id ? 4
+            : root.applied.length > 5 && root.applied[5].id == id ? 5
+            : root.applied.length > 6 && root.applied[6].id == id ? 6
+            : root.applied.length > 7 && root.applied[7].id == id ? 7
+            : -1;
+    }
+    property <int> green: root.keyer-at("concat.green-screen");
+    property <int> blue: root.keyer-at("concat.blue-screen");
+    /// 0 off, 1 green, 2 blue: which chroma package is on.
+    property <int> keyer: root.green >= 0 ? 1 : root.blue >= 0 ? 2 : 0;
+    property <int> keyer-index: root.green >= 0 ? root.green : root.blue;
+    /// The Mode row: 0 off, 1 automatic, 2 custom, 3 green screen, 4 blue
+    /// screen. A keyer on the chain wins, since a cutout under a key would
+    /// be two removals at once.
+    property <int> removal: root.keyer == 1 ? 3 : root.keyer == 2 ? 4 : root.selected.cutout;
+    property <bool> masked: root.removal == 1 || root.removal == 2;
 
     property <float> scale;
     property <float> offset-x;
     property <float> offset-y;
     property <float> rotation;
+    property <float> stretch-x;
+    property <float> stretch-y;
     property <float> alpha;
     property <float> crop-left;
     property <float> crop-top;
     property <float> crop-right;
     property <float> crop-bottom;
+    property <float> feather;
 
     function seed() {
+        root.feather = root.selected.cutout-feather;
         root.scale = root.selected.scale;
         root.offset-x = root.selected.offset-x;
         root.offset-y = root.selected.offset-y;
         root.rotation = root.selected.rotation;
+        root.stretch-x = root.selected.stretch-x;
+        root.stretch-y = root.selected.stretch-y;
         root.alpha = root.selected.opacity;
         root.crop-left = root.selected.crop-left;
         root.crop-top = root.selected.crop-top;
@@ -349,17 +398,18 @@ export component VideoPanel inherits VerticalLayout {
         root.crop-bottom = root.selected.crop-bottom;
     }
 
-    property <[string]> blends: ["Normal", "Multiply", "Screen", "Add", "Lighten", "Darken"];
+    property <[string]> blends: [I18n.t("Normal"), I18n.t("Multiply"), I18n.t("Screen"), I18n.t("Add"), I18n.t("Lighten"), I18n.t("Darken")];
 
     init => { root.seed(); }
     changed selected => { root.seed(); }
 
     property <bool> transform-help;
+    property <bool> cutout-help;
 
     Section {
         first: true;
         transform := SectionHeader {
-            title: "Transform";
+            title: I18n.t("Transform");
             collapsible: true;
             summary: "\{Math.round(root.scale * 100)}% · \{Math.round(root.rotation)}°";
             HelpButton {
@@ -368,16 +418,14 @@ export component VideoPanel inherits VerticalLayout {
             }
         }
 
-        if transform.open: VerticalLayout {
+        if transform.open: SectionBody {
 
         if root.transform-help: Note {
-            text: "Scale and position are fractions of the output frame, so a"
-                + " clip keeps its framing if the project is re-sized. The"
-                + " same numbers move with the box on the monitor.";
+            text: I18n.t("Scale and position are fractions of the output frame, so a clip keeps its framing if the project is re-sized. The same numbers move with the box on the monitor. Width and height pull one axis beyond the scale; the edge grips on the monitor do the same.");
         }
 
         Param {
-            label: "Scale";
+            label: I18n.t("Scale");
             value <=> root.scale;
             minimum: 0.05;
             maximum: 8;
@@ -387,7 +435,7 @@ export component VideoPanel inherits VerticalLayout {
             changed(v) => { root.set(ClipField.scale, v); root.commit(); }
         }
         Param {
-            label: "Position X";
+            label: I18n.t("Position X");
             value <=> root.offset-x;
             minimum: -1;
             maximum: 1;
@@ -397,7 +445,7 @@ export component VideoPanel inherits VerticalLayout {
             changed(v) => { root.set(ClipField.offset-x, v); root.commit(); }
         }
         Param {
-            label: "Position Y";
+            label: I18n.t("Position Y");
             value <=> root.offset-y;
             minimum: -1;
             maximum: 1;
@@ -407,7 +455,7 @@ export component VideoPanel inherits VerticalLayout {
             changed(v) => { root.set(ClipField.offset-y, v); root.commit(); }
         }
         Param {
-            label: "Rotation";
+            label: I18n.t("Rotation");
             value <=> root.rotation;
             minimum: -180;
             maximum: 180;
@@ -416,20 +464,40 @@ export component VideoPanel inherits VerticalLayout {
             fmt: ParamFormat.degrees;
             changed(v) => { root.set(ClipField.rotation, v); root.commit(); }
         }
+        Param {
+            label: I18n.t("Width");
+            value <=> root.stretch-x;
+            minimum: 0.1;
+            maximum: 4;
+            step: 0.01;
+            default-value: 1;
+            fmt: ParamFormat.fraction;
+            changed(v) => { root.set(ClipField.stretch-x, v); root.commit(); }
+        }
+        Param {
+            label: I18n.t("Height");
+            value <=> root.stretch-y;
+            minimum: 0.1;
+            maximum: 4;
+            step: 0.01;
+            default-value: 1;
+            fmt: ParamFormat.fraction;
+            changed(v) => { root.set(ClipField.stretch-y, v); root.commit(); }
+        }
 
         }
     }
 
     Section {
         blend := SectionHeader {
-            title: "Blend";
+            title: I18n.t("Blend");
             collapsible: true;
             summary: "\{Math.round(root.alpha * 100)}% · "
                 + root.blends[Math.max(0, Math.min(root.selected.blend, root.blends.length - 1))];
         }
-        if blend.open: VerticalLayout {
+        if blend.open: SectionBody {
         Param {
-            label: "Opacity";
+            label: I18n.t("Opacity");
             value <=> root.alpha;
             minimum: 0;
             maximum: 1;
@@ -439,7 +507,7 @@ export component VideoPanel inherits VerticalLayout {
             changed(v) => { root.set(ClipField.opacity, v); root.commit(); }
         }
         Row {
-            label: "Mode";
+            label: I18n.t("Mode");
             Select {
                 options: root.blends;
                 current: root.selected.blend;
@@ -447,15 +515,146 @@ export component VideoPanel inherits VerticalLayout {
             }
         }
         SwitchRow {
-            label: "Flip horizontal";
+            label: I18n.t("Flip horizontal");
             checked: root.selected.flip-h;
             toggled(on) => { root.set(ClipField.flip-h, on ? 1 : 0); root.commit(); }
         }
         SwitchRow {
-            label: "Flip vertical";
+            label: I18n.t("Flip vertical");
             checked: root.selected.flip-v;
             toggled(on) => { root.set(ClipField.flip-v, on ? 1 : 0); root.commit(); }
         }
+        }
+    }
+
+    // The background taken away. Automatic and custom cut by the mask the
+    // cutout model finds for the person in the picture - custom with
+    // strokes painted on the monitor over it - and the two screens key a
+    // colour out. A screen is the chroma package on the chain, which is why
+    // its knobs read from the chain's own rows.
+    Section {
+        cutout := SectionHeader {
+            title: I18n.t("Remove background");
+            collapsible: true;
+            summary: root.removal == 0 ? I18n.t("off")
+                : root.removal == 1 ? I18n.t("Automatic")
+                : root.removal == 2 ? I18n.t("Custom")
+                : root.removal == 3 ? I18n.t("Green screen") : I18n.t("Blue screen");
+            HelpButton {
+                open: root.cutout-help;
+                toggled => { root.cutout-help = self.open; }
+            }
+        }
+        if cutout.open: SectionBody {
+
+        if root.cutout-help: Note {
+            text: I18n.t("Automatic keeps the person the cutout model finds and drops the rest. Custom starts from the same mask and takes corrections painted on the monitor: the smart brush and smart eraser follow the model's confidence, the plain ones do exactly what you paint. Green and blue screen key one colour out instead; similarity is how far from the colour still counts, softness feathers the edge.");
+        }
+
+        Row {
+            label: I18n.t("Mode");
+            Select {
+                options: [I18n.t("Off"), I18n.t("Automatic"), I18n.t("Custom"), I18n.t("Green screen"), I18n.t("Blue screen")];
+                current: root.removal;
+                changed(index) => {
+                    // One removal at a time: the keyer comes off the chain
+                    // before anything else goes on, and the cutout is set
+                    // or cleared to match.
+                    if (root.keyer-index >= 0) {
+                        root.chain-remove(root.keyer-index);
+                    }
+                    root.cutout-mode(index == 1 ? 1 : index == 2 ? 2 : 0);
+                    if (index == 3) {
+                        root.chain-add("concat.green-screen");
+                    } else if (index == 4) {
+                        root.chain-add("concat.blue-screen");
+                    }
+                    root.commit();
+                }
+            }
+        }
+
+        if root.masked: Param {
+            label: I18n.t("Feather");
+            value <=> root.feather;
+            minimum: 0;
+            maximum: 0.1;
+            step: 0.002;
+            default-value: 0.01;
+            fmt: ParamFormat.percent;
+            changed(v) => { root.set(ClipField.cutout-feather, v); root.commit(); }
+        }
+
+        // The analysis, while it runs: the masks are found in the
+        // background and the picture is shown as shot until they are.
+        if root.masked && root.selected.cutout-progress >= 0: Row {
+            label: I18n.t("Analysis");
+            Text {
+                text: I18n.t1("Finding the subject… {0}%", "\{Math.round(root.selected.cutout-progress * 100)}");
+                color: Theme.fg-muted;
+                font-size: Theme.fs;
+                vertical-alignment: center;
+            }
+        }
+
+        if root.removal == 2: Row {
+            label: I18n.t("Tool");
+            Select {
+                options: [I18n.t("Smart brush"), I18n.t("Brush"), I18n.t("Smart eraser"), I18n.t("Eraser")];
+                current: root.brush-tool;
+                changed(index) => { root.cutout-tool(index); }
+            }
+        }
+        if root.removal == 2: Param {
+            label: I18n.t("Brush size");
+            value: root.brush-size;
+            minimum: 0.005;
+            maximum: 0.5;
+            step: 0.005;
+            default-value: 0.06;
+            fmt: ParamFormat.percent;
+            changed(v) => { root.cutout-size(v); }
+        }
+        if root.removal == 2: SwitchRow {
+            label: I18n.t("Paint on the monitor");
+            checked: root.painting;
+            toggled(on) => { root.cutout-painting(on); }
+        }
+        if root.removal == 2: Row {
+            label: root.selected.cutout-strokes == 1 ? "1 stroke"
+                : "\{root.selected.cutout-strokes} strokes";
+            Button {
+                label: I18n.t("Clear strokes");
+                ghost: true;
+                enabled: root.selected.cutout-strokes > 0;
+                clicked => { root.cutout-clear(); }
+            }
+        }
+
+        // The keyer's own knobs, re-seeded from the chain the way the
+        // stack's rows are; see PresetStack.
+        for p in root.params: Rectangle {
+            property <AppliedParamData> data: p;
+            visible: root.keyer-index >= 0 && p.entry == root.keyer-index;
+            height: root.keyer-index >= 0 && p.entry == root.keyer-index
+                ? knob.preferred-height : 0;
+            changed data => { knob.value = self.data.value; }
+
+            knob := Param {
+                label: p.label;
+                value: p.value;
+                minimum: p.min;
+                maximum: p.max;
+                step: p.step;
+                default-value: p.default-value;
+                fmt: p.fmt;
+                changed(v) => {
+                    root.chain-set-param(root.keyer-index, p.key, v);
+                    root.commit();
+                }
+            }
+        }
+
         }
     }
 
@@ -463,16 +662,15 @@ export component VideoPanel inherits VerticalLayout {
     // source's own edges, so a crop survives a change of output size.
     Section {
         crop := SectionHeader {
-            title: "Crop";
+            title: I18n.t("Crop");
             collapsible: true;
             summary: (root.crop-left == 0 && root.crop-top == 0
-                && root.crop-right == 0 && root.crop-bottom == 0) ? "none"
-                : "\{Math.round(root.crop-left * 100)} · \{Math.round(root.crop-top * 100)}"
-                    + " · \{Math.round(root.crop-right * 100)} · \{Math.round(root.crop-bottom * 100)}";
+                && root.crop-right == 0 && root.crop-bottom == 0) ? I18n.t("none")
+                : "\{Math.round(root.crop-left * 100)} · \{Math.round(root.crop-top * 100)} · \{Math.round(root.crop-right * 100)} · \{Math.round(root.crop-bottom * 100)}";
         }
-        if crop.open: VerticalLayout {
+        if crop.open: SectionBody {
         Param {
-            label: "Left";
+            label: I18n.t("Left");
             value <=> root.crop-left;
             minimum: 0;
             maximum: 0.9;
@@ -482,7 +680,7 @@ export component VideoPanel inherits VerticalLayout {
             changed(v) => { root.set(ClipField.crop-left, v); root.commit(); }
         }
         Param {
-            label: "Top";
+            label: I18n.t("Top");
             value <=> root.crop-top;
             minimum: 0;
             maximum: 0.9;
@@ -492,7 +690,7 @@ export component VideoPanel inherits VerticalLayout {
             changed(v) => { root.set(ClipField.crop-top, v); root.commit(); }
         }
         Param {
-            label: "Right";
+            label: I18n.t("Right");
             value <=> root.crop-right;
             minimum: 0;
             maximum: 0.9;
@@ -502,7 +700,7 @@ export component VideoPanel inherits VerticalLayout {
             changed(v) => { root.set(ClipField.crop-right, v); root.commit(); }
         }
         Param {
-            label: "Bottom";
+            label: I18n.t("Bottom");
             value <=> root.crop-bottom;
             minimum: 0;
             maximum: 0.9;
@@ -546,12 +744,13 @@ export component AudioPanel inherits VerticalLayout {
     Section {
         first: true;
         volume := SectionHeader {
-            title: "Volume";
+            title: I18n.t("Volume");
             collapsible: true;
             summary: InspectorFmt.format(ParamFormat.gain, root.level);
         }
-        if volume.open: Param {
-            label: "Level";
+        if volume.open: SectionBody {
+        Param {
+            label: I18n.t("Level");
             value <=> root.level;
             // The bottom is silence, not -60. +24 at the top because quiet
             // material genuinely needs it — a distant lavalier is routinely
@@ -567,19 +766,20 @@ export component AudioPanel inherits VerticalLayout {
                 root.commit();
             }
         }
+        }
     }
 
     Section {
         fades := SectionHeader {
-            title: "Fades";
+            title: I18n.t("Fades");
             collapsible: true;
-            summary: (root.fade-in == 0 && root.fade-out == 0) ? "none"
+            summary: (root.fade-in == 0 && root.fade-out == 0) ? I18n.t("none")
                 : InspectorFmt.format(ParamFormat.seconds2, root.fade-in)
                     + " / " + InspectorFmt.format(ParamFormat.seconds2, root.fade-out);
         }
-        if fades.open: VerticalLayout {
+        if fades.open: SectionBody {
         Param {
-            label: "Fade in";
+            label: I18n.t("Fade in");
             value <=> root.fade-in;
             minimum: 0;
             maximum: root.fade-limit;
@@ -588,7 +788,7 @@ export component AudioPanel inherits VerticalLayout {
             changed(v) => { root.set(ClipField.fade-in, v); root.commit(); }
         }
         Param {
-            label: "Fade out";
+            label: I18n.t("Fade out");
             value <=> root.fade-out;
             minimum: 0;
             maximum: root.fade-limit;
@@ -615,14 +815,14 @@ export component SpeedPanel inherits VerticalLayout {
     property <bool> speed-help;
     /// The Select's rows: the constant rate first, then the shapes in the
     /// order Rust keeps them, then Custom for a shape that is none of them.
-    property <[string]> curves: ["Normal", "Montage", "Hero", "Bullet",
-        "Jump Cut", "Flash In", "Flash Out", "Custom"];
+    property <[string]> curves: [I18n.t("Normal"), I18n.t("Montage"), I18n.t("Hero"), I18n.t("Bullet"),
+        I18n.t("Jump Cut"), I18n.t("Flash In"), I18n.t("Flash Out"), I18n.t("Custom")];
     property <bool> curved: root.selected.speed-curve >= 0;
 
     Section {
         first: true;
         speed := SectionHeader {
-            title: "Speed";
+            title: I18n.t("Speed");
             collapsible: true;
             summary: InspectorFmt.format(ParamFormat.rate, root.speed);
             HelpButton {
@@ -631,17 +831,14 @@ export component SpeedPanel inherits VerticalLayout {
             }
         }
 
-        if speed.open: VerticalLayout {
+        if speed.open: SectionBody {
 
         if root.speed-help: Note {
-            text: "Rate re-times the clip in place, so the timeline length"
-                + " changes with it. Trim afterwards, not before. A curve"
-                + " varies the rate over the clip; the same footage plays,"
-                + " faster here and slower there.";
+            text: I18n.t("Rate re-times the clip in place, so the timeline length changes with it. Trim afterwards, not before. A curve varies the rate over the clip; the same footage plays, faster here and slower there.");
         }
 
         Row {
-            label: "Curve";
+            label: I18n.t("Curve");
             Select {
                 options: root.curves;
                 // Custom is one past the presets; Rust says so with their
@@ -659,7 +856,7 @@ export component SpeedPanel inherits VerticalLayout {
         }
 
         Param {
-            label: "Rate";
+            label: I18n.t("Rate");
             value <=> root.speed;
             // With a curve the rate is the curve's mean, read-only: the
             // shape decides it.
@@ -676,7 +873,7 @@ export component SpeedPanel inherits VerticalLayout {
         }
 
         SwitchRow {
-            label: "Change pitch with speed";
+            label: I18n.t("Change pitch with speed");
             checked: !root.selected.preserve-pitch;
             toggled(on) => {
                 root.set(ClipField.preserve-pitch, on ? 0 : 1);
@@ -685,7 +882,7 @@ export component SpeedPanel inherits VerticalLayout {
         }
 
         SwitchRow {
-            label: "Reverse";
+            label: I18n.t("Reverse");
             checked: root.selected.reverse;
             toggled(on) => {
                 root.set(ClipField.reverse, on ? 1 : 0);
@@ -707,11 +904,11 @@ export component AnimationPanel inherits VerticalLayout {
     callback set(field: ClipField, value: float);
     callback commit();
 
-    property <[string]> in-shapes: ["None", "Fade", "Zoom In", "Zoom Out",
-        "Slide Up", "Slide Down", "Slide Left", "Slide Right", "Spin"];
-    property <[string]> out-shapes: ["None", "Fade", "Zoom In", "Zoom Out",
-        "Slide Up", "Slide Down", "Slide Left", "Slide Right", "Spin"];
-    property <[string]> combo-shapes: ["None", "Pulse", "Shake", "Spin", "Bounce", "Drift"];
+    property <[string]> in-shapes: [I18n.t("None"), I18n.t("Fade"), I18n.t("Zoom In"), I18n.t("Zoom Out"),
+        I18n.t("Slide Up"), I18n.t("Slide Down"), I18n.t("Slide Left"), I18n.t("Slide Right"), I18n.t("Spin")];
+    property <[string]> out-shapes: [I18n.t("None"), I18n.t("Fade"), I18n.t("Zoom In"), I18n.t("Zoom Out"),
+        I18n.t("Slide Up"), I18n.t("Slide Down"), I18n.t("Slide Left"), I18n.t("Slide Right"), I18n.t("Spin")];
+    property <[string]> combo-shapes: [I18n.t("None"), I18n.t("Pulse"), I18n.t("Shake"), I18n.t("Spin"), I18n.t("Bounce"), I18n.t("Drift")];
 
     property <float> in-seconds;
     property <float> out-seconds;
@@ -730,19 +927,18 @@ export component AnimationPanel inherits VerticalLayout {
     Section {
         first: true;
         SectionHeader {
-            title: "In";
+            title: I18n.t("In");
             HelpButton {
                 open: root.help;
                 toggled => { root.help = self.open; }
             }
         }
+        SectionBody {
         if root.help: Note {
-            text: "In and Out play over the clip's first and last seconds;"
-                + " Combo runs its whole length. Each moves the clip from"
-                + " where you placed it, so position it first.";
+            text: I18n.t("In and Out play over the clip's first and last seconds; Combo runs its whole length. Each moves the clip from where you placed it, so position it first.");
         }
         Row {
-            label: "Shape";
+            label: I18n.t("Shape");
             Select {
                 options: root.in-shapes;
                 current: root.selected.anim-in + 1;
@@ -750,7 +946,7 @@ export component AnimationPanel inherits VerticalLayout {
             }
         }
         if root.selected.anim-in >= 0: Param {
-            label: "Length";
+            label: I18n.t("Length");
             value <=> root.in-seconds;
             minimum: 0.1;
             maximum: root.limit;
@@ -759,12 +955,14 @@ export component AnimationPanel inherits VerticalLayout {
             fmt: ParamFormat.seconds2;
             changed(v) => { root.set(ClipField.anim-in-duration, v); root.commit(); }
         }
+        }
     }
 
     Section {
-        SectionHeader { title: "Out"; }
+        SectionHeader { title: I18n.t("Out"); }
+        SectionBody {
         Row {
-            label: "Shape";
+            label: I18n.t("Shape");
             Select {
                 options: root.out-shapes;
                 current: root.selected.anim-out + 1;
@@ -772,7 +970,7 @@ export component AnimationPanel inherits VerticalLayout {
             }
         }
         if root.selected.anim-out >= 0: Param {
-            label: "Length";
+            label: I18n.t("Length");
             value <=> root.out-seconds;
             minimum: 0.1;
             maximum: root.limit;
@@ -781,17 +979,20 @@ export component AnimationPanel inherits VerticalLayout {
             fmt: ParamFormat.seconds2;
             changed(v) => { root.set(ClipField.anim-out-duration, v); root.commit(); }
         }
+        }
     }
 
     Section {
-        SectionHeader { title: "Combo"; }
+        SectionHeader { title: I18n.t("Combo"); }
+        SectionBody {
         Row {
-            label: "Shape";
+            label: I18n.t("Shape");
             Select {
                 options: root.combo-shapes;
                 current: root.selected.anim-combo + 1;
                 changed(index) => { root.set(ClipField.anim-combo, index - 1); root.commit(); }
             }
+        }
         }
     }
 }
@@ -812,7 +1013,7 @@ export component AdjustPanel inherits VerticalLayout {
     Section {
         first: true;
         SectionHeader {
-            title: "Colour";
+            title: I18n.t("Colour");
             HelpButton {
                 open: root.help;
                 toggled => { root.help = self.open; }
@@ -820,26 +1021,26 @@ export component AdjustPanel inherits VerticalLayout {
         }
 
         if root.help: Note {
-            text: "Exposure is in stops; the rest is a signed percent of the"
-                + " picture as shot, and zero everywhere is the picture as"
-                + " shot. Double-click a knob to put it back.";
+            text: I18n.t("Exposure is in stops; the rest is a signed percent of the picture as shot, and zero everywhere is the picture as shot. Double-click a knob to put it back.");
         }
 
         // See PresetStack for why each row re-seeds its knob.
-        for p in root.params: Rectangle {
-            property <AppliedParamData> data: p;
-            height: knob.preferred-height;
-            changed data => { knob.value = self.data.value; }
+        SectionBody {
+            for p in root.params: Rectangle {
+                property <AppliedParamData> data: p;
+                height: knob.preferred-height;
+                changed data => { knob.value = self.data.value; }
 
-            knob := Param {
-                label: p.label;
-                value: p.value;
-                minimum: p.min;
-                maximum: p.max;
-                step: p.step;
-                default-value: p.default-value;
-                fmt: p.fmt;
-                changed(v) => { root.set(p.key, v); root.commit(); }
+                knob := Param {
+                    label: p.label;
+                    value: p.value;
+                    minimum: p.min;
+                    maximum: p.max;
+                    step: p.step;
+                    default-value: p.default-value;
+                    fmt: p.fmt;
+                    changed(v) => { root.set(p.key, v); root.commit(); }
+                }
             }
         }
     }
@@ -885,7 +1086,7 @@ export component FilterPanel inherits VerticalLayout {
     Section {
         first: true;
         layer := SectionHeader {
-            title: "Layer";
+            title: I18n.t("Layer");
             collapsible: true;
             summary: InspectorFmt.format(ParamFormat.fraction, root.strength);
             HelpButton {
@@ -894,15 +1095,14 @@ export component FilterPanel inherits VerticalLayout {
             }
         }
 
-        if layer.open: VerticalLayout {
+        if layer.open: SectionBody {
 
         if root.layer-help: Note {
-            text: "A layer treats everything under it for as long as it runs."
-                + " Trim it on the timeline to change what it covers.";
+            text: I18n.t("A layer treats everything under it for as long as it runs. Trim it on the timeline to change what it covers.");
         }
 
         Param {
-            label: "Strength";
+            label: I18n.t("Strength");
             value <=> root.strength;
             minimum: 0;
             maximum: 1;
@@ -917,15 +1117,15 @@ export component FilterPanel inherits VerticalLayout {
 
     Section {
         ramps := SectionHeader {
-            title: "Ramps";
+            title: I18n.t("Ramps");
             collapsible: true;
-            summary: (root.fade-in == 0 && root.fade-out == 0) ? "none"
+            summary: (root.fade-in == 0 && root.fade-out == 0) ? I18n.t("none")
                 : InspectorFmt.format(ParamFormat.seconds2, root.fade-in)
                     + " / " + InspectorFmt.format(ParamFormat.seconds2, root.fade-out);
         }
-        if ramps.open: VerticalLayout {
+        if ramps.open: SectionBody {
         Param {
-            label: "Ramp in";
+            label: I18n.t("Ramp in");
             value <=> root.fade-in;
             minimum: 0;
             maximum: root.ramp-limit;
@@ -934,7 +1134,7 @@ export component FilterPanel inherits VerticalLayout {
             changed(v) => { root.set(ClipField.fade-in, v); root.commit(); }
         }
         Param {
-            label: "Ramp out";
+            label: I18n.t("Ramp out");
             value <=> root.fade-out;
             minimum: 0;
             maximum: root.ramp-limit;

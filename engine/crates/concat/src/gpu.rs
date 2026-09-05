@@ -9,6 +9,10 @@
 //! Created before the backend is selected, because Slint takes the device at
 //! selection time; `None` when the machine offers no adapter, and then the
 //! window renders the way it did without one.
+//!
+//! On Android the backend owns its device and none is shared, so the type
+//! is carried and never opened there; see platform.rs.
+#![cfg_attr(target_os = "android", allow(dead_code))]
 
 /// The shared device and what it was created from.
 #[derive(Clone)]
@@ -26,8 +30,20 @@ pub struct Gpu {
 impl Gpu {
     /// Opens the machine's best adapter and a device on it.
     pub fn acquire() -> Option<Gpu> {
+        // Only the backend Slint's Skia renderer can share a device on:
+        // Skia is built against the platform's own API, so a device on any
+        // other backend is refused at selection time. PRIMARY let wgpu pick
+        // Vulkan on Windows machines that offer it, and the window then
+        // failed to open with "Unsupported WGPU backend for use with Skia".
+        let backends = if cfg!(target_vendor = "apple") {
+            wgpu::Backends::METAL
+        } else if cfg!(windows) {
+            wgpu::Backends::DX12
+        } else {
+            wgpu::Backends::VULKAN
+        };
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::PRIMARY,
+            backends,
             ..wgpu::InstanceDescriptor::new_without_display_handle()
         });
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {

@@ -4,6 +4,7 @@
 //! Numbers into words and shapes: timecode, curves, sizes, and the drawn
 //! waveform.
 
+use crate::i18n::{t, tf};
 use crate::ui::Bezier;
 
 /// x of a cubic bezier with endpoints pinned at 0 and 1, at parameter `t`.
@@ -52,6 +53,22 @@ pub fn bezier_y_at_x(x1: f32, y1: f32, x2: f32, y2: f32, x: f32) -> f32 {
         t = (lo + hi) / 2.0;
     }
     bezier_axis(y1, y2, t)
+}
+
+/// hh:mm:ss:ff, non-drop-frame, the way the ruler and the tray spell a
+/// moment - see `Fmt.frames-timecode` in util.slint, which this mirrors so
+/// the Details panel's duration reads like the readout beside it.
+pub fn frames_timecode(seconds: f32, rate: f32) -> String {
+    let rate = rate.round().max(1.0) as i64;
+    let frames = (seconds.max(0.0) * rate as f32).floor() as i64;
+    let whole = frames / rate;
+    format!(
+        "{:02}:{:02}:{:02}:{:02}",
+        whole / 3600,
+        (whole / 60) % 60,
+        whole % 60,
+        frames % rate
+    )
 }
 
 /// "hh:mm:ss", "mm:ss" or "ss" -> seconds. Slint's string type has no split().
@@ -140,14 +157,16 @@ pub fn bytes(count: f32) -> String {
 /// second on an estimate that is not accurate to the second is theatre.
 pub fn eta(seconds: f32) -> String {
     if seconds <= 1.0 {
-        "almost done".into()
+        t("almost done")
     } else if seconds < 60.0 {
-        format!("{:.0}s left", seconds)
+        tf("{0}s left", &[&format!("{seconds:.0}")])
     } else {
-        format!(
-            "{:.0}m {:02.0}s left",
-            (seconds / 60.0).floor(),
-            seconds % 60.0
+        tf(
+            "{0}m {1}s left",
+            &[
+                &format!("{:.0}", (seconds / 60.0).floor()),
+                &format!("{:02.0}", seconds % 60.0),
+            ],
         )
     }
 }
@@ -231,17 +250,17 @@ pub fn when_phrase(opened_at_millis: u64) -> String {
     let hours = minutes / 60;
     let days = hours / 24;
     if minutes < 2 {
-        "just now".into()
+        t("just now")
     } else if hours < 1 {
-        format!("{minutes} minutes ago")
+        tf("{0} minutes ago", &[&minutes])
     } else if days < 1 {
-        "today".into()
+        t("today")
     } else if days == 1 {
-        "yesterday".into()
+        t("yesterday")
     } else if days < 30 {
-        format!("{days} days ago")
+        tf("{0} days ago", &[&days])
     } else {
-        format!("{} months ago", days / 30)
+        tf("{0} months ago", &[&(days / 30)])
     }
 }
 

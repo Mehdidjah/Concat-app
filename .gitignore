@@ -59,3 +59,6 @@ desktop.ini
 /ffmpeg-dev/
 .vercel
 .env*.local
+# FFmpeg built for a phone by engine/scripts/ffmpeg-mobile.sh: sources,
+# build trees and the installed prefixes, all machine-built.
+/engine/vendor/

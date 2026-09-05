@@ -13,6 +13,8 @@
 //! separately and rejoin the exporter as plain image clips; see
 //! `ExportRequest`'s caller.
 
+use std::path::Path;
+
 use concat_project::model::{ClipKind as ModelClipKind, Project, Timeline};
 
 use crate::chains::{audio_filter_chain, video_effect_chain};
@@ -23,6 +25,17 @@ use crate::{ClipKind, ExportClip, ExportKey, TransitionSpec};
 /// separately and rejoin as image clips); a clip whose media or track has
 /// vanished is skipped with the same tolerance the document reader extends.
 pub fn flatten_timeline(project: &Project, timeline_id: Option<&str>) -> Vec<ExportClip> {
+    flatten_timeline_in(project, timeline_id, None)
+}
+
+/// [`flatten_timeline`], knowing the project folder: a clip with a cutout
+/// is then told where its media's masks are, and renders cut. Without the
+/// folder the cutout is carried but not rendered.
+pub fn flatten_timeline_in(
+    project: &Project,
+    timeline_id: Option<&str>,
+    project_dir: Option<&Path>,
+) -> Vec<ExportClip> {
     let Some(timeline) = pick_timeline(project, timeline_id) else {
         return Vec::new();
     };
@@ -71,6 +84,8 @@ pub fn flatten_timeline(project: &Project, timeline_id: Option<&str>) -> Vec<Exp
                     offset_x: 0.0,
                     offset_y: 0.0,
                     rotation: 0.0,
+                    stretch_x: 1.0,
+                    stretch_y: 1.0,
                     opacity: clip.opacity,
                     video_filter_chain: video_effect_chain(&clip.video_effects),
                     transition: None,
@@ -78,6 +93,8 @@ pub fn flatten_timeline(project: &Project, timeline_id: Option<&str>) -> Vec<Exp
                     media_width: None,
                     media_height: None,
                     has_audio: Some(false),
+                    cutout: None,
+                    mask_dir: String::new(),
                 });
             }
 
@@ -127,6 +144,8 @@ pub fn flatten_timeline(project: &Project, timeline_id: Option<&str>) -> Vec<Exp
                 offset_x: clip.offset_x,
                 offset_y: clip.offset_y,
                 rotation: clip.rotation,
+                stretch_x: clip.stretch_x,
+                stretch_y: clip.stretch_y,
                 opacity: clip.opacity,
                 video_filter_chain: video_effect_chain(&clip.video_effects),
                 // Passed through unconditionally: `resolve_transitions` is
@@ -145,6 +164,13 @@ pub fn flatten_timeline(project: &Project, timeline_id: Option<&str>) -> Vec<Exp
                 media_width: media.width,
                 media_height: media.height,
                 has_audio: Some(media.has_audio),
+                cutout: clip.cutout.clone(),
+                mask_dir: match (&clip.cutout, project_dir) {
+                    (Some(_), Some(dir)) => concat_vision::mask_dir(dir, &media.path)
+                        .to_string_lossy()
+                        .into_owned(),
+                    _ => String::new(),
+                },
             })
         })
         .collect()

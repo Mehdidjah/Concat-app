@@ -28,7 +28,7 @@ use concat_effects::manifest::Kind as PackageKind;
 use concat_host::export::{self, ExportSpec};
 use concat_host::playback::ClipSpec;
 use concat_host::preview::FrameSpec;
-use concat_host::{ProjectInfo, Session, media, projects, templates};
+use concat_host::{AnalyseRequest, Cutouts, ProjectInfo, Session, media, projects, templates};
 use concat_media::Peaks;
 use concat_project::commands::{ClipMove, ClipPatch, TrackFlag, TrimEdge};
 use concat_project::model::{
@@ -40,9 +40,13 @@ use slint::{Model, SharedString, VecModel};
 use crate::dock::{
     Dock, DockLayout, SEAT_GAP, default_dock, lay_out, nearest_row, row_at, row_top,
 };
-use crate::format::{bytes, colour_of, eta, hex_of, hex_with_alpha, wave_path, when_phrase};
+use crate::format::{
+    bytes, colour_of, eta, frames_timecode, hex_of, hex_with_alpha, wave_path, when_phrase,
+};
 use crate::host::{Host, MediaArt, image_at, image_of, media_art, on_ui, spawn};
+use crate::i18n::{self, t, tf};
 use crate::prefs::Preferences;
+use crate::presets::{self, TextPreset};
 use crate::ui::*;
 
 /// The monitor's output sizes, matching the picker's rows.
@@ -90,7 +94,11 @@ pub struct Strip {
 const WAVE_STEPS: f32 = 30.0;
 
 /// The export dialog's ladders, matching its rows.
-pub const EXPORT_SIZES: [(u32, u32); 4] = [(3840, 2160), (2560, 1440), (1920, 1080), (1280, 720)];
+/// The export sheet's resolution ladder, as the short side of the frame:
+/// 4K, QHD, 1080p, 720p. The long side follows the project's own aspect,
+/// so a 9:16 edit exports as 1080 x 1920 and a 21:9 one as 2520 x 1080 -
+/// the picker chooses how fine, never which way round.
+pub const EXPORT_SHORT_SIDES: [u32; 4] = [2160, 1440, 1080, 720];
 pub const EXPORT_RATES: [(i64, i64); 3] = [(24, 1), (30, 1), (60, 1)];
 /// Megabits per second at 1080p30 for each quality tier, for the size
 /// estimate; and the CRF each tier renders at.
@@ -117,16 +125,73 @@ pub const START_RATES: [(&str, i64, i64); 5] = [
     ("60", 60, 1),
 ];
 
-/// The interface's languages, as Settings > General lists them. One, until
-/// the `.slint` tree's strings are wrapped for translation.
-pub const LANGUAGES: [&str; 1] = ["English"];
-
 /// The transcriber's languages: the rows of the Auto / English / Chinese
 /// control in Settings > Transcriber, and the whisper code each means.
 pub const TRANSCRIBE_LANGUAGES: [&str; 3] = ["auto", "en", "zh"];
 
 /// The default Kokoro speaker: `af_heart`.
 const DEFAULT_VOICE: i32 = 3;
+
+/// The project sheet: the Details panel's Modify button, as a form.
+#[derive(Default)]
+pub struct ProjectSheet {
+    pub open: bool,
+    pub name: String,
+    /// Row in `OUTPUTS`, or -1 for a frame the list does not carry.
+    pub size: i32,
+    /// Row in `START_RATES`.
+    pub rate: usize,
+}
+
+/// The captions sheet: the tray's Captions tool, as a form and then as a
+/// progress report.
+#[derive(Default)]
+pub struct CaptionsSheet {
+    pub open: bool,
+    /// The clip being transcribed.
+    pub clip: Option<String>,
+    /// Row in `TRANSCRIBE_LANGUAGES`.
+    pub language: i32,
+    /// Row in the installed transcriber list.
+    pub model: usize,
+    /// 0 bottom, 1 centre, 2 top.
+    pub placement: usize,
+    /// 0 small, 1 medium, 2 large.
+    pub size: usize,
+    pub running: bool,
+    pub progress: f32,
+    /// Why the last run failed, when it did.
+    pub message: String,
+}
+
+/// The speech sheet: a title's words, or any words, read aloud.
+#[derive(Default)]
+pub struct SpeechSheet {
+    pub open: bool,
+    /// The title the words came from, and where the sound lands. None
+    /// reads a script of its own at the playhead.
+    pub clip: Option<String>,
+    pub text: String,
+    /// Row in `Studio::speakers`.
+    pub voice: usize,
+    /// Row in the installed voice model list.
+    pub model: usize,
+    /// 0 slower, 1 natural, 2 faster.
+    pub pace: usize,
+    pub running: bool,
+    pub progress: f32,
+    pub message: String,
+}
+
+/// The paces the speech sheet offers, as the voice's rate multiplier.
+const PACES: [f32; 3] = [0.85, 1.0, 1.15];
+/// Where a caption sits, by the sheet's row: a frame-height fraction from
+/// the centre, positive down. Bottom, centre, top.
+const CAPTION_OFFSETS: [f64; 3] = [0.35, 0.0, -0.35];
+/// A caption's cap height by the sheet's row, as a fraction of the frame.
+const CAPTION_SIZES: [f64; 3] = [0.04, 0.05, 0.065];
+/// A rough speaking rate, for the estimate under the script.
+const CHARS_PER_SECOND: f32 = 14.0;
 
 /// The export sheet's state.
 pub struct ExportState {
@@ -149,9 +214,7 @@ impl Default for ExportState {
         Self {
             open: false,
             name: "Untitled".into(),
-            folder: std::env::var("HOME")
-                .map(|home| format!("{home}/Movies"))
-                .unwrap_or_default(),
+            folder: home_folder("Movies"),
             resolution: 2,
             rate: 1,
             quality: 1,
@@ -162,6 +225,14 @@ impl Default for ExportState {
             written: String::new(),
         }
     }
+}
+
+/// `name` under the home directory, as a path string; empty when there is
+/// no home to speak of, and the form then asks for a folder outright.
+fn home_folder(name: &str) -> String {
+    std::env::var("HOME")
+        .map(|home| format!("{home}/{name}"))
+        .unwrap_or_default()
 }
 
 /// The settings sheet's state.
@@ -211,9 +282,13 @@ impl Default for StartState {
     fn default() -> Self {
         Self {
             name: "Untitled project".into(),
-            location: std::env::var("HOME")
-                .map(|home| format!("{home}/Desktop/Concat"))
-                .unwrap_or_default(),
+            // A phone has no desk: its projects live at the top of the
+            // folder the file manager shows for the app.
+            location: home_folder(if cfg!(target_os = "android") {
+                "Concat"
+            } else {
+                "Desktop/Concat"
+            }),
             resolution: 0,
             rate: 3,
             busy: false,
@@ -291,6 +366,24 @@ pub enum Gesture {
         /// a tall frame and a wide one scale at the same rate.
         centre: (f64, f64),
         from: f64,
+        /// Half the picture's bounds at the press, in frame fractions, so
+        /// an edge's position at any later scale is one multiplication.
+        half: (f64, f64),
+    },
+    /// An edge grip pulls one axis: the picture's stretch across or down,
+    /// about its centre, measured along the box's own axis so a turned
+    /// picture stretches along itself and not along the frame.
+    StageStretch {
+        clip: String,
+        /// The left and right edges pull the width; the others the height.
+        across: bool,
+        stretch: f64,
+        centre: (f64, f64),
+        /// The pointer's distance from the centre along the axis at the
+        /// press, in frame pixels.
+        from: f64,
+        /// The picture's turn, to project the pointer onto its axes.
+        rotation: f64,
     },
     /// The rotation grip dragged: the picture turns by the angle the pointer
     /// has swept about the centre since the press.
@@ -300,7 +393,25 @@ pub enum Gesture {
         centre: (f64, f64),
         from: f64,
     },
+    /// A brush on the stage: the stroke so far, in source fractions for
+    /// the command it becomes and in stage fractions for the line drawn
+    /// under the pointer meanwhile.
+    Paint {
+        clip: String,
+        tool: model::BrushTool,
+        size: f64,
+        points: Vec<[f64; 2]>,
+        screen: Vec<(f32, f32)>,
+    },
 }
+
+/// The custom cutout's brushes, in the inspector's order.
+pub const BRUSHES: [model::BrushTool; 4] = [
+    model::BrushTool::SmartBrush,
+    model::BrushTool::Brush,
+    model::BrushTool::SmartEraser,
+    model::BrushTool::Eraser,
+];
 
 /// Where a picture was when a stage move began.
 pub struct StageOrigin {
@@ -394,13 +505,19 @@ pub struct Models {
     /// The colour panel's knobs.
     pub adjust_params: Rc<VecModel<AppliedParamData>>,
     pub menu: Rc<VecModel<MenuItemData>>,
-    pub av: Rc<VecModel<MenuItemData>>,
     pub bar: Rc<VecModel<MenuItemData>>,
+    /// The sheets' option lists: what is installed, and who can speak.
+    pub caption_models: Rc<VecModel<SharedString>>,
+    pub speech_models: Rc<VecModel<SharedString>>,
+    pub speakers: Rc<VecModel<SharedString>>,
+    pub speaker_details: Rc<VecModel<SharedString>>,
     pub transcribers: Rc<VecModel<ModelData>>,
     pub voices: Rc<VecModel<ModelData>>,
     pub seats: Rc<VecModel<SeatBox>>,
     pub dividers: Rc<VecModel<DockDivider>>,
     pub recents: Rc<VecModel<RecentProjectData>>,
+    /// The Text page's presets, published once from the loaded list.
+    pub text_presets: Rc<VecModel<TextPresetData>>,
 }
 
 impl Models {
@@ -426,13 +543,17 @@ impl Models {
             audio_params: Rc::new(VecModel::default()),
             adjust_params: Rc::new(VecModel::default()),
             menu: Rc::new(VecModel::default()),
-            av: Rc::new(VecModel::default()),
             bar: Rc::new(VecModel::default()),
+            caption_models: Rc::new(VecModel::default()),
+            speech_models: Rc::new(VecModel::default()),
+            speakers: Rc::new(VecModel::default()),
+            speaker_details: Rc::new(VecModel::default()),
             transcribers: Rc::new(VecModel::default()),
             voices: Rc::new(VecModel::default()),
             seats: Rc::new(VecModel::default()),
             dividers: Rc::new(VecModel::default()),
             recents: Rc::new(VecModel::default()),
+            text_presets: Rc::new(VecModel::default()),
         }
     }
 }
@@ -519,7 +640,6 @@ pub struct Studio {
     pub settings: SettingsState,
     pub transcribers: Vec<ModelState>,
     pub voices: Vec<ModelState>,
-    pub av_token: i32,
     pub open_menu: i32,
     pub menu_bar_token: i32,
     pub menu_target: Option<String>,
@@ -554,6 +674,27 @@ pub struct Studio {
     /// text clip is drawn from; see `footprint`.
     pub title_blocks: HashMap<String, (u32, u32)>,
     pub drop: Option<DropPlan>,
+    pub project_sheet: ProjectSheet,
+    pub captions: CaptionsSheet,
+    pub speech: SpeechSheet,
+    /// Every speaker the voice engine offers, in its own order.
+    pub speakers: Vec<concat_speech::tts::VoiceInfo>,
+    /// The looks the Text page offers; see `presets`.
+    pub text_presets: Vec<TextPreset>,
+
+    /// The languages Settings › General offers, in its order; see `i18n`.
+    pub languages: Vec<i18n::Language>,
+
+    // ── cutouts ──
+    /// The brush a custom cutout paints with: a row of `BRUSHES`.
+    pub brush: usize,
+    /// The brush's diameter, as a fraction of the picture's width.
+    pub brush_size: f64,
+    /// Whether a press on the stage paints the selected custom cutout
+    /// rather than moving the picture.
+    pub painting: bool,
+    /// The mask analyses running, by media id, and how far each has got.
+    cutout_jobs: HashMap<String, f32>,
 }
 
 // ── conversions between the document and the window ─────────────────────
@@ -612,6 +753,8 @@ fn shelves(kind: PackageKind) -> (Vec<SharedString>, Vec<CatalogueEntryData>) {
         } else {
             meta.category.clone()
         };
+        // Shelf and package names come from the manifests in English and
+        // are looked up like any other string, so a locale can carry them.
         let group = match groups.iter().position(|held| *held == category) {
             Some(index) => index,
             None => {
@@ -621,14 +764,17 @@ fn shelves(kind: PackageKind) -> (Vec<SharedString>, Vec<CatalogueEntryData>) {
         };
         entries.push(CatalogueEntryData {
             id: meta.id.as_str().into(),
-            name: meta.name.as_str().into(),
-            category: category.as_str().into(),
+            name: t(&meta.name).into(),
+            category: t(&category).into(),
             group: group as i32,
-            description: meta.description.as_str().into(),
+            description: t(&meta.description).into(),
         });
     }
     (
-        groups.into_iter().map(SharedString::from).collect(),
+        groups
+            .into_iter()
+            .map(|group| SharedString::from(t(&group)))
+            .collect(),
         entries,
     )
 }
@@ -658,6 +804,7 @@ fn commit_key(commands: &[Command]) -> String {
         .iter()
         .map(|command| match command {
             Command::SetClipTransform { .. } => "transform".to_owned(),
+            Command::SetClipCutout { .. } => "cutout".to_owned(),
             Command::SetClipSpeed { .. } => "speed".to_owned(),
             Command::SetClipSpeedCurve { .. } => "curve".to_owned(),
             Command::SetClipAnimation { slot, .. } => format!("animation:{slot:?}"),
@@ -749,7 +896,7 @@ fn adjust_rows(chain: &[AppliedFilter]) -> Vec<AppliedParamData> {
         .map(|param| AppliedParamData {
             entry: -1,
             key: param.key.as_str().into(),
-            label: param.label.as_str().into(),
+            label: t(&param.label).into(),
             min: param.min as f32,
             max: param.max as f32,
             step: if param.step > 0.0 {
@@ -799,7 +946,7 @@ fn chain_rows(chain: &[AppliedFilter]) -> (Vec<AppliedEntryData>, Vec<AppliedPar
             knobs.push(AppliedParamData {
                 entry: index as i32,
                 key: concat_effects::catalogue::INTENSITY.into(),
-                label: "Intensity".into(),
+                label: t("Intensity").into(),
                 min: 0.0,
                 max: 100.0,
                 step: 1.0,
@@ -821,7 +968,7 @@ fn chain_rows(chain: &[AppliedFilter]) -> (Vec<AppliedEntryData>, Vec<AppliedPar
             knobs.push(AppliedParamData {
                 entry: index as i32,
                 key: param.key.as_str().into(),
-                label: param.label.as_str().into(),
+                label: t(&param.label).into(),
                 min: param.min as f32,
                 max: param.max as f32,
                 step: step as f32,
@@ -856,7 +1003,12 @@ impl Studio {
     /// read off disk.
     pub fn new(host: Host) -> Self {
         let prefs = Preferences::load(&host.dirs);
+        // The words first, so everything published from here on is in
+        // the remembered language.
+        i18n::select(prefs.locale.as_deref().unwrap_or(i18n::ENGLISH), &host.dirs);
+        let languages = i18n::languages(&host.dirs);
         let recents = projects::list(&host.dirs.config);
+        let text_presets = presets::all(&host.dirs);
         let mut studio = Self {
             prefs,
             session: None,
@@ -893,7 +1045,6 @@ impl Studio {
             settings: SettingsState::default(),
             transcribers: Vec::new(),
             voices: Vec::new(),
-            av_token: 0,
             open_menu: -1,
             menu_bar_token: 0,
             menu_target: None,
@@ -914,9 +1065,23 @@ impl Studio {
             last_commit: None,
             title_blocks: HashMap::new(),
             drop: None,
+            project_sheet: ProjectSheet::default(),
+            captions: CaptionsSheet::default(),
+            speech: SpeechSheet::default(),
+            speakers: Vec::new(),
+            text_presets,
+            languages,
+            brush: 0,
+            brush_size: 0.06,
+            painting: true,
+            cutout_jobs: HashMap::new(),
             host,
         };
-        studio.settings.language = studio.prefs.language.unwrap_or(0);
+        studio.settings.language = studio
+            .languages
+            .iter()
+            .position(|language| Some(language.code.as_str()) == studio.prefs.locale.as_deref())
+            .unwrap_or(0);
         studio.settings.transcribe_language = studio.prefs.transcribe_language.unwrap_or(0);
         studio.refresh_models();
         studio
@@ -1007,8 +1172,10 @@ impl Studio {
                     .filter(|clip| clip.track_id == lane.id)
                     .map(|clip| match clip.kind {
                         model::ClipKind::Video | model::ClipKind::Image => LANE_LARGE,
-                        model::ClipKind::Audio | model::ClipKind::Text => LANE_MEDIUM,
-                        model::ClipKind::Layer => LANE_SMALL,
+                        model::ClipKind::Audio => LANE_MEDIUM,
+                        // A title is its name strip alone; a layer has no
+                        // picture at all. Neither needs a body's height.
+                        model::ClipKind::Text | model::ClipKind::Layer => LANE_SMALL,
                     })
                     .fold(0.0_f32, f32::max);
                 if tallest > 0.0 { tallest } else { LANE_MEDIUM }
@@ -1103,6 +1270,7 @@ impl Studio {
         self.sync_audio();
         self.request_media_art();
         self.request_preview();
+        self.ensure_cutouts();
     }
 
     pub fn undo(&mut self) {
@@ -1164,11 +1332,11 @@ impl Studio {
         spawn(
             move || projects::save(&path, &document),
             move |studio, _, _, result| match result {
-                Ok(()) if announce => studio.notify("Project saved", false),
+                Ok(()) if announce => studio.notify(&t("Project saved"), false),
                 Ok(()) => {}
                 Err(error) => {
                     studio.dirty = true;
-                    studio.notify(&format!("Could not save: {error}"), true);
+                    studio.notify(&tf("Could not save: {0}", &[&error]), true);
                 }
             },
         );
@@ -1293,7 +1461,7 @@ impl Studio {
                         eprintln!("concat: preview: {error}");
                         if !studio.preview_failed {
                             studio.preview_failed = true;
-                            studio.notify(&format!("Preview failed: {error}"), true);
+                            studio.notify(&tf("Preview failed: {0}", &[&error]), true);
                         }
                     }
                 }
@@ -1492,7 +1660,11 @@ impl Studio {
                     studio.notify(&crate::host::probe_error(error), true);
                 } else if added > 0 {
                     studio.notify(
-                        &format!("Imported {added} file{}", if added == 1 { "" } else { "s" }),
+                        &if added == 1 {
+                            t("Imported 1 file")
+                        } else {
+                            tf("Imported {0} files", &[&added])
+                        },
                         false,
                     );
                 }
@@ -1650,10 +1822,12 @@ impl Studio {
                     row: 0,
                 })
             }
+            // A title: the preset's id rides where a file's media id would,
+            // "default" for the plain one.
             "text" => Some(DropPlan {
                 kind: ClipKind::Text,
                 label: label.to_owned(),
-                media: String::new(),
+                media: id.to_owned(),
                 start: 0.0,
                 duration: LAYER_DURATION,
                 row: 0,
@@ -1698,13 +1872,12 @@ impl Studio {
             return;
         };
         let created = if plan.kind == ClipKind::Text {
-            self.apply(Command::AddTextClip {
-                track_id: Some(track_id),
-                start: f64::from(plan.start),
-                style: Some(new_title_style()),
-                duration: Some(f64::from(plan.duration)),
-                offset_y: None,
-            })
+            self.add_title(
+                Some(track_id),
+                f64::from(plan.start),
+                f64::from(plan.duration),
+                &plan.media,
+            )
         } else if plan.kind == ClipKind::Filter {
             self.apply(Command::AddLayerClip {
                 track_id: Some(track_id),
@@ -1733,13 +1906,7 @@ impl Studio {
         };
         let start = f64::from(self.playhead.max(0.0));
         let created = if plan.kind == ClipKind::Text {
-            self.apply(Command::AddTextClip {
-                track_id: None,
-                start,
-                style: Some(new_title_style()),
-                duration: Some(f64::from(plan.duration)),
-                offset_y: None,
-            })
+            self.add_title(None, start, f64::from(plan.duration), &plan.media)
         } else if plan.kind == ClipKind::Filter {
             self.apply(Command::AddLayerClip {
                 track_id: None,
@@ -1759,6 +1926,41 @@ impl Studio {
         }
     }
 
+    /// Places a title in the look a preset names - "default" for the plain
+    /// title - and, when the preset brings a font, registers the font on
+    /// the project in the same step, so the painter finds it the first
+    /// time it draws the words.
+    fn add_title(
+        &mut self,
+        track_id: Option<String>,
+        start: f64,
+        duration: f64,
+        preset: &str,
+    ) -> Option<String> {
+        let (style, offset_y, font) = match self.text_presets.iter().find(|held| held.id == preset)
+        {
+            Some(found) => (
+                found.style.clone(),
+                found.offset_y,
+                presets::install_font(&self.host.dirs, found),
+            ),
+            None => (new_title_style(), None, None),
+        };
+        let add = Command::AddTextClip {
+            track_id,
+            start,
+            style: Some(style),
+            duration: Some(duration),
+            offset_y,
+        };
+        match font {
+            Some((family, path)) => self.apply(Command::Batch {
+                commands: vec![Command::AddFont { family, path }, add],
+            }),
+            None => self.apply(add),
+        }
+    }
+
     /// The selected clip's id, when exactly one is selected.
     pub fn sole_selection(&self) -> Option<String> {
         (self.selection.len() == 1).then(|| self.selection[0].clone())
@@ -1767,14 +1969,17 @@ impl Studio {
     /// A catalogue filter or effect, applied to the selected clip's chain.
     pub fn apply_catalogue(&mut self, id: &str, video: bool) {
         let Some(clip_id) = self.sole_selection() else {
-            self.notify("Select a clip on the timeline first", true);
+            self.notify(&t("Select a clip on the timeline first"), true);
             return;
         };
         let Some(clip) = self.clip(&clip_id).cloned() else {
             return;
         };
         if video && !clip.kind.is_visual() {
-            self.notify("Select a video or image clip on the timeline first", true);
+            self.notify(
+                &t("Select a video or image clip on the timeline first"),
+                true,
+            );
             return;
         }
         if !video && clip.kind == model::ClipKind::Image {
@@ -1824,14 +2029,17 @@ impl Studio {
 
     pub fn apply_transition(&mut self, id: &str) {
         let Some(clip_id) = self.sole_selection() else {
-            self.notify("Select the clip the transition leads into", true);
+            self.notify(&t("Select the clip the transition leads into"), true);
             return;
         };
         if !self
             .clip(&clip_id)
             .is_some_and(|clip| clip.kind.is_visual())
         {
-            self.notify("Select a video or image clip on the timeline first", true);
+            self.notify(
+                &t("Select a video or image clip on the timeline first"),
+                true,
+            );
             return;
         }
         self.apply(Command::UpdateClip {
@@ -2156,7 +2364,9 @@ impl Studio {
             Gesture::None
             | Gesture::StageMove { .. }
             | Gesture::StageScale { .. }
-            | Gesture::StageRotate { .. } => {}
+            | Gesture::StageRotate { .. }
+            | Gesture::StageStretch { .. }
+            | Gesture::Paint { .. } => {}
         }
         self.gesture = gesture;
     }
@@ -2216,7 +2426,9 @@ impl Studio {
             // Not a lane gesture: hand it back untouched, echo and all.
             other @ (Gesture::StageMove { .. }
             | Gesture::StageScale { .. }
-            | Gesture::StageRotate { .. }) => {
+            | Gesture::StageRotate { .. }
+            | Gesture::StageStretch { .. }
+            | Gesture::Paint { .. }) => {
                 self.gesture = other;
             }
         }
@@ -2238,10 +2450,16 @@ impl Studio {
         let text = clip.text.get_or_insert_with(TextStyle::default);
         match field {
             ClipField::Scale => clip.scale = value.clamp(0.05, 8.0),
+            ClipField::StretchX => clip.stretch_x = value.clamp(0.1, 10.0),
+            ClipField::StretchY => clip.stretch_y = value.clamp(0.1, 10.0),
             ClipField::OffsetX => clip.offset_x = value.clamp(-1.0, 1.0),
             ClipField::OffsetY => clip.offset_y = value.clamp(-1.0, 1.0),
             ClipField::Rotation => clip.rotation = value.clamp(-180.0, 180.0),
             ClipField::Opacity => clip.opacity = value.clamp(0.0, 1.0),
+            ClipField::CutoutFeather => {
+                clip.cutout.get_or_insert_with(model::Cutout::auto).feather =
+                    value.clamp(0.0, model::MAX_FEATHER);
+            }
             ClipField::Volume => clip.volume = value.max(0.0),
             ClipField::Speed => {
                 let speed = value.clamp(0.0625, 16.0);
@@ -2420,6 +2638,8 @@ impl Studio {
             || after.offset_x != before.offset_x
             || after.offset_y != before.offset_y
             || after.rotation != before.rotation
+            || after.stretch_x != before.stretch_x
+            || after.stretch_y != before.stretch_y
         {
             commands.push(Command::SetClipTransform {
                 clip_id: id.clone(),
@@ -2427,6 +2647,14 @@ impl Studio {
                 offset_x: Some(after.offset_x),
                 offset_y: Some(after.offset_y),
                 rotation: Some(after.rotation),
+                stretch_x: Some(after.stretch_x),
+                stretch_y: Some(after.stretch_y),
+            });
+        }
+        if after.cutout != before.cutout {
+            commands.push(Command::SetClipCutout {
+                clip_id: id.clone(),
+                cutout: after.cutout.clone(),
             });
         }
         if after.speed_curve != before.speed_curve {
@@ -2616,6 +2844,8 @@ impl Studio {
                 None => (clip.scale, clip.scale),
             }
         };
+        // Then pulled along each axis, as the compositor pulls it.
+        let (w, h) = (w * clip.stretch_x, h * clip.stretch_y);
         // The placement at the playhead: the clip's own, moved by its
         // animation, so the box follows a slide or a spin.
         let base = concat_core::timeline::Transform {
@@ -2623,6 +2853,8 @@ impl Studio {
             offset_x: clip.offset_x,
             offset_y: clip.offset_y,
             rotation: clip.rotation,
+            stretch_x: clip.stretch_x,
+            stretch_y: clip.stretch_y,
         };
         let placed = match concat_project::animation::animation_of(clip) {
             Some(animation) if clip.duration > 0.0 => {
@@ -2704,6 +2936,17 @@ impl Studio {
     /// of everything selected that is under the playhead. Empty stage
     /// clears the selection, as an empty lane does.
     pub fn stage_pressed(&mut self, x: f32, y: f32, additive: bool) {
+        if let Some(clip) = self.paint_target() {
+            let point = self.stage_to_source(&clip, f64::from(x), f64::from(y));
+            self.gesture = Gesture::Paint {
+                clip: clip.id.clone(),
+                tool: BRUSHES[self.brush.min(BRUSHES.len() - 1)],
+                size: self.brush_size,
+                points: vec![point],
+                screen: vec![(x, y)],
+            };
+            return;
+        }
         let (x, y) = (f64::from(x), f64::from(y));
         let Some(id) = self.stage_hit(x, y) else {
             if !additive {
@@ -2782,6 +3025,7 @@ impl Studio {
         );
         let dx = f64::from(x) * f64::from(width) - centre.0;
         let dy = f64::from(y) * f64::from(height) - centre.1;
+        let half = footprint.half_bounds((width, height));
         self.begin_echo();
         self.gesture = if grip == 4 {
             Gesture::StageRotate {
@@ -2790,12 +3034,35 @@ impl Studio {
                 centre,
                 from: dy.atan2(dx),
             }
+        } else if grip >= 5 {
+            // 5 top, 6 right, 7 bottom, 8 left: the pointer's offset from
+            // the centre, turned back into the box's own frame.
+            let across = grip == 6 || grip == 8;
+            let (sin, cos) = clip.rotation.to_radians().sin_cos();
+            let along = if across {
+                dx * cos + dy * sin
+            } else {
+                -dx * sin + dy * cos
+            };
+            Gesture::StageStretch {
+                clip: id.to_owned(),
+                across,
+                stretch: if across {
+                    clip.stretch_x
+                } else {
+                    clip.stretch_y
+                },
+                centre,
+                from: along.abs().max(1.0),
+                rotation: clip.rotation,
+            }
         } else {
             Gesture::StageScale {
                 clip: id.to_owned(),
                 scale: clip.scale,
                 centre,
                 from: dx.hypot(dy).max(1.0),
+                half,
             }
         };
     }
@@ -2803,9 +3070,23 @@ impl Studio {
     /// The pointer moved with a stage gesture live: the echo follows, and
     /// the monitor composites it.
     pub fn stage_dragged(&mut self, x: f32, y: f32, snap: bool) {
+        let mut gesture = std::mem::replace(&mut self.gesture, Gesture::None);
+        if let Gesture::Paint {
+            clip,
+            points,
+            screen,
+            ..
+        } = &mut gesture
+        {
+            if let Some(clip) = self.clip(clip).cloned() {
+                points.push(self.stage_to_source(&clip, f64::from(x), f64::from(y)));
+                screen.push((x, y));
+            }
+            self.gesture = gesture;
+            return;
+        }
         let (x, y) = (f64::from(x), f64::from(y));
         let (width, height) = self.output_size();
-        let gesture = std::mem::replace(&mut self.gesture, Gesture::None);
         match &gesture {
             Gesture::StageMove {
                 primary,
@@ -2882,6 +3163,7 @@ impl Studio {
                 scale,
                 centre,
                 from,
+                half,
             } => {
                 let dx = x * f64::from(width) - centre.0;
                 let dy = y * f64::from(height) - centre.1;
@@ -2889,8 +3171,89 @@ impl Studio {
                 if snap {
                     next = (next * 20.0).round() / 20.0;
                 }
+                self.stage_guides.clear();
+                if self.snap && *scale > 0.0 {
+                    // The edges pull to the same lines a move pulls to - the
+                    // frame's, and every other picture's - but here the pull
+                    // sets the size, not the place: the scale that lands the
+                    // nearest edge on its target, when one is inside reach.
+                    let pull = 0.01 * f64::from(width.max(height));
+                    let frame = (width, height);
+                    let (cx, cy) = (centre.0 / f64::from(width), centre.1 / f64::from(height));
+                    let mut xs = vec![0.0, 0.5, 1.0];
+                    let mut ys = vec![0.0, 0.5, 1.0];
+                    for other in self.stage_clips() {
+                        if other.id == *clip {
+                            continue;
+                        }
+                        let footprint = self.footprint(other);
+                        let (ow, oh) = footprint.half_bounds(frame);
+                        xs.extend([footprint.cx - ow, footprint.cx, footprint.cx + ow]);
+                        ys.extend([footprint.cy - oh, footprint.cy, footprint.cy + oh]);
+                    }
+                    // Four edges: each is the centre plus or minus a half
+                    // bound that grows with the scale.
+                    let edges = [
+                        (-1.0, half.0, cx, &xs, true, width),
+                        (1.0, half.0, cx, &xs, true, width),
+                        (-1.0, half.1, cy, &ys, false, height),
+                        (1.0, half.1, cy, &ys, false, height),
+                    ];
+                    let mut best: Option<(f64, f64, bool, f64)> = None;
+                    for (sign, base, at_centre, targets, vertical, extent) in edges {
+                        if base <= 0.0 {
+                            continue;
+                        }
+                        let edge = at_centre + sign * base * next / scale;
+                        for &target in targets.iter() {
+                            let distance = (target - edge).abs() * f64::from(extent);
+                            let wanted = (target - at_centre) * sign;
+                            if distance < pull
+                                && wanted > 0.0
+                                && best.is_none_or(|(held, ..)| distance < held)
+                            {
+                                best = Some((distance, scale * wanted / base, vertical, target));
+                            }
+                        }
+                    }
+                    if let Some((_, snapped, vertical, at)) = best {
+                        next = snapped;
+                        self.stage_guides.push(StageGuideData {
+                            vertical,
+                            at: at as f32,
+                        });
+                    }
+                }
                 if let Some(clip) = self.echo_clip_mut(clip) {
                     clip.scale = next.clamp(0.05, 8.0);
+                }
+            }
+            Gesture::StageStretch {
+                clip,
+                across,
+                stretch,
+                centre,
+                from,
+                rotation,
+            } => {
+                let dx = x * f64::from(width) - centre.0;
+                let dy = y * f64::from(height) - centre.1;
+                let (sin, cos) = rotation.to_radians().sin_cos();
+                let along = if *across {
+                    dx * cos + dy * sin
+                } else {
+                    -dx * sin + dy * cos
+                };
+                let mut next = stretch * along.abs() / from;
+                if snap {
+                    next = (next * 20.0).round() / 20.0;
+                }
+                if let Some(clip) = self.echo_clip_mut(clip) {
+                    if *across {
+                        clip.stretch_x = next.clamp(0.1, 10.0);
+                    } else {
+                        clip.stretch_y = next.clamp(0.1, 10.0);
+                    }
                 }
             }
             Gesture::StageRotate {
@@ -2931,7 +3294,23 @@ impl Studio {
             Gesture::StageMove { origins, .. } => {
                 origins.into_iter().map(|origin| origin.clip).collect()
             }
-            Gesture::StageScale { clip, .. } | Gesture::StageRotate { clip, .. } => vec![clip],
+            Gesture::StageScale { clip, .. }
+            | Gesture::StageRotate { clip, .. }
+            | Gesture::StageStretch { clip, .. } => vec![clip],
+            Gesture::Paint {
+                clip,
+                tool,
+                size,
+                points,
+                ..
+            } => {
+                // The stroke becomes one command, and one undo step.
+                self.apply(Command::AddCutoutStroke {
+                    clip_id: clip,
+                    stroke: model::Stroke { tool, size, points },
+                });
+                return;
+            }
             other => {
                 // Not ours to end; a lane gesture is still live.
                 self.gesture = other;
@@ -2955,6 +3334,8 @@ impl Studio {
                 || after.offset_x != before.offset_x
                 || after.offset_y != before.offset_y
                 || after.rotation != before.rotation
+                || after.stretch_x != before.stretch_x
+                || after.stretch_y != before.stretch_y
             {
                 commands.push(Command::SetClipTransform {
                     clip_id: id,
@@ -2962,6 +3343,8 @@ impl Studio {
                     offset_x: Some(after.offset_x),
                     offset_y: Some(after.offset_y),
                     rotation: Some(after.rotation),
+                    stretch_x: Some(after.stretch_x),
+                    stretch_y: Some(after.stretch_y),
                 });
             }
         }
@@ -2978,6 +3361,250 @@ impl Studio {
                 self.apply(Command::Batch { commands });
             }
         }
+    }
+
+    // ── cutouts ──
+    //
+    // A cutout is a mask per source instant, found by the host's model and
+    // cached in the project folder. The window's part is to notice which
+    // media need masks they do not have, run one analysis at a time, and
+    // turn a brush on the stage into strokes on the document.
+
+    /// Starts the analysis for the first media whose cutout wants masks
+    /// that are not there, unless one is running. Called after every
+    /// change; the finished job calls it again for whatever is next.
+    pub fn ensure_cutouts(&mut self) {
+        if !self.cutout_jobs.is_empty() || self.host.cutouts.is_busy() {
+            return;
+        }
+        let Some(session) = self.session.as_ref() else {
+            return;
+        };
+        let project = std::path::PathBuf::from(session.path());
+        let mut wanted: Vec<(String, AnalyseRequest)> = Vec::new();
+        for clip in &self.timeline().clips {
+            if clip.cutout.is_none() || !clip.kind.is_visual() {
+                continue;
+            }
+            let Some(media) = self.project().media_by_id(&clip.media_id) else {
+                continue;
+            };
+            // The source the clip shows: its in-point, for as long as it
+            // runs at its speed. A curve's mean is its speed, so this
+            // covers a curved clip too.
+            let range = (
+                clip.source_start,
+                clip.source_start + clip.duration * clip.speed.max(0.0625),
+            );
+            match wanted.iter_mut().find(|(id, _)| *id == media.id) {
+                Some((_, request)) => request.ranges.push(range),
+                None => wanted.push((
+                    media.id.clone(),
+                    AnalyseRequest {
+                        project: project.clone(),
+                        media_path: media.path.clone(),
+                        still: media.kind == model::MediaKind::Image,
+                        ranges: vec![range],
+                    },
+                )),
+            }
+        }
+        let Some((id, request)) = wanted
+            .into_iter()
+            .find(|(_, request)| Cutouts::outstanding(request) > 0)
+        else {
+            return;
+        };
+        self.cutout_jobs.insert(id.clone(), 0.0);
+        let cutouts = Arc::clone(&self.host.cutouts);
+        spawn(
+            move || {
+                let mut last = -1.0f32;
+                let reporting = id.clone();
+                let result = cutouts.analyse(&request, &mut |progress| {
+                    // Every percent, not every frame: the readout cannot
+                    // use more and the event loop has other work.
+                    if progress - last >= 0.01 {
+                        last = progress;
+                        let id = reporting.clone();
+                        on_ui(move |studio, _, _| {
+                            if let Some(held) = studio.cutout_jobs.get_mut(&id) {
+                                *held = progress;
+                            }
+                        });
+                    }
+                });
+                (id, result)
+            },
+            |studio, _, _, (id, result)| {
+                studio.cutout_jobs.remove(&id);
+                match result {
+                    Ok(_) => {
+                        // The monitor shows the cut, and whatever else is
+                        // waiting gets its turn.
+                        studio.request_preview();
+                        studio.ensure_cutouts();
+                    }
+                    Err(error) if error.contains("cancelled") => {}
+                    Err(error) => studio.notify(&tf("Remove background: {0}", &[&error]), true),
+                }
+            },
+        );
+    }
+
+    /// The Mode row: 0 off, 1 automatic, 2 custom. The chroma rows are the
+    /// inspector's own business, on the chain.
+    pub fn cutout_mode(&mut self, mode: i32) {
+        let Some(id) = self.sole_selection() else {
+            return;
+        };
+        let Some(clip) = self.clip(&id).cloned() else {
+            return;
+        };
+        let held = clip.cutout.clone().unwrap_or_else(model::Cutout::auto);
+        let cutout = match mode {
+            1 => Some(model::Cutout {
+                mode: model::CutoutMode::Auto,
+                ..held
+            }),
+            2 => Some(model::Cutout {
+                mode: model::CutoutMode::Custom,
+                ..held
+            }),
+            _ => None,
+        };
+        if mode == 2 {
+            self.painting = true;
+        }
+        if cutout != clip.cutout {
+            self.apply(Command::SetClipCutout {
+                clip_id: id,
+                cutout,
+            });
+        }
+    }
+
+    /// Takes every stroke off the selected clip's cutout, keeping it custom.
+    pub fn cutout_clear(&mut self) {
+        let Some(id) = self.sole_selection() else {
+            return;
+        };
+        let Some(cutout) = self.clip(&id).and_then(|clip| clip.cutout.clone()) else {
+            return;
+        };
+        if cutout.strokes.is_empty() {
+            return;
+        }
+        self.apply(Command::SetClipCutout {
+            clip_id: id,
+            cutout: Some(model::Cutout {
+                strokes: Vec::new(),
+                ..cutout
+            }),
+        });
+    }
+
+    pub fn cutout_tool(&mut self, index: i32) {
+        self.brush = index.clamp(0, BRUSHES.len() as i32 - 1) as usize;
+    }
+
+    pub fn cutout_size(&mut self, size: f32) {
+        self.brush_size = f64::from(size).clamp(model::MIN_BRUSH, model::MAX_BRUSH);
+    }
+
+    pub fn cutout_painting(&mut self, on: bool) {
+        self.painting = on;
+    }
+
+    /// The picture a press on the stage would paint: the one selected clip,
+    /// under the playhead, with a custom cutout, while painting is on.
+    fn paint_target(&self) -> Option<Clip> {
+        if !self.painting {
+            return None;
+        }
+        let id = self.sole_selection()?;
+        let clip = self.clip(&id)?;
+        let custom = clip
+            .cutout
+            .as_ref()
+            .is_some_and(|cutout| cutout.mode == model::CutoutMode::Custom);
+        if !custom || !clip.kind.is_visual() || self.locked(&clip.track_id) {
+            return None;
+        }
+        self.stage_clips()
+            .into_iter()
+            .any(|shown| shown.id == clip.id)
+            .then(|| clip.clone())
+    }
+
+    /// Where a stage point lands in the source picture, in the fractions a
+    /// stroke is stored in: the footprint's turn undone, then the crop and
+    /// the flips, the same way a decoded pixel finds its mask.
+    fn stage_to_source(&self, clip: &Clip, x: f64, y: f64) -> [f64; 2] {
+        let footprint = self.footprint(clip);
+        let (width, height) = self.output_size();
+        let (width, height) = (f64::from(width.max(1)), f64::from(height.max(1)));
+        let dx = (x - footprint.cx) * width;
+        let dy = (y - footprint.cy) * height;
+        let (sin, cos) = footprint.rotation.to_radians().sin_cos();
+        let along = dx * cos + dy * sin;
+        let down = -dx * sin + dy * cos;
+        let px = along / (footprint.w * width).max(1e-6) + 0.5;
+        let py = down / (footprint.h * height).max(1e-6) + 0.5;
+        let mapping = concat_vision::Mapping {
+            crop: clip
+                .crop
+                .map(|crop| {
+                    [
+                        crop.left as f32,
+                        crop.top as f32,
+                        crop.right as f32,
+                        crop.bottom as f32,
+                    ]
+                })
+                .unwrap_or([0.0; 4]),
+            flip_h: clip.flip_h,
+            flip_v: clip.flip_v,
+        };
+        let (u, v) = mapping.source_of(px as f32, py as f32);
+        [f64::from(u), f64::from(v)]
+    }
+
+    /// The stroke in flight as the stage draws it: path commands over a
+    /// 1000 × 1000 viewbox, the line's width as a fraction of the stage,
+    /// and whether it is taking away. Empty between strokes.
+    fn stroke_overlay(&self) -> (String, f32, bool) {
+        let Gesture::Paint {
+            clip,
+            tool,
+            size,
+            screen,
+            ..
+        } = &self.gesture
+        else {
+            return (String::new(), 0.0, false);
+        };
+        let Some((first, rest)) = screen.split_first() else {
+            return (String::new(), 0.0, false);
+        };
+        let mut path = format!("M {:.1} {:.1}", first.0 * 1000.0, first.1 * 1000.0);
+        // A single press still draws a dot: a line to where it already is,
+        // with round caps.
+        for (x, y) in rest.iter().chain(rest.is_empty().then_some(first)) {
+            path.push_str(&format!(" L {:.1} {:.1}", x * 1000.0, y * 1000.0));
+        }
+        // The brush is `size` of the picture's width; on the stage that is
+        // `size` of the picture's footprint.
+        let width = self
+            .clip(clip)
+            .map(|clip| self.footprint(clip).w)
+            .unwrap_or(1.0) as f32
+            * *size as f32;
+        let erase = matches!(
+            tool,
+            model::BrushTool::Eraser | model::BrushTool::SmartEraser
+        );
+        (path, width, erase)
     }
 
     // ── edits from menus and the tray ──
@@ -3025,7 +3652,7 @@ impl Studio {
 
     pub fn merge_blocked(&self) -> Option<String> {
         if self.selection.len() != 2 {
-            return Some("Select two clips to merge".to_owned());
+            return Some(t("Select two clips to merge"));
         }
         why_not_merge(self.timeline(), &self.selection)
     }
@@ -3106,15 +3733,26 @@ impl Studio {
         self.selection = vec![created];
     }
 
-    /// Sound to detach, or a title's words to speak - the tray only hangs
-    /// the A/V menu when the selection has something to offer it.
-    pub fn has_av_tools(&self) -> bool {
-        self.sole_selection()
-            .and_then(|id| {
-                self.clip(&id)
-                    .map(|clip| clip.kind != model::ClipKind::Image)
-            })
-            .unwrap_or(false)
+    /// What the tray's sound and word tools may do to the selection: one
+    /// clip with sound to caption, one title to speak, one video clip whose
+    /// sound is on it to detach, or whose sound is off it to put back.
+    fn sound_tools(&self) -> (bool, bool, bool, bool) {
+        let Some(clip) = self.sole_selection().and_then(|id| self.clip(&id)) else {
+            return (false, false, false, false);
+        };
+        let detached = self
+            .timeline()
+            .clips
+            .iter()
+            .any(|other| other.detached_from.as_deref() == Some(clip.id.as_str()));
+        let video = clip.kind == model::ClipKind::Video;
+        (
+            matches!(clip.kind, model::ClipKind::Video | model::ClipKind::Audio),
+            clip.kind == model::ClipKind::Text,
+            video && !detached,
+            (video && detached)
+                || (clip.kind == model::ClipKind::Audio && clip.detached_from.is_some()),
+        )
     }
 
     // ── projects ──
@@ -3146,6 +3784,7 @@ impl Studio {
                 self.sync_audio();
                 self.request_media_art();
                 self.request_preview();
+                self.ensure_cutouts();
             }
             Err(error) => {
                 self.start.busy = false;
@@ -3164,7 +3803,7 @@ impl Studio {
         let (_, width, height) = RESOLUTIONS[self.start.resolution.min(RESOLUTIONS.len() - 1)];
         let (_, num, den) = START_RATES[self.start.rate.min(START_RATES.len() - 1)];
         if self.start.location.trim().is_empty() {
-            self.start.error = "Choose where the project folder should go".into();
+            self.start.error = t("Choose where the project folder should go");
             return;
         }
         match projects::create(&self.start.location, &name, width, height, num, den) {
@@ -3190,10 +3829,12 @@ impl Studio {
     /// Saves, then closes the session and returns to the launch screen.
     pub fn close_project(&mut self) {
         self.pause();
+        self.host.cutouts.cancel();
+        self.cutout_jobs.clear();
         if let Some(session) = self.session.as_mut() {
             let (path, document) = session.prepare_save(None, None, None);
             if let Err(error) = projects::save(&path, &document) {
-                self.notify(&format!("Could not save: {error}"), true);
+                self.notify(&tf("Could not save: {0}", &[&error]), true);
                 return;
             }
         }
@@ -3242,8 +3883,23 @@ impl Studio {
 
     // ── export ──
 
+    /// The frame the export renders at: the sheet's short side, scaled
+    /// along the project's aspect and rounded to even dimensions, which is
+    /// what the encoder's chroma subsampling needs.
+    pub fn export_size(&self) -> (u32, u32) {
+        let short = EXPORT_SHORT_SIDES[self.export.resolution.min(EXPORT_SHORT_SIDES.len() - 1)];
+        let (project_w, project_h) = self.output_size();
+        let (project_w, project_h) = (project_w.max(1) as f64, project_h.max(1) as f64);
+        let even = |side: f64| ((side / 2.0).round() as u32 * 2).max(2);
+        if project_w >= project_h {
+            (even(short as f64 * project_w / project_h), short)
+        } else {
+            (short, even(short as f64 * project_h / project_w))
+        }
+    }
+
     pub fn export_size_bytes(&self, tier: usize) -> f32 {
-        let (width, height) = EXPORT_SIZES[self.export.resolution.min(3)];
+        let (width, height) = self.export_size();
         let (num, den) = EXPORT_RATES[self.export.rate.min(2)];
         let rate = num as f32 / den as f32;
         let pixels = (width as f32 * height as f32) / (1920.0 * 1080.0);
@@ -3258,7 +3914,7 @@ impl Studio {
         };
         if self.timeline().clips.is_empty() {
             self.export.phase = ExportPhase::Failed;
-            self.export.message = "There is nothing on the timeline to export".into();
+            self.export.message = t("There is nothing on the timeline to export");
             return;
         }
         let job = match self.host.exporter.begin() {
@@ -3288,7 +3944,7 @@ impl Studio {
             .map(|title| title.clip)
             .collect();
         let mut request = export::request(session, &spec, titles);
-        let (width, height) = EXPORT_SIZES[self.export.resolution.min(3)];
+        let (width, height) = self.export_size();
         let (num, den) = EXPORT_RATES[self.export.rate.min(2)];
         request.width = width;
         request.height = height;
@@ -3298,7 +3954,7 @@ impl Studio {
         self.pause();
         self.export.phase = ExportPhase::Running;
         self.export.progress = 0.0;
-        self.export.stage = "Rendering video".into();
+        self.export.stage = t("Rendering video");
         self.export.message.clear();
         self.export.written.clear();
 
@@ -3312,12 +3968,11 @@ impl Studio {
                         0.0
                     };
                     let stage = match progress.stage {
-                        "rendering" => "Rendering video",
-                        "mixing audio" => "Mixing audio",
-                        "muxing" => "Finalising file",
-                        other => other,
-                    }
-                    .to_owned();
+                        "rendering" => t("Rendering video"),
+                        "mixing audio" => t("Mixing audio"),
+                        "muxing" => t("Finalising file"),
+                        other => other.to_owned(),
+                    };
                     on_ui(move |studio, _, _| {
                         if studio.export.phase == ExportPhase::Running {
                             studio.export.progress = fraction.clamp(0.0, 1.0);
@@ -3331,7 +3986,7 @@ impl Studio {
                     studio.export.phase = ExportPhase::Done;
                     studio.export.progress = 1.0;
                     studio.export.written = written;
-                    studio.notify("Export finished", false);
+                    studio.notify(&t("Export finished"), false);
                 }
                 Err(error) => {
                     if studio.export.phase == ExportPhase::Idle {
@@ -3340,7 +3995,7 @@ impl Studio {
                     }
                     studio.export.phase = ExportPhase::Failed;
                     studio.export.message = error.clone();
-                    studio.notify(&format!("Export failed: {error}"), true);
+                    studio.notify(&tf("Export failed: {0}", &[&error]), true);
                 }
             },
         );
@@ -3394,6 +4049,7 @@ impl Studio {
                 .collect();
         }
         if let Ok(status) = concat_speech::Speech::status(dirs) {
+            self.speakers = status.voices.clone();
             self.voices = status
                 .models
                 .iter()
@@ -3490,7 +4146,7 @@ impl Studio {
                 }
                 match result {
                     Ok(()) => {
-                        studio.notify("Model ready", false);
+                        studio.notify(&t("Model ready"), false);
                         if studio.is_transcriber(&id) && studio.prefs.transcriber_model.is_none() {
                             studio.prefs.transcriber_model = Some(id.clone());
                         } else if !studio.is_transcriber(&id) && studio.prefs.tts_model.is_none() {
@@ -3525,99 +4181,180 @@ impl Studio {
         self.refresh_models();
     }
 
-    fn language_code(&self) -> &'static str {
-        TRANSCRIBE_LANGUAGES
-            .get(self.settings.transcribe_language.max(0) as usize)
-            .copied()
-            .unwrap_or("auto")
+    /// The models of a kind that are on disk, in the settings' order: the
+    /// rows of a sheet's model list.
+    fn installed(models: &[ModelState]) -> Vec<&ModelState> {
+        models.iter().filter(|model| model.installed).collect()
     }
 
-    /// Auto captions for the selected clip: the transcription runs on a
-    /// worker and lands as one batch of title clips.
-    pub fn caption_selected(&mut self) {
+    /// Opens the captions sheet on the selected clip, with the settings'
+    /// language and the chosen model already picked.
+    pub fn captions_open(&mut self) {
         let Some(id) = self.sole_selection() else {
             return;
         };
-        let Some(clip) = self.clip(&id).cloned() else {
+        let installed = Self::installed(&self.transcribers);
+        let model = installed.iter().position(|model| model.active).unwrap_or(0);
+        self.captions = CaptionsSheet {
+            open: true,
+            clip: Some(id),
+            language: self.settings.transcribe_language,
+            model,
+            placement: 0,
+            size: 1,
+            ..CaptionsSheet::default()
+        };
+    }
+
+    /// Runs the pass the sheet describes. The transcription runs on a
+    /// worker, reports into the sheet as it goes, and lands as one batch of
+    /// title clips - one undo step - when it is done.
+    pub fn captions_run(&mut self) {
+        let Some(clip) = self
+            .captions
+            .clip
+            .as_ref()
+            .and_then(|id| self.clip(id))
+            .cloned()
+        else {
+            self.captions.message = t("The clip is no longer on the timeline");
             return;
         };
         let Some(media) = self.project().media_by_id(&clip.media_id).cloned() else {
-            self.notify("This clip has no file to transcribe", true);
+            self.captions.message = t("This clip has no file to transcribe");
             return;
         };
-        let Some(model) = self
-            .transcribers
-            .iter()
-            .find(|model| model.active && model.installed)
+        let Some(model) = Self::installed(&self.transcribers)
+            .get(self.captions.model)
+            .map(|model| model.id.clone())
         else {
-            self.notify(
-                "Download a transcriber model in Settings > Transcriber first",
-                true,
-            );
+            self.captions.message =
+                t("Download a transcriber model in Settings › Transcriber first");
             return;
         };
+        let language = TRANSCRIBE_LANGUAGES
+            .get(self.captions.language.max(0) as usize)
+            .copied()
+            .unwrap_or("auto");
+        let offset_y = CAPTION_OFFSETS[self.captions.placement.min(2)];
+        let font_size = CAPTION_SIZES[self.captions.size.min(2)];
         let request = concat_speech::transcribe::TranscribeRequest {
             path: media.path.clone(),
             source_start: clip.source_start,
             window: clip.duration * clip.speed,
-            language: self.language_code().to_owned(),
-            model_id: model.id.clone(),
+            language: language.to_owned(),
+            model_id: model,
         };
         let dirs = self.host.dirs.clone();
         let transcriber = Arc::clone(&self.host.transcriber);
-        self.notify("Transcribing…", false);
+        self.captions.running = true;
+        self.captions.progress = 0.0;
+        self.captions.message.clear();
         spawn(
-            move || transcriber.transcribe(&dirs, &request, |_| {}),
-            move |studio, _, _, result| match result {
-                Ok(segments) => {
-                    let commands: Vec<Command> = segments
-                        .iter()
-                        .map(|segment| Command::AddTextClip {
-                            track_id: None,
-                            start: clip.start + segment.start / clip.speed,
-                            style: Some(TextStyle {
-                                content: segment.text.clone(),
-                                font_family: "Inter".to_owned(),
-                                font_size: 0.05,
-                                font_weight: 600.0,
-                                ..TextStyle::default()
-                            }),
-                            duration: Some(((segment.end - segment.start) / clip.speed).max(0.2)),
-                            offset_y: Some(0.35),
-                        })
-                        .collect();
-                    let count = commands.len();
-                    if count == 0 {
-                        studio.notify("Nothing was said in that clip", true);
-                    } else {
-                        studio.apply(Command::Batch { commands });
-                        studio.notify(&format!("Added {count} captions"), false);
+            move || {
+                transcriber.transcribe(&dirs, &request, |percent| {
+                    on_ui(move |studio, _, _| {
+                        studio.captions.progress = (percent as f32 / 100.0).clamp(0.0, 1.0);
+                    });
+                })
+            },
+            move |studio, _, _, result| {
+                studio.captions.running = false;
+                match result {
+                    Ok(segments) => {
+                        let commands: Vec<Command> = segments
+                            .iter()
+                            .filter(|segment| !segment.text.trim().is_empty())
+                            .map(|segment| Command::AddTextClip {
+                                track_id: None,
+                                start: clip.start + segment.start / clip.speed,
+                                style: Some(TextStyle {
+                                    content: segment.text.trim().to_owned(),
+                                    font_family: "Inter".to_owned(),
+                                    font_size,
+                                    font_weight: 600.0,
+                                    ..TextStyle::default()
+                                }),
+                                duration: Some(
+                                    ((segment.end - segment.start) / clip.speed).max(0.2),
+                                ),
+                                offset_y: Some(offset_y),
+                            })
+                            .collect();
+                        let count = commands.len();
+                        studio.captions.open = false;
+                        if count == 0 {
+                            studio.notify(&t("Nothing was said in that clip"), true);
+                        } else {
+                            studio.apply(Command::Batch { commands });
+                            studio.notify(&tf("Added {0} captions", &[&count]), false);
+                        }
                     }
+                    // Asked for: the sheet is already on its way down.
+                    Err(error) if error.contains("cancel") => studio.captions.open = false,
+                    Err(error) => studio.captions.message = error,
                 }
-                Err(error) => studio.notify(&error, true),
             },
         );
     }
 
-    /// A title's words, spoken: the WAV lands in the project and on the
-    /// timeline at the title's start.
-    pub fn speak_selected(&mut self) {
-        let Some(id) = self.sole_selection() else {
-            return;
-        };
-        let Some(clip) = self.clip(&id).cloned() else {
-            return;
-        };
-        let Some(text) = clip.text.as_ref().map(|text| text.content.clone()) else {
-            self.notify("Select a title to speak", true);
-            return;
-        };
-        let Some(model) = self
-            .voices
+    pub fn captions_cancel(&mut self) {
+        self.host.transcriber.cancel();
+        self.captions.running = false;
+        self.captions.open = false;
+    }
+
+    /// Opens the speech sheet: on the selected title's words when a title
+    /// is selected, else on a blank script to be read at the playhead. The
+    /// voice is the one chosen last time.
+    pub fn speech_open(&mut self) {
+        let title = self
+            .sole_selection()
+            .and_then(|id| self.clip(&id))
+            .filter(|clip| clip.kind == model::ClipKind::Text)
+            .cloned();
+        let installed = Self::installed(&self.voices);
+        let model = installed.iter().position(|model| model.active).unwrap_or(0);
+        let wanted = self.prefs.tts_voice.unwrap_or(DEFAULT_VOICE);
+        let voice = self
+            .speakers
             .iter()
-            .find(|model| model.active && model.installed)
+            .position(|speaker| speaker.id == wanted)
+            .unwrap_or(0);
+        self.speech = SpeechSheet {
+            open: true,
+            clip: title.as_ref().map(|clip| clip.id.clone()),
+            text: title
+                .and_then(|clip| clip.text.map(|text| text.content))
+                .unwrap_or_default(),
+            voice,
+            model,
+            pace: 1,
+            ..SpeechSheet::default()
+        };
+    }
+
+    /// Reads the script: the WAV lands in the bin and on the timeline, at
+    /// the title's start or at the playhead.
+    pub fn speech_run(&mut self) {
+        let text = self.speech.text.trim().to_owned();
+        if text.is_empty() {
+            self.speech.message = t("Nothing to read yet");
+            return;
+        }
+        let Some(model) = Self::installed(&self.voices)
+            .get(self.speech.model)
+            .map(|model| model.id.clone())
         else {
-            self.notify("Download a voice model in Settings > Speech first", true);
+            self.speech.message = t("Download a voice model in Settings › Speech first");
+            return;
+        };
+        let Some(voice) = self
+            .speakers
+            .get(self.speech.voice)
+            .map(|speaker| speaker.id)
+        else {
+            self.speech.message = t("No voice to read with");
             return;
         };
         let Some(project) = self
@@ -3627,46 +4364,123 @@ impl Studio {
         else {
             return;
         };
+        // Remembered: the voice chosen is the voice wanted next time.
+        self.prefs.tts_voice = Some(voice);
+        self.prefs.save(&self.host.dirs);
+        let start = self
+            .speech
+            .clip
+            .as_ref()
+            .and_then(|id| self.clip(id))
+            .map(|clip| clip.start)
+            .unwrap_or(f64::from(self.playhead));
         let request = concat_speech::tts::SpeakRequest {
-            model_id: model.id.clone(),
-            voice: self.prefs.tts_voice.unwrap_or(DEFAULT_VOICE),
+            model_id: model,
+            voice,
             text,
-            speed: 1.0,
+            speed: PACES[self.speech.pace.min(2)],
             project,
         };
         let dirs = self.host.dirs.clone();
         let speech = Arc::clone(&self.host.speech);
-        self.notify("Generating voice…", false);
+        self.speech.running = true;
+        self.speech.progress = 0.0;
+        self.speech.message.clear();
         spawn(
             move || {
-                let spoken = speech.speak(&dirs, &request, |_| {})?;
+                let spoken = speech.speak(&dirs, &request, |fraction| {
+                    on_ui(move |studio, _, _| {
+                        studio.speech.progress = fraction.clamp(0.0, 1.0);
+                    });
+                })?;
                 let summary = media::probe(&spoken.path)?;
                 Ok::<_, String>(summary)
             },
-            move |studio, _, _, result| match result {
-                Ok(summary) => {
-                    let created = studio.apply(Command::AddMedia {
-                        item: summary.to_new_media(),
-                    });
-                    let media_id = created.or_else(|| {
-                        studio
-                            .project()
-                            .media
-                            .iter()
-                            .find(|item| item.path == summary.path)
-                            .map(|item| item.id.clone())
-                    });
-                    if let Some(media_id) = media_id {
-                        studio.apply(Command::AddClipAtFirstFree {
-                            media_id,
-                            start: clip.start,
+            move |studio, _, _, result| {
+                studio.speech.running = false;
+                match result {
+                    Ok(summary) => {
+                        let created = studio.apply(Command::AddMedia {
+                            item: summary.to_new_media(),
                         });
-                        studio.notify("Voice added at the title", false);
+                        let media_id = created.or_else(|| {
+                            studio
+                                .project()
+                                .media
+                                .iter()
+                                .find(|item| item.path == summary.path)
+                                .map(|item| item.id.clone())
+                        });
+                        studio.speech.open = false;
+                        if let Some(media_id) = media_id {
+                            studio.apply(Command::AddClipAtFirstFree { media_id, start });
+                            studio.notify(&t("Voice added to the timeline"), false);
+                        }
                     }
+                    Err(error) if error.contains("cancel") => studio.speech.open = false,
+                    Err(error) => studio.speech.message = error,
                 }
-                Err(error) => studio.notify(&error, true),
             },
         );
+    }
+
+    pub fn speech_cancel(&mut self) {
+        self.host.speech.cancel();
+        self.speech.running = false;
+        self.speech.open = false;
+    }
+
+    /// "af_heart" as a person would say it: the name, and the accent and
+    /// gender its prefix encodes.
+    fn voice_label(name: &str) -> (String, String) {
+        let (prefix, rest) = name.split_once('_').unwrap_or(("", name));
+        let mut chars = rest.chars();
+        let title = match chars.next() {
+            Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+            None => String::new(),
+        };
+        let accent = match prefix.chars().next() {
+            Some('a') => t("American"),
+            Some('b') => t("British"),
+            Some('e') => t("Spanish"),
+            Some('f') => t("French"),
+            Some('h') => t("Hindi"),
+            Some('i') => t("Italian"),
+            Some('j') => t("Japanese"),
+            Some('p') => t("Portuguese"),
+            Some('z') => t("Chinese"),
+            _ => String::new(),
+        };
+        let gender = match prefix.chars().nth(1) {
+            Some('f') => t("female"),
+            Some('m') => t("male"),
+            _ => String::new(),
+        };
+        let detail = [accent, gender]
+            .into_iter()
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>()
+            .join(" · ");
+        (title, detail)
+    }
+
+    /// What the sheet's script would take to say, for the line under it.
+    fn speech_estimate(&self) -> String {
+        let chars = self.speech.text.trim().chars().count();
+        if chars == 0 {
+            return t("Nothing to read yet");
+        }
+        let seconds = chars as f32 / CHARS_PER_SECOND / PACES[self.speech.pace.min(2)];
+        let whole = seconds.round() as i32;
+        let voice = self
+            .speakers
+            .get(self.speech.voice)
+            .map(|speaker| Self::voice_label(&speaker.name).0)
+            .unwrap_or_default();
+        tf(
+            "About {0}:{1} in {2} · {3} characters",
+            &[&(whole / 60), &format!("{:02}", whole % 60), &voice, &chars],
+        )
     }
 
     /// Packs the open project into the template library.
@@ -3682,7 +4496,7 @@ impl Studio {
         spawn(
             move || templates::save(&config, &document, &settings, &path, &name),
             |studio, _, _, result| match result {
-                Ok(info) => studio.notify(&format!("Saved template {:?}", info.name), false),
+                Ok(info) => studio.notify(&tf("Saved template “{0}”", &[&info.name]), false),
                 Err(error) => studio.notify(&error, true),
             },
         );
@@ -3844,6 +4658,13 @@ impl Studio {
         editor.set_preview_frame(self.preview.clone());
         sync(&models.stage, self.stage_items());
         sync(&models.guides, self.stage_guides.clone());
+        let (path, width, erase) = self.stroke_overlay();
+        editor.set_stroke_path(path.into());
+        editor.set_stroke_width(width);
+        editor.set_stroke_erase(erase);
+        editor.set_brush_tool(self.brush as i32);
+        editor.set_brush_size(self.brush_size as f32);
+        editor.set_painting(self.painting);
 
         editor.set_drop(match &self.drop {
             Some(plan) => DropData {
@@ -3874,7 +4695,11 @@ impl Studio {
         editor.set_tool(self.tool);
         editor.set_snap(self.snap);
         editor.set_selected_count(self.selection.len() as i32);
-        editor.set_has_av_tools(self.has_av_tools());
+        let (can_caption, can_speak, can_detach, can_reattach) = self.sound_tools();
+        editor.set_can_caption(can_caption);
+        editor.set_can_speak(can_speak);
+        editor.set_can_detach(can_detach);
+        editor.set_can_reattach(can_reattach);
         editor.set_merge_blocked_because(match self.merge_blocked() {
             Some(reason) => reason.into(),
             None => SharedString::new(),
@@ -3951,6 +4776,8 @@ impl Studio {
             offset_x: clip.offset_x as f32,
             offset_y: clip.offset_y as f32,
             rotation: clip.rotation as f32,
+            stretch_x: clip.stretch_x as f32,
+            stretch_y: clip.stretch_y as f32,
             opacity: clip.opacity as f32,
             volume: clip.volume as f32,
             speed: clip.speed as f32,
@@ -4011,12 +4838,41 @@ impl Studio {
             plated: plate.alpha() > 0,
             line_height: text.line_height as f32,
             tracking: text.tracking as f32,
+            cutout: match &clip.cutout {
+                None => 0,
+                Some(cutout) if cutout.mode == model::CutoutMode::Auto => 1,
+                Some(_) => 2,
+            },
+            cutout_feather: clip
+                .cutout
+                .as_ref()
+                .map(|cutout| cutout.feather as f32)
+                .unwrap_or(model::DEFAULT_FEATHER as f32),
+            cutout_strokes: clip
+                .cutout
+                .as_ref()
+                .map(|cutout| cutout.strokes.len() as i32)
+                .unwrap_or(0),
+            cutout_progress: self
+                .cutout_jobs
+                .get(&clip.media_id)
+                .copied()
+                .unwrap_or(-1.0),
         }
     }
 
     /// The menus, the dialogs, the bin and the engine lists.
     pub fn publish_chrome(&self, app: &App, models: &Models) {
         let editor = app.global::<Editor>();
+
+        // The language, when it changed: one property the whole tree
+        // reads, written only when it differs so nothing re-evaluates
+        // for nothing.
+        let words = app.global::<I18n>();
+        let lang = SharedString::from(i18n::current());
+        if words.get_lang() != lang {
+            words.set_lang(lang);
+        }
 
         // The catalogue's shelves. Built in, so they never change after
         // start; `sync` makes republishing them a no-op.
@@ -4077,6 +4933,31 @@ impl Studio {
                 .collect(),
         );
 
+        // The Text page's presets: the look each card draws its name in.
+        sync(
+            &models.text_presets,
+            self.text_presets
+                .iter()
+                .map(|preset| {
+                    let plate = colour_of(&preset.style.background);
+                    TextPresetData {
+                        id: preset.id.as_str().into(),
+                        name: t(&preset.name).into(),
+                        family: preset.style.font_family.trim_matches('"').into(),
+                        weight: preset.style.font_weight.round() as i32,
+                        italic: preset.style.italic,
+                        fill: colour_of(&preset.style.color),
+                        plate,
+                        plated: plate.alpha() > 0,
+                        stroke: colour_of(&preset.style.stroke_color),
+                        stroke_width: preset.style.stroke_width as f32,
+                        size: preset.style.font_size as f32,
+                        align: align_of(preset.style.align),
+                    }
+                })
+                .collect(),
+        );
+
         // The bin.
         let filter = self.media_filter;
         let items = &self.project().media;
@@ -4090,6 +4971,12 @@ impl Studio {
                     name: item.name.as_str().into(),
                     kind: media_kind_of(item.kind),
                     duration: item.duration.unwrap_or(0.0) as f32,
+                    format: std::path::Path::new(&item.path)
+                        .extension()
+                        .and_then(|extension| extension.to_str())
+                        .map(|extension| extension.to_ascii_lowercase())
+                        .unwrap_or_default()
+                        .into(),
                     thumbnail: self.thumbs.get(&item.id).cloned().unwrap_or_default(),
                     wave: match self.peaks.get(&item.id) {
                         Some(peaks) if item.kind == model::MediaKind::Audio => {
@@ -4134,6 +5021,29 @@ impl Studio {
         );
         editor.set_quality_index(self.quality as i32);
 
+        // The Details panel, and the sheet its Modify button opens.
+        let folder: SharedString = self
+            .session
+            .as_ref()
+            .map(|session| session.path().to_owned())
+            .unwrap_or_else(|| "—".to_owned())
+            .into();
+        editor.set_project_name(self.project_name.as_str().into());
+        editor.set_project_folder(folder.clone());
+        editor.set_project_output(format!("{width} × {height}").into());
+        editor.set_project_rate(format!("{:.2} fps", self.frame_rate()).into());
+        editor.set_project_duration(frames_timecode(self.duration(), self.frame_rate()).into());
+        editor.set_count_media(self.project().media.len() as i32);
+        editor.set_count_tracks(self.timeline().tracks.len() as i32);
+        editor.set_count_clips(self.timeline().clips.len() as i32);
+        app.set_project_sheet(ProjectSheetData {
+            open: self.project_sheet.open,
+            name: self.project_sheet.name.as_str().into(),
+            folder,
+            size: self.project_sheet.size,
+            rate: self.project_sheet.rate as i32,
+        });
+
         let rows = self.menu();
         editor.set_menu_height(Self::menu_height(&rows));
         sync(&models.menu, rows);
@@ -4153,7 +5063,11 @@ impl Studio {
                     .filter(|model| model.installed)
                     .collect();
                 let on_disk: f32 = installed.iter().map(|model| model.megabytes).sum();
-                format!("{} installed · {on_disk:.0} MB on disk", installed.len()).into()
+                tf(
+                    "{0} installed · {1} MB on disk",
+                    &[&installed.len(), &format!("{on_disk:.0}")],
+                )
+                .into()
             },
             version: env!("CARGO_PKG_VERSION").into(),
             engine: format!("concat-engine · FFmpeg {}", concat_media::linked_version()).into(),
@@ -4161,10 +5075,73 @@ impl Studio {
         sync(&models.transcribers, Self::model_rows(&self.transcribers));
         sync(&models.voices, Self::model_rows(&self.voices));
 
-        let av = self.av_menu();
-        editor.set_av_height(Self::menu_height(&av));
-        sync(&models.av, av);
-        editor.set_av_token(self.av_token);
+        // The speech sheets, and the lists they choose from.
+        let transcribers = Self::installed(&self.transcribers);
+        sync(
+            &models.caption_models,
+            transcribers
+                .iter()
+                .map(|model| SharedString::from(model.name.as_str()))
+                .collect(),
+        );
+        app.set_captions(CaptionsSheetData {
+            open: self.captions.open,
+            clip: self
+                .captions
+                .clip
+                .as_ref()
+                .and_then(|id| self.clip(id))
+                .map(|clip| SharedString::from(clip.name.as_str()))
+                .unwrap_or_default(),
+            language: self.captions.language,
+            model: self.captions.model as i32,
+            placement: self.captions.placement as i32,
+            size: self.captions.size as i32,
+            running: self.captions.running,
+            progress: self.captions.progress,
+            ready: !transcribers.is_empty(),
+            message: self.captions.message.as_str().into(),
+        });
+        let voices = Self::installed(&self.voices);
+        sync(
+            &models.speech_models,
+            voices
+                .iter()
+                .map(|model| SharedString::from(model.name.as_str()))
+                .collect(),
+        );
+        sync(
+            &models.speakers,
+            self.speakers
+                .iter()
+                .map(|speaker| Self::voice_label(&speaker.name).0.into())
+                .collect(),
+        );
+        sync(
+            &models.speaker_details,
+            self.speakers
+                .iter()
+                .map(|speaker| Self::voice_label(&speaker.name).1.into())
+                .collect(),
+        );
+        app.set_speech(SpeechSheetData {
+            open: self.speech.open,
+            text: self.speech.text.as_str().into(),
+            voice: self.speech.voice as i32,
+            model: self.speech.model as i32,
+            pace: self.speech.pace as i32,
+            running: self.speech.running,
+            progress: self.speech.progress,
+            ready: !voices.is_empty(),
+            placement: if self.speech.clip.is_some() {
+                "at the title"
+            } else {
+                "at the playhead"
+            }
+            .into(),
+            estimate: self.speech_estimate().into(),
+            message: self.speech.message.as_str().into(),
+        });
 
         let bar = self.menu_bar();
         app.set_app_menu_height(Self::menu_height(&bar));
@@ -4185,7 +5162,7 @@ impl Studio {
     }
 
     fn export_data(&self) -> ExportData {
-        let (width, height) = EXPORT_SIZES[self.export.resolution.min(3)];
+        let (width, height) = self.export_size();
         let (num, den) = EXPORT_RATES[self.export.rate.min(2)];
         let rate = num as f32 / den as f32;
         let clips = self.timeline().clips.len();
@@ -4256,9 +5233,13 @@ impl Studio {
                         0.0
                     },
                     transferred: if model.unpacking {
-                        "Unpacking…".into()
+                        t("Unpacking…").into()
                     } else {
-                        format!("{fetched:.0} MB of {total:.0} MB").into()
+                        tf(
+                            "{0} MB of {1} MB",
+                            &[&format!("{fetched:.0}"), &format!("{total:.0}")],
+                        )
+                        .into()
                     },
                     eta: SharedString::new(),
                 }
@@ -4298,23 +5279,17 @@ impl Studio {
             checkable: true,
             checked: on,
         };
-        let heading = |label: &str| MenuItemData {
-            label: label.into(),
-            kind: MenuRow::Label,
-            ..Default::default()
-        };
         let rule = || MenuItemData {
             kind: MenuRow::Separator,
             ..Default::default()
         };
 
         let mut rows = vec![
-            heading(&clip.name),
-            action("copy", "Copy".into(), Glyph::Copy, "⌘C", true),
-            action("duplicate", "Duplicate".into(), Glyph::Plus, "⌘D", !locked),
+            action("copy", t("Copy"), Glyph::Copy, "⌘C", true),
+            action("duplicate", t("Duplicate"), Glyph::Plus, "⌘D", !locked),
             action(
                 "paste",
-                "Paste".into(),
+                t("Paste"),
                 Glyph::Plus,
                 "⌘V",
                 self.clipboard.is_some(),
@@ -4322,7 +5297,7 @@ impl Studio {
             rule(),
             action(
                 "split",
-                "Split at playhead".into(),
+                t("Split at playhead"),
                 Glyph::Split,
                 "S",
                 straddled && !locked,
@@ -4332,16 +5307,16 @@ impl Studio {
         let audible = clip.kind != model::ClipKind::Image;
         rows.push(check(
             "mute",
-            "Mute",
+            &t("Mute"),
             "M",
             clip.volume <= 0.0,
             !locked && audible,
         ));
-        rows.push(check("lock", "Lock track", "", locked, true));
+        rows.push(check("lock", &t("Lock track"), "", locked, true));
         rows.push(rule());
         rows.push(MenuItemData {
             id: "delete".into(),
-            label: "Delete".into(),
+            label: t("Delete").into(),
             kind: MenuRow::Action,
             glyph: Glyph::Trash,
             shortcut: "⌫".into(),
@@ -4359,57 +5334,9 @@ impl Studio {
             MenuRow::Label => 24.0,
             MenuRow::Separator => 9.0,
         };
-        rows.iter().map(|row| metrics(row.kind)).sum::<f32>() + 8.0
+        rows.iter().map(|row| metrics(row.kind)).sum::<f32>() + 12.0
     }
 
-    /// The tray's A/V menu. What it offers depends on what is selected.
-    fn av_menu(&self) -> Vec<MenuItemData> {
-        let Some(clip) = self.sole_selection().and_then(|id| self.clip(&id)) else {
-            return Vec::new();
-        };
-        let row = |id: &str, label: &str, glyph: Glyph, enabled: bool| MenuItemData {
-            id: id.into(),
-            label: label.into(),
-            kind: MenuRow::Action,
-            glyph,
-            shortcut: SharedString::new(),
-            enabled,
-            danger: false,
-            checkable: false,
-            checked: false,
-        };
-        if clip.kind == model::ClipKind::Text {
-            return vec![row("speak", "Generate voice", Glyph::Volume, true)];
-        }
-        let has_sound = clip.kind != model::ClipKind::Image;
-        let detached = self
-            .timeline()
-            .clips
-            .iter()
-            .any(|other| other.detached_from.as_deref() == Some(clip.id.as_str()));
-        vec![
-            row("captions", "Auto captions", Glyph::TextMark, has_sound),
-            MenuItemData {
-                kind: MenuRow::Separator,
-                ..Default::default()
-            },
-            row(
-                "detach",
-                "Detach audio",
-                Glyph::Waveform,
-                clip.kind == model::ClipKind::Video && !detached,
-            ),
-            row(
-                "reattach",
-                "Reattach audio",
-                Glyph::Merge,
-                (clip.kind == model::ClipKind::Video && detached)
-                    || (clip.kind == model::ClipKind::Audio && clip.detached_from.is_some()),
-            ),
-        ]
-    }
-
-    /// The File / Edit / View menus.
     fn menu_bar(&self) -> Vec<MenuItemData> {
         let row =
             |id: &str, label: String, glyph: Glyph, shortcut: &str, enabled: bool| MenuItemData {
@@ -4442,41 +5369,29 @@ impl Studio {
             0 => vec![
                 row(
                     "add-selected",
-                    "Add selected to timeline".into(),
+                    t("Add selected to timeline"),
                     Glyph::Plus,
                     "",
                     has_selection_media,
                 ),
-                row("import", "Import media…".into(), Glyph::Import, "⌘I", true),
-                row("save", "Save".into(), Glyph::Import, "⌘S", true),
+                row("import", t("Import media…"), Glyph::Import, "⌘I", true),
+                row("save", t("Save"), Glyph::Import, "⌘S", true),
                 row(
                     "export",
-                    "Export…".into(),
+                    t("Export…"),
                     Glyph::Export,
                     "",
                     !self.timeline().clips.is_empty(),
                 ),
-                row(
-                    "template",
-                    "Save as template…".into(),
-                    Glyph::Slot,
-                    "",
-                    true,
-                ),
-                row("speech", "Text to speech…".into(), Glyph::Volume, "", true),
+                row("template", t("Save as template…"), Glyph::Slot, "", true),
+                row("speech", t("Text to speech…"), Glyph::Volume, "", true),
                 rule(),
-                row("settings", "Settings…".into(), Glyph::Settings, "⌘,", true),
+                row("settings", t("Settings…"), Glyph::Settings, "⌘,", true),
                 rule(),
-                row(
-                    "close-project",
-                    "Close project".into(),
-                    Glyph::Import,
-                    "",
-                    true,
-                ),
+                row("close-project", t("Close project"), Glyph::Import, "", true),
                 MenuItemData {
                     id: "close-window".into(),
-                    label: "Close window".into(),
+                    label: t("Close window").into(),
                     kind: MenuRow::Action,
                     glyph: Glyph::Close,
                     shortcut: "⌘W".into(),
@@ -4487,12 +5402,12 @@ impl Studio {
                 },
             ],
             1 => vec![
-                row("undo", "Undo".into(), Glyph::ChevronUp, "⌘Z", can_undo),
-                row("redo", "Redo".into(), Glyph::ChevronDown, "⇧⌘Z", can_redo),
+                row("undo", t("Undo"), Glyph::ChevronUp, "⌘Z", can_undo),
+                row("redo", t("Redo"), Glyph::ChevronDown, "⇧⌘Z", can_redo),
                 rule(),
                 row(
                     "split",
-                    "Split at playhead".into(),
+                    t("Split at playhead"),
                     Glyph::Razor,
                     "⌘B",
                     straddled,
@@ -4500,9 +5415,9 @@ impl Studio {
                 MenuItemData {
                     id: "delete".into(),
                     label: if selected > 1 {
-                        format!("Delete {selected} clips")
+                        tf("Delete {0} clips", &[&selected])
                     } else {
-                        "Delete clip".into()
+                        t("Delete clip")
                     }
                     .into(),
                     kind: MenuRow::Action,
@@ -4516,7 +5431,7 @@ impl Studio {
                 rule(),
                 MenuItemData {
                     id: "snap".into(),
-                    label: "Snap to edges".into(),
+                    label: t("Snap to edges").into(),
                     kind: MenuRow::Action,
                     glyph: Glyph::None,
                     shortcut: "N".into(),
@@ -4527,11 +5442,11 @@ impl Studio {
                 },
             ],
             2 => vec![
-                row("zoom-in", "Zoom in".into(), Glyph::Plus, "+", true),
-                row("zoom-out", "Zoom out".into(), Glyph::Minus, "-", true),
+                row("zoom-in", t("Zoom in"), Glyph::Plus, "+", true),
+                row("zoom-out", t("Zoom out"), Glyph::Minus, "-", true),
                 rule(),
-                row("start", "Go to start".into(), Glyph::SkipBack, "Home", true),
-                row("end", "Go to end".into(), Glyph::SkipForward, "End", true),
+                row("start", t("Go to start"), Glyph::SkipBack, "Home", true),
+                row("end", t("Go to end"), Glyph::SkipForward, "End", true),
             ],
             _ => Vec::new(),
         }
@@ -4626,6 +5541,185 @@ impl Studio {
             self.schedule_autosave();
             self.request_preview();
         }
+    }
+
+    // ── the project sheet ──
+
+    /// Opens the sheet on the project as it stands.
+    pub fn project_sheet_open(&mut self) {
+        let (width, height) = self.output_size();
+        let (num, den) = self.session.as_ref().map_or((30, 1), |session| {
+            let settings = session.settings();
+            (settings.rate_num, settings.rate_den)
+        });
+        self.project_sheet = ProjectSheet {
+            open: true,
+            name: self.project_name.clone(),
+            size: OUTPUTS
+                .iter()
+                .position(|size| *size == (width as i32, height as i32))
+                .map_or(-1, |index| index as i32),
+            rate: START_RATES
+                .iter()
+                .position(|(_, n, d)| (*n, *d) == (num, den))
+                .unwrap_or(3),
+        };
+    }
+
+    /// Applies the sheet - the name, the frame and the rate together - and
+    /// closes it. The frame goes the way the monitor's picker sends it, so
+    /// the two cannot disagree about what a size means.
+    pub fn project_apply(&mut self) {
+        let sheet = std::mem::take(&mut self.project_sheet);
+        let name = sheet.name.trim().to_owned();
+        let size = usize::try_from(sheet.size)
+            .ok()
+            .and_then(|index| OUTPUTS.get(index).copied());
+        let (_, num, den) = START_RATES[sheet.rate.min(START_RATES.len() - 1)];
+        let Some(session) = self.session.as_mut() else {
+            return;
+        };
+        session.prepare_save(
+            (!name.is_empty()).then_some(name.as_str()),
+            size.map(|(width, _)| width as u32),
+            size.map(|(_, height)| height as u32),
+        );
+        session.set_rate(num, den);
+        if !name.is_empty() {
+            self.project_name = name;
+        }
+        self.dirty = true;
+        self.schedule_autosave();
+        self.request_preview();
+    }
+
+    // ── the keyboard, and the menu's verbs ──
+
+    /// A chord from the window's key table; see `Editor.shortcut`. The view
+    /// chords - zoom, the playhead's ends, the sheets - go through the app
+    /// menu's own handler in lib.rs, so a key and the row that advertises
+    /// it are one thing.
+    pub fn shortcut(&mut self, action: &str) {
+        match action {
+            "split" => {
+                let at = self.playhead;
+                self.split_at(at, false);
+            }
+            "split-selected" => {
+                let at = self.playhead;
+                self.split_at(at, true);
+            }
+            "select-all" => self.select_all(),
+            "copy" | "duplicate" | "mute" => {
+                if let Some(id) = self.sole_selection() {
+                    self.clip_action(&id, action);
+                }
+            }
+            "paste" => {
+                let Some(held) = self.clipboard.clone() else {
+                    return;
+                };
+                match self.sole_selection() {
+                    // After the selected clip, on its lane, as the menu does.
+                    Some(id) => self.clip_action(&id, "paste"),
+                    // Nothing selected: at the playhead, on the lane it was
+                    // copied from. `duplicate` lays a copy after its source,
+                    // so the source is placed one length before the playhead.
+                    None => {
+                        let mut source = held;
+                        source.start = f64::from(self.playhead) - source.duration;
+                        self.duplicate(&source);
+                    }
+                }
+            }
+            "tool-select" => self.tool = TimelineTool::Select,
+            // B toggles: pressing it with the razor up puts the pointer back.
+            "tool-razor" => {
+                self.tool = if self.tool == TimelineTool::Razor {
+                    TimelineTool::Select
+                } else {
+                    TimelineTool::Razor
+                };
+            }
+            _ => {}
+        }
+    }
+
+    /// One of the clip menu's verbs on clip `id`. The menu's rows and the
+    /// keyboard's chords both land here, so a shortcut and the row that
+    /// advertises it cannot disagree.
+    pub fn clip_action(&mut self, id: &str, action: &str) {
+        let Some(clip) = self.clip(id).cloned() else {
+            return;
+        };
+        match action {
+            "copy" => self.clipboard = Some(clip),
+            "duplicate" => self.duplicate(&clip),
+            "paste" => {
+                if let Some(held) = self.clipboard.clone() {
+                    let mut source = held;
+                    // Pasted after the clip that was right-clicked, on its lane.
+                    source.track_id = clip.track_id.clone();
+                    source.start = clip.start + clip.duration - source.duration;
+                    self.duplicate(&source);
+                }
+            }
+            "split" => {
+                let at = self.playhead;
+                self.selection = vec![id.to_owned()];
+                self.split_at(at, true);
+            }
+            "mute" => {
+                let volume = if clip.volume <= 0.0 { 1.0 } else { 0.0 };
+                self.apply(Command::UpdateClip {
+                    clip_id: id.to_owned(),
+                    patch: ClipPatch {
+                        volume: Some(volume),
+                        ..Default::default()
+                    },
+                });
+            }
+            "lock" => self.toggle_lock(&clip.track_id),
+            "delete" => {
+                self.apply(Command::RemoveClips {
+                    clip_ids: vec![id.to_owned()],
+                });
+                self.menu_target = None;
+            }
+            _ => {}
+        }
+    }
+
+    /// Every clip on an unlocked lane.
+    pub fn select_all(&mut self) {
+        self.selection = self
+            .timeline()
+            .clips
+            .iter()
+            .filter(|clip| !self.locked(&clip.track_id))
+            .map(|clip| clip.id.clone())
+            .collect();
+    }
+
+    /// Tab `from` dropped at `slot`, a position counted over the strip as
+    /// it stands; the command counts with the tab already removed.
+    pub fn move_timeline(&mut self, from: i32, slot: i32) {
+        let Some(from) = usize::try_from(from).ok() else {
+            return;
+        };
+        let Some(timeline) = self.project().timelines.get(from) else {
+            return;
+        };
+        let id = timeline.id.clone();
+        let slot = slot.max(0) as usize;
+        let index = if from < slot { slot - 1 } else { slot };
+        if index == from {
+            return;
+        }
+        self.apply(Command::MoveTimeline {
+            timeline_id: id,
+            index,
+        });
     }
 }
 

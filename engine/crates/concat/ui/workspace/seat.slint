@@ -102,7 +102,11 @@ export component Seat inherits Rectangle {
 
             import-media => { Editor.import-media(); }
             filter-changed(filter) => { Editor.media-filter-changed(filter); }
-            select(id, additive) => { Editor.media-select(id, additive); }
+            floor-pressed => { Editor.blur(); }
+            select(id, additive) => {
+                Editor.blur();
+                Editor.media-select(id, additive);
+            }
             band-selected(columns, from-col, to-col, from-row, to-row, additive) => {
                 Editor.media-band-selected(columns, from-col, to-col,
                     from-row, to-row, additive);
@@ -111,7 +115,8 @@ export component Seat inherits Rectangle {
             remove-selected => { Editor.media-remove-selected(); }
             activate(id) => { Editor.media-activate(id); }
 
-            add-text => { Editor.library-add-text(); }
+            presets: Editor.text-presets;
+            add-text(preset) => { Editor.library-add-text(preset); }
             apply-effect(id) => { Editor.library-apply-effect(id); }
             apply-transition(id) => { Editor.library-apply-transition(id); }
             apply-filter(id, label) => { Editor.library-apply-filter(id, label); }
@@ -143,14 +148,22 @@ export component Seat inherits Rectangle {
             frame: Editor.preview-frame;
             stage-items: Editor.stage-items;
             stage-guides: Editor.stage-guides;
+            stroke-path: Editor.stroke-path;
+            stroke-width: Editor.stroke-width;
+            stroke-erase: Editor.stroke-erase;
+            painting: Editor.painting && Editor.selected-clip.cutout == 2;
 
             play-toggled => { Editor.play-toggled(); }
             seek(seconds) => { Editor.seek(seconds); }
             step(frames) => { Editor.step-frames(frames); }
             ratio-changed(index) => { Editor.ratio-changed(index); }
             quality-changed(index) => { Editor.quality-changed(index); }
-            stage-pressed(x, y, additive) => { Editor.stage-pressed(x, y, additive); }
+            stage-pressed(x, y, additive) => {
+                Editor.blur();
+                Editor.stage-pressed(x, y, additive);
+            }
             stage-grip-pressed(id, grip, x, y) => {
+                Editor.blur();
                 Editor.stage-grip-pressed(id, grip, x, y);
             }
             stage-dragged(x, y, snap) => { Editor.stage-dragged(x, y, snap); }
@@ -197,6 +210,24 @@ export component Seat inherits Rectangle {
             chain-set-param(audio, index, key, value) => {
                 Editor.chain-set-param(audio, index, key, value);
             }
+            brush-tool: Editor.brush-tool;
+            brush-size: Editor.brush-size;
+            painting: Editor.painting;
+            cutout-mode(mode) => { Editor.cutout-mode(mode); }
+            cutout-tool(index) => { Editor.cutout-tool(index); }
+            cutout-size(size) => { Editor.cutout-size(size); }
+            cutout-painting(on) => { Editor.cutout-painting(on); }
+            cutout-clear => { Editor.cutout-clear(); }
+
+            project-name: Editor.project-name;
+            project-folder: Editor.project-folder;
+            project-output: Editor.project-output;
+            project-rate: Editor.project-rate;
+            project-duration: Editor.project-duration;
+            count-media: Editor.count-media;
+            count-tracks: Editor.count-tracks;
+            count-clips: Editor.count-clips;
+            modify-project => { Editor.modify-project(); }
 
             selected: Editor.selected-clip;
             clip-set(field, value) => { Editor.clip-set(field, value); }
@@ -259,7 +290,10 @@ export component Seat inherits Rectangle {
             snap: Editor.snap;
             selected-count: Editor.selected-count;
             merge-blocked-because: Editor.merge-blocked-because;
-            has-av-tools: Editor.has-av-tools;
+            can-caption: Editor.can-caption;
+            can-speak: Editor.can-speak;
+            can-detach: Editor.can-detach;
+            can-reattach: Editor.can-reattach;
             playhead: Editor.playhead;
             frame-rate: Editor.frame-rate;
             scroll-left: Editor.scroll-left;
@@ -269,21 +303,28 @@ export component Seat inherits Rectangle {
             tab-renamed(index, name) => { Editor.tab-renamed(index, name); }
             tab-close-requested(index) => { Editor.tab-close-requested(index); }
             tab-added => { Editor.tab-added(); }
+            tab-moved(from, to) => { Editor.tab-moved(from, to); }
             tool-changed(tool) => { Editor.tool-changed(tool); }
             snap-changed(snap) => { Editor.snap-changed(snap); }
             split => { Editor.split(); }
             merge => { Editor.merge(); }
             delete-selected => { Editor.delete-selected(); }
-            av-tools => { Editor.av-tools(); }
-            av-items: Editor.av-items;
-            av-height: Editor.av-height;
-            av-token: Editor.av-token;
-            av-selected(id) => { Editor.av-selected(id); }
+            captions => { Editor.captions(); }
+            speak => { Editor.speak(); }
+            detach => { Editor.detach-audio(); }
+            reattach => { Editor.reattach-audio(); }
             add-track => { Editor.add-track(); }
             zoom-to-fit(width) => { Editor.zoom-to-fit(width); }
             zoom(factor, anchor) => { Editor.zoom(factor, anchor); }
-            scrubbed(seconds) => { Editor.scrubbed(seconds); }
-            clip-pressed(id, additive, edge) => { Editor.clip-pressed(id, additive, edge); }
+            floor-pressed => { Editor.blur(); }
+            scrubbed(seconds) => {
+                Editor.blur();
+                Editor.scrubbed(seconds);
+            }
+            clip-pressed(id, additive, edge) => {
+                Editor.blur();
+                Editor.clip-pressed(id, additive, edge);
+            }
             clip-dragged(seconds, pixels) => { Editor.clip-dragged(seconds, pixels); }
             clip-released => { Editor.clip-released(); }
             razored(id, seconds) => { Editor.razored(id, seconds); }

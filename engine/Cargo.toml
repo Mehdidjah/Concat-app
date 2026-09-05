@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/*"]
 
 [workspace.package]
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 rust-version = "1.93"
 license = "AGPL-3.0-or-later"  # + plugin exception, see LICENSE-EXCEPTIONS.md
@@ -18,6 +18,8 @@ concat-host = { path = "crates/concat-host" }
 concat-speech = { path = "crates/concat-speech" }
 concat-effects = { path = "crates/concat-effects" }
 concat-text = { path = "crates/concat-text" }
+concat-vision = { path = "crates/concat-vision" }
+concat = { path = "crates/concat" }
 
 serde_json = "1"
 thiserror = "2"

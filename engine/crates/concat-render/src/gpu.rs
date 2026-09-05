@@ -165,6 +165,11 @@ pub struct WgpuCompositor {
 impl WgpuCompositor {
     /// Builds a compositor on the best available adapter, or `None` when the
     /// machine has nothing usable - callers fall back to the CPU path.
+    ///
+    /// Native only: it blocks on the adapter and device requests, and on the
+    /// web there is no thread to block. A web caller awaits those requests
+    /// itself and hands the result to [`WgpuCompositor::with_device`].
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn new() -> Option<Self> {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
@@ -806,13 +811,15 @@ impl WgpuCompositor {
         let centre_x = layer.x as f32 + width / 2.0 + placement.translate_x;
         let centre_y = layer.y as f32 + height / 2.0 + placement.translate_y;
         let (sin, cos) = placement.rotation.sin_cos();
-        let scale = placement.scale.max(1e-6);
+        let scale_x = (placement.scale * placement.stretch_x).max(1e-6);
+        let scale_y = (placement.scale * placement.stretch_y).max(1e-6);
 
         let corner = |sx: f32, sy: f32, u: f32, v: f32| {
-            // Source-space offset from centre, scaled, then rotated clockwise
-            // in y-down coordinates - the forward form of the CPU inverse map.
-            let dx = sx * width / 2.0 * scale;
-            let dy = sy * height / 2.0 * scale;
+            // Source-space offset from centre, scaled per axis, then rotated
+            // clockwise in y-down coordinates - the forward form of the CPU
+            // inverse map.
+            let dx = sx * width / 2.0 * scale_x;
+            let dy = sy * height / 2.0 * scale_y;
             let px = centre_x + dx * cos - dy * sin;
             let py = centre_y + dx * sin + dy * cos;
             Vertex {
@@ -845,13 +852,29 @@ impl WgpuCompositor {
     /// failure the constructor's never-panic policy cannot rule out up
     /// front. The caller falls back to the CPU compositor rather than
     /// panicking mid-export.
+    /// `None` when the device did not deliver the pixels - a lost device,
+    /// a failed map - and the caller then marks this compositor dead. The
+    /// map's own result is what decides, not the poll's: a poll can return
+    /// without the map having been served.
     fn read_back(&mut self) -> Option<Frame> {
-        let target = self.target.as_ref().expect("composite rendered first");
+        let target = self.target.as_ref()?;
         let (width, height, padded_row) = (target.width, target.height, target.padded_row);
 
         let slice = target.staging.slice(..);
-        slice.map_async(wgpu::MapMode::Read, |_| {});
-        let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
+        let (mapped_tx, mapped_rx) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |result| {
+            let _ = mapped_tx.send(result);
+        });
+        if self
+            .device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .is_err()
+        {
+            return None;
+        }
+        if !matches!(mapped_rx.try_recv(), Ok(Ok(()))) {
+            return None;
+        }
 
         let mut frame = Frame::transparent(width, height);
         {

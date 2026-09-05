@@ -4,6 +4,7 @@
 // Inter is bundled rather than assumed: a desktop binary should look the same
 // on a machine that has never installed it. One file per weight the design
 // uses — 400 body, 500 titles, 600 the page heading.
+import { I18n } from "i18n.slint";
 import "fonts/Inter-Regular.ttf";
 import "fonts/Inter-Medium.ttf";
 import "fonts/Inter-SemiBold.ttf";
@@ -19,10 +20,13 @@ import "fonts/Synonym-SemiBold.ttf";
 import { Theme } from "theme/theme.slint";
 import { Bezier, Curves, Fmt, Payload } from "util.slint";
 import { EffectData } from "demo/effects-panel.slint";
-import { MediaFilter, MediaItemData, MediaKind } from "workspace/media-pane.slint";
+import { MediaFilter, MediaItemData, MediaKind, TextPresetData } from "workspace/media-pane.slint";
 import { ContextMenu, MenuItemData, MenuRow } from "primitives/context-menu.slint";
 import { ExportData, ExportDialog, ExportPhase } from "dialogs/export.slint";
 import { ModelData, SettingsData, SettingsDialog, SystemFactData } from "dialogs/settings.slint";
+import { ProjectDialog, ProjectSheetData } from "dialogs/project.slint";
+import { CaptionsDialog, CaptionsSheetData } from "dialogs/captions.slint";
+import { SpeechDialog, SpeechSheetData } from "dialogs/speech.slint";
 import { DockDivider, DockSide, SeatBox } from "dock.slint";
 import { Editor } from "editor.slint";
 import { PaneKind } from "workspace/pane-switcher.slint";
@@ -43,14 +47,15 @@ import {
 
 // Re-exported so main.rs can reach the globals and the struct.
 export {
-    Curves, Fmt, Payload, Theme, Bezier, Editor,
+    Curves, Fmt, Payload, Theme, Bezier, Editor, I18n,
     AppliedEntryData, AppliedParamData, CatalogueEntryData, ParamFormat,
     DockDivider, DockSide, PaneKind, SeatBox,
-    EffectData, MediaFilter, MediaItemData, MediaKind,
+    EffectData, MediaFilter, MediaItemData, MediaKind, TextPresetData,
     ClipData, ClipField, ClipKind, ClipTextField, DropData, SelectedClipData,
     StageGuideData, StageItemData, TextAlignment, TimelineTabData, TimelineTool,
     TrackData, TrackSize, MenuItemData, MenuRow, ExportData, ExportPhase, ModelData, SettingsData,
-    RecentProjectData, StartData, SystemFactData, ToastData,
+    RecentProjectData, StartData, SystemFactData, ToastData, ProjectSheetData,
+    CaptionsSheetData, SpeechSheetData,
 }
 
 export component App inherits Window {
@@ -101,8 +106,8 @@ export component App inherits Window {
     // Title bar. The drag/maximize pair must be handled in main.rs — a window
     // cannot drag itself from inside the scene graph; the rest are seams like
     // the library callbacks above.
-    in property <string> project-name: "Untitled project";
-    in property <string> project-status: "saved";
+    in property <string> project-name: I18n.t("Untitled project");
+    in property <string> project-status: I18n.t("saved");
     in property <bool> macos;
 
     /// The File / Edit / View menus. Built in Rust like every other menu here,
@@ -153,6 +158,47 @@ export component App inherits Window {
 
     callback open-settings();
     callback export-clicked();
+
+    /// The project sheet, opened from the Details panel.
+    in property <ProjectSheetData> project-sheet;
+    callback project-closed();
+    callback project-name-edited(name: string);
+    callback project-size-changed(index: int);
+    callback project-rate-changed(index: int);
+    callback project-apply();
+
+    /// The two speech sheets: captions from a clip's sound, and a title's
+    /// words - or any words - read aloud. Their option lists come from what
+    /// is installed, so they are handed over as models.
+    in property <CaptionsSheetData> captions;
+    in property <[string]> caption-models;
+    callback captions-closed();
+    callback captions-language-changed(index: int);
+    callback captions-model-changed(index: int);
+    callback captions-placement-changed(index: int);
+    callback captions-size-changed(index: int);
+    callback captions-begin();
+    callback captions-cancel();
+
+    in property <SpeechSheetData> speech;
+    in property <[string]> speech-models;
+    in property <[string]> speech-voices;
+    in property <[string]> speech-voice-details;
+    callback speech-closed();
+    callback speech-text-edited(text: string);
+    callback speech-voice-changed(index: int);
+    callback speech-model-changed(index: int);
+    callback speech-pace-changed(index: int);
+    callback speech-begin();
+    callback speech-cancel();
+
+    /// Takes focus back from whatever field holds it. The keyboard scope is
+    /// where focus rests when nothing is being typed into, so giving it the
+    /// focus is what "click beside the field" means; Rust calls this for
+    /// every press a pane reports through Editor.blur.
+    public function blur() {
+        keys.focus();
+    }
 
     /// The bottom-right notice: what just happened, said once. Set from Rust
     /// and watched by its token — see ToastLayer, which owns the timing.
@@ -221,14 +267,67 @@ export component App inherits Window {
             activated => { root.app-menu-selected("redo"); }
         }
 
-        // Space plays and pauses, the way it does in every editor. It lands
-        // here only when nothing else took it: a field being typed into
-        // consumes its own spaces before the key can walk up to this scope.
+        // The rest of the keyboard, the way CapCut lays it out: the chord
+        // key with a letter for an edit, a bare letter for a tool, the
+        // arrows and Home/End for the playhead. Every one lands here only
+        // when nothing else took it - a field being typed into consumes
+        // its own letters and spaces before a key can walk up to this
+        // scope, which is what keeps typing a title from cutting a clip.
         key-pressed(event) => {
-            if event.text == Key.Space && !root.on-start {
-                Editor.play-toggled();
+            if (root.on-start) {
+                return reject;
+            }
+            // The command key arrives as meta on a Mac and as control
+            // everywhere else; either is the chord key.
+            if (event.modifiers.control || event.modifiers.meta) {
+                if (event.modifiers.shift || event.modifiers.alt) {
+                    return reject;
+                }
+                if (event.text == "b") { Editor.shortcut("split"); return accept; }
+                if (event.text == "a") { Editor.shortcut("select-all"); return accept; }
+                if (event.text == "c") { Editor.shortcut("copy"); return accept; }
+                if (event.text == "v") { Editor.shortcut("paste"); return accept; }
+                if (event.text == "d") { Editor.shortcut("duplicate"); return accept; }
+                if (event.text == "e") { Editor.shortcut("export"); return accept; }
+                if (event.text == "i") { Editor.shortcut("import"); return accept; }
+                if (event.text == ",") { Editor.shortcut("settings"); return accept; }
+                if (event.text == "=" || event.text == "+") {
+                    Editor.shortcut("zoom-in");
+                    return accept;
+                }
+                if (event.text == "-") { Editor.shortcut("zoom-out"); return accept; }
+                return reject;
+            }
+            if (event.modifiers.alt) {
+                return reject;
+            }
+            if (event.text == Key.Space) { Editor.play-toggled(); return accept; }
+            if (event.text == Key.Delete || event.text == Key.Backspace) {
+                Editor.delete-selected();
                 return accept;
             }
+            if (event.text == Key.Home) { Editor.shortcut("start"); return accept; }
+            if (event.text == Key.End) { Editor.shortcut("end"); return accept; }
+            // A frame, or ten with shift.
+            if (event.text == Key.LeftArrow) {
+                Editor.step-frames(event.modifiers.shift ? -10 : -1);
+                return accept;
+            }
+            if (event.text == Key.RightArrow) {
+                Editor.step-frames(event.modifiers.shift ? 10 : 1);
+                return accept;
+            }
+            if (event.modifiers.shift) {
+                return reject;
+            }
+            if (event.text == "a" || event.text == "v") {
+                Editor.shortcut("tool-select");
+                return accept;
+            }
+            if (event.text == "b") { Editor.shortcut("tool-razor"); return accept; }
+            if (event.text == "s") { Editor.shortcut("split-selected"); return accept; }
+            if (event.text == "n") { Editor.shortcut("snap"); return accept; }
+            if (event.text == "m") { Editor.shortcut("mute"); return accept; }
             return reject;
         }
 
@@ -331,6 +430,56 @@ export component App inherits Window {
         model-download(id) => { root.model-download(id); }
         model-cancel(id) => { root.model-cancel(id); }
         model-remove(id) => { root.model-remove(id); }
+    }
+
+    ProjectDialog {
+        x: 0;
+        y: 0;
+        width: root.width;
+        height: root.height;
+        data: root.project-sheet;
+
+        closed => { root.project-closed(); }
+        name-edited(name) => { root.project-name-edited(name); }
+        size-changed(index) => { root.project-size-changed(index); }
+        rate-changed(index) => { root.project-rate-changed(index); }
+        apply => { root.project-apply(); }
+    }
+
+    CaptionsDialog {
+        x: 0;
+        y: 0;
+        width: root.width;
+        height: root.height;
+        data: root.captions;
+        models: root.caption-models;
+
+        closed => { root.captions-closed(); }
+        language-changed(index) => { root.captions-language-changed(index); }
+        model-changed(index) => { root.captions-model-changed(index); }
+        placement-changed(index) => { root.captions-placement-changed(index); }
+        size-changed(index) => { root.captions-size-changed(index); }
+        begin => { root.captions-begin(); }
+        cancel => { root.captions-cancel(); }
+    }
+
+    SpeechDialog {
+        x: 0;
+        y: 0;
+        width: root.width;
+        height: root.height;
+        data: root.speech;
+        models: root.speech-models;
+        voices: root.speech-voices;
+        voice-details: root.speech-voice-details;
+
+        closed => { root.speech-closed(); }
+        text-edited(text) => { root.speech-text-edited(text); }
+        voice-changed(index) => { root.speech-voice-changed(index); }
+        model-changed(index) => { root.speech-model-changed(index); }
+        pace-changed(index) => { root.speech-pace-changed(index); }
+        begin => { root.speech-begin(); }
+        cancel => { root.speech-cancel(); }
     }
 
     // Over the workspace and both sheets, under the menus. A tooltip has to

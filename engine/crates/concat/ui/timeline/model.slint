@@ -150,12 +150,13 @@ export enum TextAlignment { left, center, right }
 /// and alignment as its ordinal, which keeps this to two callbacks instead of
 /// one per control.
 export enum ClipField {
-    scale, offset-x, offset-y, rotation, opacity,
+    scale, offset-x, offset-y, rotation, stretch-x, stretch-y, opacity,
     volume, speed, preserve-pitch, speed-curve, reverse, fade-in, fade-out,
     anim-in, anim-out, anim-combo, anim-in-duration, anim-out-duration,
     flip-h, flip-v, blend, crop-left, crop-top, crop-right, crop-bottom,
     font-size, font-weight, italic, text-opacity, align,
     stroke-width, shadow, line-height, tracking,
+    cutout-feather,
 }
 
 /// The same again for the properties that are text rather than numbers.
@@ -183,6 +184,9 @@ export struct SelectedClipData {
     offset-x: float,
     offset-y: float,
     rotation: float,
+    /// the width and height pulled beyond the scale; 1 keeps the aspect
+    stretch-x: float,
+    stretch-y: float,
     opacity: float,
 
     // sound — everything but a still
@@ -214,6 +218,14 @@ export struct SelectedClipData {
     crop-bottom: float,
     fade-in: float,
     fade-out: float,
+
+    // the cutout: 0 none, 1 automatic, 2 custom; how soft its edge is; how
+    // many strokes it carries; and the analysis finding its masks, -1 when
+    // none is running, else how far along it is
+    cutout: int,
+    cutout-feather: float,
+    cutout-strokes: int,
+    cutout-progress: float,
 
     // the overlay, when this is a text clip
     content: string,

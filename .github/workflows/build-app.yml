@@ -58,6 +58,13 @@ env:
   # Oldest macOS the bundles run on. Apple silicon Macs all run newer than
   # this; it is the Intel floor.
   MACOSX_DEPLOYMENT_TARGET: "12.0"
+  # ggml (whisper.cpp's kernels) tunes itself to the machine it is built
+  # on unless told otherwise, and these bundles run on other machines: a
+  # runner with AVX-512 or SVE would leave a binary that faults on a CPU
+  # without them. Off, ggml compiles to the portable baseline instead -
+  # AVX2 with FMA and F16C on x86_64, NEON on ARM. whisper-rs-sys forwards
+  # every GGML_* variable to CMake as a define.
+  GGML_NATIVE: "OFF"
 
 jobs:
   app:
@@ -66,14 +73,18 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # `ffmpeg` and `sherpa` name the target the way each project's
+          # release archives do.
           - platform: macos
             arch: arm64
             os: macos-15
             target: aarch64-apple-darwin
+            sherpa: osx-arm64
           - platform: macos
             arch: x86_64
             os: macos-15-intel
             target: x86_64-apple-darwin
+            sherpa: osx-x64
           # 22.04, not latest: the binary links the build machine's glibc,
           # so the oldest supported runner is what keeps it runnable on
           # older distributions.
@@ -82,29 +93,32 @@ jobs:
             os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             ffmpeg: linux64
+            sherpa: linux-x64
           - platform: linux
             arch: aarch64
             os: ubuntu-22.04-arm
             target: aarch64-unknown-linux-gnu
             ffmpeg: linuxarm64
+            sherpa: linux-aarch64
           - platform: windows
             arch: x86_64
             os: windows-2022
             target: x86_64-pc-windows-msvc
             ffmpeg: win64
+            sherpa: win-x64
           - platform: windows
             arch: aarch64
             os: windows-11-arm
             target: aarch64-pc-windows-msvc
             ffmpeg: winarm64
+            sherpa: win-arm64
     runs-on: ${{ matrix.os }}
+    # The slowest target (Intel macOS, fat LTO) finishes in under half an
+    # hour. A job still running past this is stuck, not slow.
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: engine
-          key: ${{ matrix.target }}
 
       - name: Read the version
         id: version
@@ -139,22 +153,56 @@ jobs:
             echo "FFMPEG_DIR=$PWD/ffmpeg-dev"
             echo "LD_LIBRARY_PATH=$PWD/ffmpeg-dev/lib"
             # The shipped binary finds the libraries beside itself, in lib/.
-            echo "RUSTFLAGS=-C link-arg=-Wl,-rpath,\$ORIGIN/lib"
+            # --disable-new-dtags makes that an old-style DT_RPATH, which is
+            # consulted for *every* object in the process - DT_RUNPATH is
+            # not transitive, so libavformat's own load of libavcodec would
+            # ignore it and the staged binary would not stand alone.
+            echo "RUSTFLAGS=-C link-arg=-Wl,-rpath,\$ORIGIN/lib -C link-arg=-Wl,--disable-new-dtags"
           } >> "$GITHUB_ENV"
 
       # ── macOS ──────────────────────────────────────────────────────────
+      # FFMPEG_DIR, same as the other platforms: ffmpeg-sys honours it ahead
+      # of every fallback, so the build never depends on the runner image
+      # happening to carry a pkg-config that knows about Homebrew - the
+      # arm64 image did not, and the build died in the pkg-config fallback.
       - name: FFmpeg development libraries (macOS)
         if: matrix.platform == 'macos'
         run: |
+          set -euo pipefail
           brew install ffmpeg cmake dylibbundler
           ffmpeg_dir=$(brew --prefix ffmpeg)
           echo "FFMPEG_DIR=$ffmpeg_dir" >> "$GITHUB_ENV"
           echo "PKG_CONFIG_PATH=$ffmpeg_dir/lib/pkgconfig" >> "$GITHUB_ENV"
+          # ggml's Metal code asks `@available(macOS 15, *)` before using
+          # residency sets. Below that deployment target the question is
+          # answered at run time by ___isPlatformVersionAtLeast, which lives
+          # in clang's compiler-rt - and rustc links with -nodefaultlibs, so
+          # nothing pulls that archive in. Name it on the link line. (A
+          # build on a developer's Mac never sees this: with no deployment
+          # target set, the check is folded away at compile time.)
+          echo "RUSTFLAGS=-C link-arg=$(xcrun clang --print-file-name=libclang_rt.osx.a)" >> "$GITHUB_ENV"
 
       # ── Windows ────────────────────────────────────────────────────────
-      # libclang for bindgen. Chocolatey's LLVM is x64; the arm64 runner
-      # takes LLVM's own Windows-on-Arm installer. The BtbN zip unpacks to
-      # one top-level folder.
+      # LLVM: libclang for bindgen on both architectures, and the C/C++
+      # compiler on arm64. Chocolatey's LLVM is x64; the arm64 runner takes
+      # LLVM's own Windows-on-Arm installer. The BtbN zip unpacks to one
+      # top-level folder.
+      #
+      # On arm64 the whole C side is compiled by clang-cl rather than cl:
+      # ggml refuses MSVC for ARM outright (its NEON kernels need clang),
+      # and ring picks clang there on its own. clang-cl speaks cl's command
+      # line and links against the same CRT, so the objects mix with the
+      # rest of the build; the cc crate hands it the Visual Studio
+      # environment, and the cmake crate passes it to CMake - but only
+      # under a Ninja generator, since the Visual Studio generator chooses
+      # the compiler itself. Ninja ships on the runner image. Under Ninja
+      # the cmake crate also writes CMAKE_CXX_FLAGS itself, in place of
+      # CMake's defaults, and those defaults are where /EHsc came from;
+      # clang-cl, unlike cl, rejects `try` outright without it (ggml's
+      # gguf reader uses exceptions). CXXFLAGS travels through the cc
+      # crate into those flags - spelt with a dash, because the build
+      # step runs under Git's bash, whose MSYS layer rewrites a value
+      # that starts with a slash into a Windows path.
       - name: FFmpeg development libraries (Windows)
         if: matrix.platform == 'windows'
         shell: pwsh
@@ -164,22 +212,116 @@ jobs:
             $llvm = "21.1.0"
             curl.exe -fsSL --retry 5 --retry-all-errors -o llvm.exe "https://github.com/llvm/llvm-project/releases/download/llvmorg-$llvm/LLVM-$llvm-woa64.exe"
             Start-Process -Wait -FilePath .\llvm.exe -ArgumentList "/S"
+            "CC=clang-cl" | Out-File -FilePath $env:GITHUB_ENV -Append
+            "CXX=clang-cl" | Out-File -FilePath $env:GITHUB_ENV -Append
+            "CXXFLAGS=-EHsc" | Out-File -FilePath $env:GITHUB_ENV -Append
+            "CMAKE_GENERATOR=Ninja" | Out-File -FilePath $env:GITHUB_ENV -Append
           } else {
             choco install llvm -y --no-progress
           }
+          "C:\Program Files\LLVM\bin" | Out-File -FilePath $env:GITHUB_PATH -Append
+          "LIBCLANG_PATH=C:\Program Files\LLVM\bin" | Out-File -FilePath $env:GITHUB_ENV -Append
           $url = "$env:FFMPEG_RELEASE/ffmpeg-n$env:FFMPEG_VERSION-latest-${{ matrix.ffmpeg }}-gpl-shared-$env:FFMPEG_VERSION.zip"
           curl.exe -fsSL --retry 5 --retry-all-errors -o ffmpeg-win.zip "$url"
           Expand-Archive ffmpeg-win.zip -DestinationPath ffdl
           $dir = (Get-ChildItem ffdl -Directory | Select-Object -First 1).FullName
           "FFMPEG_DIR=$dir" | Out-File -FilePath $env:GITHUB_ENV -Append
-          "LIBCLANG_PATH=C:\Program Files\LLVM\bin" | Out-File -FilePath $env:GITHUB_ENV -Append
           "$dir\bin" | Out-File -FilePath $env:GITHUB_PATH -Append
 
+      # ── sherpa-onnx ────────────────────────────────────────────────────
+      # The prebuilt library the sys crate would otherwise fetch for
+      # itself, fetched here instead and handed over through
+      # SHERPA_ONNX_LIB_DIR. Left to the crate, the download lands inside
+      # target/, where rust-cache's cleanup does not keep it; a restored
+      # cache then replays the build script's answer without the files
+      # it points at, and the crate fails to link the moment anything
+      # makes it recompile. Outside target/, the files are there on every
+      # run. The version is the one the lockfile resolved, so a bump
+      # cannot desynchronise.
+      - name: sherpa-onnx static libraries (macOS and Linux)
+        if: matrix.platform != 'windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(grep -A1 'name = "sherpa-onnx-sys"' engine/Cargo.lock | sed -n 's/^version = "\(.*\)"/\1/p')
+          stem="sherpa-onnx-v$version-${{ matrix.sherpa }}-static-lib"
+          echo "Downloading $stem"
+          curl -fsSL --retry 5 --retry-all-errors -o sherpa.tar.bz2 "https://github.com/k2-fsa/sherpa-onnx/releases/download/v$version/$stem.tar.bz2"
+          mkdir -p sherpa
+          tar -xjf sherpa.tar.bz2 -C sherpa
+          test -d "sherpa/$stem/lib"
+          echo "SHERPA_ONNX_LIB_DIR=$PWD/sherpa/$stem/lib" >> "$GITHUB_ENV"
+
+      # On Windows it links shared (see concat-speech's manifest for why
+      # static cannot work there), from a directory holding only the
+      # import libraries. The separation matters: when the sys crate's
+      # build script sees DLLs beside the .lib files it tries to copy them
+      # into the "profile directory", located by searching OUT_DIR's
+      # ancestors for one named after $PROFILE - which panics under the
+      # custom `app` profile, whose directory is not called "release". The
+      # DLLs are kept apart and the packaging step ships them beside the
+      # binary.
+      #
+      # The archive is .tar.bz2, and Windows' own tar has no bzip2 of its
+      # own: it pipes through an external decoder, and on the x64 image
+      # that pipe can hang without a word. Python's tarfile unpacks it
+      # in-process. Each command announces itself, so a stall would name
+      # the culprit.
+      - name: sherpa-onnx shared libraries (Windows)
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $version = (Select-String -Path engine\Cargo.lock -Pattern 'name = "sherpa-onnx-sys"' -Context 0,1).Context.PostContext[0] -replace '.*"(.*)".*', '$1'
+          $stem = "sherpa-onnx-v$version-${{ matrix.sherpa }}-shared-MT-Release-lib"
+          Write-Host "Downloading $stem"
+          curl.exe -fsSL --retry 5 --retry-all-errors -o sherpa.tar.bz2 "https://github.com/k2-fsa/sherpa-onnx/releases/download/v$version/$stem.tar.bz2"
+          Write-Host "Unpacking"
+          python -c "import tarfile; t = tarfile.open('sherpa.tar.bz2'); t.extractall(**({'filter': 'data'} if hasattr(tarfile, 'data_filter') else {}))"
+          if (-not (Test-Path "$stem\lib")) { throw "$stem\lib is not there after unpacking" }
+          New-Item -ItemType Directory -Force sherpa-libs, sherpa-dlls | Out-Null
+          Copy-Item "$stem\lib\*.lib" sherpa-libs\
+          Copy-Item "$stem\lib\*.dll" sherpa-dlls\
+          "SHERPA_ONNX_LIB_DIR=$PWD\sherpa-libs" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "SHERPA_DLL_DIR=$PWD\sherpa-dlls" | Out-File -FilePath $env:GITHUB_ENV -Append
+
       # ── Build ──────────────────────────────────────────────────────────
+      # The cache comes after the environment is set, not before: its key
+      # is made from the compiler and linker variables in force (RUSTFLAGS,
+      # CC, CXX, CMAKE_*, and GGML_* added to the default set), so a change
+      # to any of them is a new key rather than a stale target/ served
+      # under the old one.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: engine
+          key: ${{ matrix.target }}
+          env-vars: CARGO CC CFLAGS CXX CMAKE RUST GGML
+
       # The shipping profile: fat LTO, panic=abort, stripped. See the
       # workspace Cargo.toml for what each knob costs.
-      - run: cargo build --profile app -p concat --target ${{ matrix.target }}
+      #
+      # Bash on every platform, teed to a log: raw job logs need a login to
+      # read, but the step summary is public - so on failure the tail of the
+      # build goes there, and a red run explains itself to anyone.
+      - name: Build
+        shell: bash
         working-directory: engine
+        run: |
+          set -o pipefail
+          cargo build --profile app -p concat --target ${{ matrix.target }} 2>&1 | tee build.log
+
+      - name: Build log to the summary (failure only)
+        if: failure()
+        shell: bash
+        run: |
+          if [ -f engine/build.log ]; then
+            {
+              echo "### Build failed: ${{ matrix.target }}"
+              echo '```'
+              tail -n 150 engine/build.log
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
 
       # ── Package: macOS ─────────────────────────────────────────────────
       # An .app bundle: the binary, an icon set made from the repository's
@@ -331,7 +473,17 @@ jobs:
           DESKTOP
           cp LICENSE THIRD_PARTY_NOTICES.md "stage/$name/"
           # The binary must resolve every library from the folder alone.
-          if env -u LD_LIBRARY_PATH ldd "stage/$name/concat" | grep -i 'not found'; then
+          # The whole ldd report goes to the public summary when it does
+          # not, so the failure names the library instead of just a step.
+          report=$(env -u LD_LIBRARY_PATH ldd "stage/$name/concat" || true)
+          if grep -i 'not found' <<<"$report"; then
+            {
+              echo "### Unresolved libraries: ${{ matrix.target }}"
+              echo '```'
+              echo "$report"
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "$report"
             echo "the binary does not resolve every library from its own folder" >&2
             exit 1
           fi
@@ -378,6 +530,8 @@ jobs:
           Get-ChildItem "engine\target\${{ matrix.target }}\app" -Filter *.dll -ErrorAction SilentlyContinue |
             Copy-Item -Destination "stage\$name\"
           Copy-Item "$env:FFMPEG_DIR\bin\*.dll" "stage\$name\"
+          # The sherpa-onnx runtime, set aside by the download step above.
+          Copy-Item "$env:SHERPA_DLL_DIR\*.dll" "stage\$name\"
           Copy-Item LICENSE, THIRD_PARTY_NOTICES.md "stage\$name\"
           Compress-Archive -Path "stage\$name" -DestinationPath "stage\$name.zip"
           if ("${{ matrix.arch }}" -eq "x86_64") {
