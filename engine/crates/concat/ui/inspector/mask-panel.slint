@@ -177,7 +177,7 @@ export component MaskPanel inherits VerticalLayout {
                 ShapeTile { row: 1; col: 1; shape: 4; label: I18n.t("Star"); glyph: Glyph.star; selected: root.mask.shape == 4; picked => { root.shape(4); } }
                 ShapeTile { row: 1; col: 2; shape: 5; label: I18n.t("Heart"); glyph: Glyph.heart; selected: root.mask.shape == 5; picked => { root.shape(5); } }
                 ShapeTile { row: 2; col: 0; shape: 6; label: I18n.t("Text"); glyph: Glyph.text-mark; selected: root.mask.shape == 6; picked => { root.shape(6); } }
-                ShapeTile { row: 2; col: 1; shape: 7; label: I18n.t("Brush"); glyph: Glyph.brush; selected: root.mask.shape == 7; picked => { root.shape(7); } }
+                ShapeTile { row: 2; col: 1; shape: 7; label: I18n.t("Brush"); glyph: Glyph.mask-brush; selected: root.mask.shape == 7; picked => { root.shape(7); } }
                 ShapeTile { row: 2; col: 2; shape: 8; label: I18n.t("Pen"); glyph: Glyph.pen; selected: root.mask.shape == 8; picked => { root.shape(8); } }
             }
         }
