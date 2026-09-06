@@ -43,7 +43,7 @@ use crate::dock::{
 use crate::format::{
     bytes, colour_of, eta, frames_timecode, hex_of, hex_with_alpha, wave_path, when_phrase,
 };
-use crate::host::{Host, MediaArt, image_at, image_of, media_art, on_ui, spawn};
+use crate::host::{Host, MediaArt, image_at, image_of, media_art, on_ui, spawn, spawn_unpublished};
 use crate::i18n::{self, t, tf};
 use crate::prefs::Preferences;
 use crate::presets::{self, TextPreset};
@@ -650,12 +650,16 @@ pub struct Studio {
     pub quality: HashMap<String, usize>,
     pub playing: bool,
     transport: slint::Timer,
+    /// Coalesces pointer-rate preview changes to one request per UI frame.
+    preview_frame: slint::Timer,
     /// One clip, held for Paste.
     pub clipboard: Option<Clip>,
     /// The monitor's last frame, and whether another is wanted.
     pub preview: slint::Image,
     preview_busy: bool,
     preview_wanted: bool,
+    /// Identifies the newest requested frame so stale worker results drop.
+    preview_generation: u64,
     /// Said once per session: a monitor that cannot decode says so, and
     /// then stops repeating itself.
     preview_failed: bool,
@@ -1100,10 +1104,12 @@ impl Studio {
             quality: HashMap::new(),
             playing: false,
             transport: slint::Timer::default(),
+            preview_frame: slint::Timer::default(),
             clipboard: None,
             preview: slint::Image::default(),
             preview_busy: false,
             preview_wanted: false,
+            preview_generation: 0,
             preview_failed: false,
             export: ExportState::default(),
             settings: SettingsState::default(),
@@ -1467,6 +1473,17 @@ impl Studio {
     /// Asks the engine for the frame at the playhead, one at a time: a
     /// request while one is out waits for it, and the newest wins.
     pub fn request_preview(&mut self) {
+        self.preview_generation = self.preview_generation.wrapping_add(1);
+        if self.preview_busy {
+            self.preview_wanted = true;
+            return;
+        }
+        self.start_preview_request();
+    }
+
+    /// Starts the newest generation without incrementing it again when a
+    /// queued request follows a worker that just completed.
+    fn start_preview_request(&mut self) {
         /// A monitor frame on its way to the window.
         enum Picture {
             /// Already on the GPU, on the window's own device.
@@ -1476,10 +1493,6 @@ impl Studio {
         }
 
         if self.on_start || self.session.is_none() {
-            return;
-        }
-        if self.preview_busy {
-            self.preview_wanted = true;
             return;
         }
         let Some(session) = self.session.as_ref() else {
@@ -1495,10 +1508,18 @@ impl Studio {
             self.title_blocks.insert(title.clip_id, title.block);
             clips.push(title.clip);
         }
-        let scale = match self.quality_of() {
+        let configured_scale: f64 = match self.quality_of() {
             0 => 1.0,
             1 => 0.5,
             _ => 0.25,
+        };
+        // Playback favours cadence over full resolution. Pausing immediately
+        // requests the configured quality again.
+        let scale = if self.playing {
+            let long_edge = f64::from(width.max(height)).max(1.0);
+            configured_scale.min(1280.0 / long_edge)
+        } else {
+            configured_scale
         };
         let width = ((f64::from(width) * scale).round() as u32).max(2) & !1;
         let height = ((f64::from(height) * scale).round() as u32).max(2) & !1;
@@ -1509,9 +1530,14 @@ impl Studio {
         };
         let settings = session.settings();
         let monitor = self.host.monitor.clone();
+        let prefetch_monitor = monitor.clone();
+        let prefetch_clips = clips.clone();
+        let prefetch_settings = settings.clone();
+        let generation = self.preview_generation;
+        let playing = self.playing;
         self.preview_busy = true;
         self.preview_wanted = false;
-        spawn(
+        spawn_unpublished(
             move || {
                 // On the window's device the frame stays a texture; without
                 // one it comes back as pixels and is uploaded here.
@@ -1524,35 +1550,76 @@ impl Studio {
                         .frame(clips.clone(), &settings, spec)
                         .map(|bytes| Picture::Pixels(bytes, width, height))
                 };
-                // Decode-ahead for whatever comes next, while the pool is warm.
-                monitor.prefetch(clips, &settings, spec, 2);
                 frame
             },
-            |studio, _, _, result| {
+            move |studio, app, models, result| {
                 studio.preview_busy = false;
-                match result {
-                    Ok(Picture::Texture(texture)) => match slint::Image::try_from(texture) {
-                        Ok(image) => studio.preview = image,
-                        Err(error) => eprintln!("concat: preview texture: {error}"),
-                    },
-                    Ok(Picture::Pixels(bytes, width, height)) => {
-                        let buffer =
-                            slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(
-                                &bytes, width, height,
-                            );
-                        studio.preview = slint::Image::from_rgba8(buffer);
-                    }
-                    Err(error) => {
-                        eprintln!("concat: preview: {error}");
-                        if !studio.preview_failed {
-                            studio.preview_failed = true;
-                            studio.notify(&tf("Preview failed: {0}", &[&error]), true);
+                let fresh = generation == studio.preview_generation;
+                // During playback, presenting the newest completed frame is
+                // smoother than discarding every result when rendering takes
+                // slightly longer than one clock tick.
+                if fresh || (playing && studio.playing) {
+                    let mut failed = false;
+                    let mut rendered = false;
+                    match result {
+                        Ok(Picture::Texture(texture)) => match slint::Image::try_from(texture) {
+                            Ok(image) => {
+                                studio.preview = image;
+                                rendered = true;
+                            }
+                            Err(error) => eprintln!("concat: preview texture: {error}"),
+                        },
+                        Ok(Picture::Pixels(bytes, width, height)) => {
+                            let buffer =
+                                slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(
+                                    &bytes, width, height,
+                                );
+                            studio.preview = slint::Image::from_rgba8(buffer);
+                            rendered = true;
                         }
+                        Err(error) => {
+                            eprintln!("concat: preview: {error}");
+                            if !studio.preview_failed {
+                                studio.preview_failed = true;
+                                studio.notify(&tf("Preview failed: {0}", &[&error]), true);
+                                failed = true;
+                            }
+                        }
+                    }
+                    studio.publish_preview(app);
+                    if failed {
+                        studio.publish_chrome(app, models);
+                    }
+                    if rendered && !studio.preview_wanted {
+                        std::thread::spawn(move || {
+                            prefetch_monitor.prefetch(
+                                prefetch_clips,
+                                &prefetch_settings,
+                                spec,
+                                if playing { 1 } else { 2 },
+                            );
+                        });
                     }
                 }
                 if studio.preview_wanted {
-                    studio.request_preview();
+                    studio.start_preview_request();
                 }
+            },
+        );
+    }
+
+    /// Schedules no more than one preview request in a 60 Hz UI interval.
+    pub fn schedule_preview_frame(&mut self) {
+        if self.preview_frame.running() {
+            return;
+        }
+        self.preview_frame.start(
+            slint::TimerMode::SingleShot,
+            std::time::Duration::from_millis(16),
+            || {
+                crate::host::Shell::with(|shell, _| {
+                    shell.studio.borrow_mut().request_preview();
+                });
             },
         );
     }
@@ -1562,6 +1629,7 @@ impl Studio {
     pub fn play_toggle(&mut self) {
         if self.playing {
             self.pause();
+            self.request_preview();
             return;
         }
         if self.session.is_none() {
@@ -1592,7 +1660,7 @@ impl Studio {
                             studio.request_preview();
                         }
                     }
-                    shell.studio.borrow().publish_lanes(&app, &shell.models);
+                    shell.studio.borrow().publish_transport(&app, &shell.models);
                 });
             },
         );
@@ -4607,6 +4675,39 @@ impl Studio {
         self.publish_dock(app, models);
     }
 
+    /// Publishes only the monitor image. A completed decode should not rebuild
+    /// the timeline, inspector, dock, and library models.
+    pub fn publish_preview(&self, app: &App) {
+        app.global::<Editor>()
+            .set_preview_frame(self.preview.clone());
+    }
+
+    /// Publishes only the state that changes on a playback clock tick.
+    pub fn publish_transport(&self, app: &App, models: &Models) {
+        let editor = app.global::<Editor>();
+        editor.set_playhead(self.playhead);
+        editor.set_playing(self.playing);
+        let playhead = f64::from(self.playhead);
+        let showing = self
+            .timeline()
+            .clips
+            .iter()
+            .filter(|clip| {
+                (clip.kind.is_visual() || clip.kind == model::ClipKind::Text)
+                    && clip.start <= playhead
+                    && playhead < clip.start + clip.duration
+            })
+            .max_by_key(|clip| -self.row_of(&clip.track_id));
+        editor.set_has_picture(showing.is_some());
+        editor.set_preview_clip_name(
+            showing
+                .map(|clip| clip.name.as_str())
+                .unwrap_or_default()
+                .into(),
+        );
+        sync(&models.stage, self.stage_items());
+    }
+
     pub fn publish_dock(&self, _app: &App, models: &Models) {
         let out = self.dock_layout();
         sync(&models.seats, out.seats);
@@ -5019,7 +5120,6 @@ impl Studio {
         };
         self.seek((start + target * duration) as f32);
     }
-
 
     /// The selection, flattened for the inspector: exactly one clip or
     /// nothing.
