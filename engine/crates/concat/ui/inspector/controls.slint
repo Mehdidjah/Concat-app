@@ -6,6 +6,7 @@ import { Theme } from "../theme/theme.slint";
 import { Fmt } from "../util.slint";
 import { Glyph, Icon } from "../icons.slint";
 import { NumberField } from "../primitives/number-field.slint";
+import { IconButton } from "../primitives/panel.slint";
 import { ClipField, ClipKeyData, Keyframes } from "../timeline/model.slint";
 
 // The clip inspector's controls: a horizontal fader, the Param row that
@@ -423,8 +424,13 @@ export component Param inherits VerticalLayout {
     /// row would otherwise claim to be keying scale.
     in property <bool> keyable: false;
     in property <ClipField> field;
+    /// A caller-owned key button for properties outside ClipField, such as
+    /// an individual mask's geometry.
+    in property <bool> custom-keyframe: false;
+    in property <bool> keyframed: false;
 
     callback changed(value: float);
+    callback keyframe-toggled(on: bool);
 
     padding-left: Theme.pad;
     padding-right: Theme.pad;
@@ -454,6 +460,16 @@ export component Param inherits VerticalLayout {
         if root.keyable: VerticalLayout {
             alignment: center;
             KeyCluster { field: root.field; }
+        }
+        if root.custom-keyframe: Rectangle { width: 6px; }
+        if root.custom-keyframe: VerticalLayout {
+            alignment: center;
+            IconButton {
+                glyph: Glyph.keyframe;
+                label: root.keyframed ? I18n.t("Remove keyframe") : I18n.t("Add keyframe");
+                checked: root.keyframed;
+                clicked => { root.keyframe-toggled(!root.keyframed); }
+            }
         }
     }
 
