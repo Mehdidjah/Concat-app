@@ -289,6 +289,29 @@ mod tests {
     }
 
     #[test]
+    fn a_mask_uses_its_independent_position_keys() {
+        let mut frame = Frame::from_rgba(32, 32, vec![255; 32 * 32 * 4]).unwrap();
+        let mut mask = ClipMask::new("mask1".to_owned(), MaskShape::Circle);
+        mask.width = 0.2;
+        mask.height = 0.2;
+        mask.set_key(
+            MaskProperty::PositionX,
+            0.0,
+            0.0,
+            concat_project::model::KeyEase::LINEAR,
+        );
+        mask.set_key(
+            MaskProperty::PositionX,
+            1.0,
+            0.5,
+            concat_project::model::KeyEase::LINEAR,
+        );
+        cut(&mut frame, &[mask], 1.0, &BTreeMap::new());
+        assert_eq!(frame.pixel(16, 16).unwrap()[3], 0);
+        assert!(frame.pixel(24, 16).unwrap()[3] > 240);
+    }
+
+    #[test]
     fn empty_drawing_masks_leave_the_picture_alone() {
         let mut frame = Frame::from_rgba(8, 8, vec![255; 8 * 8 * 4]).unwrap();
         let mask = ClipMask::new("mask1".to_owned(), MaskShape::Brush);

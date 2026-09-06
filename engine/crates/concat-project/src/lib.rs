@@ -40,7 +40,7 @@ mod tests {
     use crate::commands::{ClipMove, ClipPatch, Command, TrackFlag, TrimEdge};
     use crate::doc::DocumentSettings;
     use crate::editor::Editor;
-    use crate::model::{ClipKind, MaskShape, MediaKind, TextStyle};
+    use crate::model::{ClipKind, KeyEase, MaskProperty, MaskShape, MediaKind, TextStyle};
 
     fn media(path: &str, duration: f64, has_audio: bool) -> Command {
         Command::AddMedia {
@@ -112,6 +112,8 @@ mod tests {
 
         let mut mask = editor.project().active().clips[0].masks[0].clone();
         mask.position_x = 0.25;
+        mask.set_key(MaskProperty::PositionX, 0.0, 0.25, KeyEase::LINEAR);
+        mask.set_key(MaskProperty::PositionX, 1.0, 0.75, KeyEase::IN_OUT);
         editor
             .apply(Command::UpdateClipMask {
                 clip_id: clip_id.clone(),
@@ -125,6 +127,8 @@ mod tests {
         assert!(clip.masks_enabled);
         assert_eq!(clip.masks[0].shape, MaskShape::Circle);
         assert_eq!(clip.masks[0].position_x, 0.25);
+        assert_eq!(clip.masks[0].keys.len(), 2);
+        assert!((clip.masks[0].value_at(MaskProperty::PositionX, 0.5) - 0.5).abs() < 1e-6);
 
         editor
             .apply(Command::RemoveClipMask { clip_id, mask_id })
