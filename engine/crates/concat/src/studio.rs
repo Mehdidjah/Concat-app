@@ -1001,6 +1001,7 @@ fn adjust_rows(chain: &[AppliedFilter]) -> Vec<AppliedParamData> {
             entry: -1,
             key: param.key.as_str().into(),
             label: t(&param.label).into(),
+            group: t(&param.group).into(),
             min: param.min as f32,
             max: param.max as f32,
             step: if param.step > 0.0 {
@@ -1051,6 +1052,7 @@ fn chain_rows(chain: &[AppliedFilter]) -> (Vec<AppliedEntryData>, Vec<AppliedPar
                 entry: index as i32,
                 key: concat_effects::catalogue::INTENSITY.into(),
                 label: t("Intensity").into(),
+                group: "".into(),
                 min: 0.0,
                 max: 100.0,
                 step: 1.0,
@@ -1073,6 +1075,7 @@ fn chain_rows(chain: &[AppliedFilter]) -> (Vec<AppliedEntryData>, Vec<AppliedPar
                 entry: index as i32,
                 key: param.key.as_str().into(),
                 label: t(&param.label).into(),
+                group: "".into(),
                 min: param.min as f32,
                 max: param.max as f32,
                 step: step as f32,

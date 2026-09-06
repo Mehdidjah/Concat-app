@@ -406,6 +406,10 @@ export component KeyCluster inherits HorizontalLayout {
 // unit you reason about — "none", "auto", "1.00x"), the fader and a raw
 // number field below. Keeping both is what lets a fade of zero say "none"
 // without making zero un-typeable.
+//
+// Without the slider the whole thing is one line: label, readout, keys and
+// the number field, which scrubs on a drag just as the fader would. That is
+// the shape for a stack of knobs that are typed or nudged more than ridden.
 export component Param inherits VerticalLayout {
     in property <string> label;
     in-out property <float> value;
@@ -418,6 +422,9 @@ export component Param inherits VerticalLayout {
     /// Ride the Rail instead of the Fader — for the one setting a section is
     /// named after, not for a list of knobs.
     in property <bool> rail: false;
+    /// Off drops the fader and folds the row into one line; the number
+    /// field alone carries the value, and drags for it.
+    in property <bool> slider: true;
     /// Show the keyframe cluster, and which field it keys. Opt-in rather
     /// than derived from `field`, because a Slint enum property with nothing
     /// assigned to it is its first variant and not "none" - every unkeyable
@@ -454,8 +461,21 @@ export component Param inherits VerticalLayout {
             vertical-alignment: center;
         }
 
-        // On the readout's side rather than under the slider: the cluster is
-        // about the value, and the value is what it sits beside.
+        if !root.slider: Rectangle { width: 8px; }
+        if !root.slider: NumberField {
+            width: 64px;
+            value <=> root.value;
+            minimum: root.minimum;
+            maximum: root.maximum;
+            step: root.step;
+            precision: InspectorFmt.precision-of(root.step);
+            enabled: root.enabled;
+            changed(v) => { root.changed(v); }
+        }
+
+        // On the readout's side rather than under the slider, and after the
+        // number field when that is on the line: the cluster is about the
+        // value, and it trails whatever last states the value.
         if root.keyable: Rectangle { width: 6px; }
         if root.keyable: VerticalLayout {
             alignment: center;
@@ -473,7 +493,7 @@ export component Param inherits VerticalLayout {
         }
     }
 
-    HorizontalLayout {
+    if root.slider: HorizontalLayout {
         spacing: 8px;
 
         // One row, either slider. See Rail's header for which belongs where;
@@ -502,7 +522,7 @@ export component Param inherits VerticalLayout {
             changed(v) => { root.changed(v); }
         }
 
-        field := NumberField {
+        NumberField {
             width: 64px;
             value <=> root.value;
             minimum: root.minimum;
@@ -512,6 +532,29 @@ export component Param inherits VerticalLayout {
             enabled: root.enabled;
             changed(v) => { root.changed(v); }
         }
+    }
+}
+
+// A label over a run of rows inside one section - Color, Lightness,
+// Effects on the Adjust tab. Lighter than a SectionHeader, since it groups
+// knobs rather than opening a drawer: muted text and a hairline under it.
+export component Subhead inherits VerticalLayout {
+    in property <string> title;
+
+    padding-left: Theme.pad;
+    padding-right: Theme.pad;
+    padding-top: 6px;
+    spacing: 6px;
+
+    Text {
+        text: root.title;
+        color: Theme.fg-muted;
+        font-size: Theme.fs;
+        font-weight: Theme.weight-title;
+    }
+    Rectangle {
+        height: 1px;
+        background: Theme.line;
     }
 }
 
