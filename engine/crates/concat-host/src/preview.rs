@@ -154,15 +154,11 @@ impl Monitor {
         spec: FrameSpec,
     ) -> Result<Vec<u8>, String> {
         let request = Self::request(clips, settings, spec);
-        let sources = concat_export::preview_sources_cached(
+        concat_export::preview_frame_cached(
             &self.pool,
             &request,
-            false,
             &mut self.prepared.lock().unwrap_or_else(|e| e.into_inner()),
-        )?;
-        Ok(sources
-            .composite(&mut concat_render::CpuCompositor)
-            .into_pixels())
+        )
     }
 
     /// Decode-ahead for the playback stream: warms the pool for the next

@@ -1620,6 +1620,17 @@ pub fn preview_sources_cached(
     preview_sources_from(pool, request, &entry.built, rate)
 }
 
+/// CPU-composited counterpart to [`preview_sources_cached`].
+pub fn preview_frame_cached(
+    pool: &concat_media::ReaderPool,
+    request: &PreviewFrameRequest,
+    cache: &mut PreviewCache,
+) -> Result<Vec<u8>, String> {
+    Ok(preview_sources_cached(pool, request, false, cache)?
+        .composite(&mut CpuCompositor)
+        .into_pixels())
+}
+
 fn preview_structure_matches(previous: &[ExportClip], next: &[ExportClip]) -> bool {
     previous.len() == next.len()
         && previous.iter().zip(next).all(|(previous, next)| {
@@ -1950,6 +1961,46 @@ mod tests {
             kind: kind.to_owned(),
             duration,
         })
+    }
+
+    #[test]
+    fn preview_cache_reuses_animation_and_mask_key_changes_only() {
+        let original = clip("video", 0, 0.0, 2.0, 0.0);
+        let mut animated = original.clone();
+        animated.animation.push(ExportKey {
+            property: "scale".to_owned(),
+            at: 0.5,
+            value: 1.25,
+            ease: linear_ease(),
+        });
+        assert!(preview_structure_matches(
+            std::slice::from_ref(&original),
+            std::slice::from_ref(&animated)
+        ));
+
+        let mut masked = original.clone();
+        masked.masks_enabled = true;
+        masked
+            .masks
+            .push(ClipMask::new("mask1".to_owned(), MaskShape::Rectangle));
+        let mut keyed = masked.clone();
+        keyed.masks[0].set_key(
+            concat_project::model::MaskProperty::PositionX,
+            0.5,
+            0.25,
+            concat_project::model::KeyEase::LINEAR,
+        );
+        assert!(preview_structure_matches(
+            std::slice::from_ref(&masked),
+            std::slice::from_ref(&keyed)
+        ));
+
+        let mut changed_geometry = keyed;
+        changed_geometry.masks[0].feather = 0.1;
+        assert!(!preview_structure_matches(
+            std::slice::from_ref(&masked),
+            std::slice::from_ref(&changed_geometry)
+        ));
     }
 
     /// End to end against a real FFmpeg: the paused monitor's frame must show
