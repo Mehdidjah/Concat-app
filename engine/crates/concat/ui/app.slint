@@ -33,29 +33,29 @@ import { PaneKind } from "workspace/pane-switcher.slint";
 import { RecentProjectData, StartData, StartScreen } from "start.slint";
 import { TitleBar } from "title-bar.slint";
 import {
-    AppliedEntryData, AppliedParamData, CatalogueEntryData,
+    AppliedEntryData, AppliedParamData, CatalogueEntryData, Library, LibraryViewData,
 } from "inspector/clip-inspector.slint";
 import { ParamFormat } from "inspector/controls.slint";
 import { ToastData, ToastLayer } from "primitives/toast.slint";
 import { TooltipLayer } from "primitives/tooltip.slint";
 import { Workspace } from "workspace/workspace.slint";
 import {
-    ClipData, ClipField, ClipKind, ClipTextField, DropData, KeyframeGraphData,
-    KeyframeGraphPointData, KeyframeMarkerData, SelectedClipData,
-    StageGuideData, StageItemData, TextAlignment, TimelineTabData, TimelineTool,
-    TrackData, TrackSize,
+    ClipData, ClipField, ClipKeyData, ClipKind, ClipTextField, DropData, Keyframes,
+    KeyframeGraphData, KeyframeGraphPointData, KeyframeMarkerData,
+    SelectedClipData, StageGuideData, StageItemData, TextAlignment, TimelineTabData,
+    TimelineTool, TrackData, TrackSize,
 } from "timeline/model.slint";
 
 // Re-exported so main.rs can reach the globals and the struct.
 export {
     Curves, Fmt, Payload, Theme, Bezier, Editor, I18n,
-    AppliedEntryData, AppliedParamData, CatalogueEntryData, ParamFormat,
+    AppliedEntryData, AppliedParamData, CatalogueEntryData, Library, LibraryViewData, ParamFormat,
     DockDivider, DockSide, PaneKind, SeatBox,
     EffectData, MediaFilter, MediaItemData, MediaKind, TextPresetData,
-    ClipData, ClipField, ClipKind, ClipTextField, DropData, KeyframeGraphData,
-    KeyframeGraphPointData, KeyframeMarkerData, SelectedClipData,
-    StageGuideData, StageItemData, TextAlignment, TimelineTabData, TimelineTool,
-    TrackData, TrackSize, MenuItemData, MenuRow, ExportData, ExportPhase, ModelData, SettingsData,
+    ClipData, ClipField, ClipKeyData, ClipKind, ClipTextField, DropData, Keyframes,
+    KeyframeGraphData, KeyframeGraphPointData, KeyframeMarkerData,
+    SelectedClipData, StageGuideData, StageItemData, TextAlignment, TimelineTabData,
+    TimelineTool, TrackData, TrackSize, MenuItemData, MenuRow, ExportData, ExportPhase, ModelData, SettingsData,
     RecentProjectData, StartData, SystemFactData, ToastData, ProjectSheetData,
     CaptionsSheetData, SpeechSheetData,
 }
@@ -123,6 +123,19 @@ export component App inherits Window {
 
     callback titlebar-begin-drag();
     callback titlebar-toggle-maximize();
+    /// The strip's own window buttons, where the platform's decorations were
+    /// taken off; see platform.rs.
+    callback titlebar-minimize();
+    callback titlebar-close();
+    /// Draw minimise / maximise / close on the strip. False on macOS, where
+    /// the traffic lights are the window's own.
+    in property <bool> own-window-buttons;
+    /// Read back from the platform on every resize, so the strip can show
+    /// restore rather than maximise - whichever route maximised it.
+    in-out property <bool> window-maximized;
+    callback window-resized();
+    changed width => { root.window-resized(); }
+    changed height => { root.window-resized(); }
     // The dialogs. Both are held at the root because Slint has no portal: a
     // modal has to be declared where it is drawn, and it is drawn over
     // everything.
@@ -351,8 +364,12 @@ export component App inherits Window {
                     root.menu-opened(index);
                 }
 
+                own-buttons: root.own-window-buttons;
+                maximized: root.window-maximized;
                 begin-drag => { root.titlebar-begin-drag(); }
                 toggle-maximize => { root.titlebar-toggle-maximize(); }
+                minimize => { root.titlebar-minimize(); }
+                close => { root.titlebar-close(); }
                 open-settings => { root.open-settings(); }
                 add-pane(kind) => { Editor.dock-add(kind); }
                 export-clicked => { root.export-clicked(); }

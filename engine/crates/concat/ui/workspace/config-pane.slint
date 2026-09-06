@@ -8,7 +8,7 @@ import { Pane, PaneBody, PaneScroll } from "pane.slint";
 import { PaneKind, PaneSwitcher } from "pane-switcher.slint";
 import { EffectData } from "../demo/effects-panel.slint";
 import {
-    AdjustPanel, AnimationPanel, AppliedEntryData, AppliedParamData, AudioPanel,
+    AdjustPanel, AnimationPanel, AppliedEntryData, AppliedParamData, AudioPanel, ProcessorRows,
     CatalogueEntryData, FilterPanel, PresetStack, SpeedPanel, VideoPanel,
 } from "../inspector/clip-inspector.slint";
 import { TextPanel } from "../inspector/text-panel.slint";
@@ -103,6 +103,10 @@ export component ConfigPane inherits Rectangle {
     property <bool> has-selection: root.selected.present;
     in property <string> project-name: I18n.t("Untitled project");
     in property <string> project-folder: "—";
+    /// The active timeline, whose frame, rate and duration the rows below
+    /// report. Named in the panel so a project with three cuts at three
+    /// frames never leaves anyone wondering which one "1080 × 1920" is.
+    in property <string> timeline-name: I18n.t("Timeline 1");
     in property <string> project-output: "1080 x 1920";
     in property <string> project-rate: "30.00 fps";
     in property <string> project-duration: "00:00:00:00";
@@ -367,7 +371,13 @@ export component ConfigPane inherits Rectangle {
                     FactHeading { title: I18n.t("PROJECT"); }
                     FactRow { label: I18n.t("Name"); value: root.project-name; }
                     FactRow { label: I18n.t("Folder"); value: root.project-folder; }
-                    FactRow { label: I18n.t("Output"); value: root.project-output; }
+
+                    // The frame is a timeline's, not the project's: two cuts
+                    // of one edit can be two shapes, and these rows say which
+                    // one they are describing.
+                    FactHeading { title: I18n.t("TIMELINE"); }
+                    FactRow { label: I18n.t("Name"); value: root.timeline-name; }
+                    FactRow { label: I18n.t("Frame"); value: root.project-output; }
                     FactRow { label: I18n.t("Rate"); value: root.project-rate; }
                     FactRow { label: I18n.t("Duration"); value: root.project-duration; }
 
@@ -604,9 +614,19 @@ export component ConfigPane inherits Rectangle {
                         set(field, value) => { root.clip-set(field, value); }
                         commit => { root.clip-commit(); }
                     }
+                    // The three treatments, between the mix and the library:
+                    // they are chain links like any other, but they are the
+                    // ones a sound clip usually needs, so they get a switch
+                    // rather than a search.
+                    ProcessorRows {
+                        applied: root.applied-audio;
+                        add(id) => { root.chain-add(true, id); }
+                        remove(index) => { root.chain-remove(true, index); }
+                    }
                     PresetStack {
                         noun: I18n.t("audio effect");
                         library-title: I18n.t("Audio effects");
+                        shelf: 2;
                         group-labels: root.audio-groups;
                         catalogue: root.catalogue-audio;
                         applied: root.applied-audio;
@@ -632,6 +652,7 @@ export component ConfigPane inherits Rectangle {
                 if root.showing == "Filters": PresetStack {
                     noun: I18n.t("filter");
                     library-title: I18n.t("Filter library");
+                    shelf: 0;
                     group-labels: root.filter-groups;
                     catalogue: root.catalogue-filters;
                     applied: root.applied-visual;
@@ -653,6 +674,7 @@ export component ConfigPane inherits Rectangle {
                 if root.showing == "Effects": PresetStack {
                     noun: I18n.t("effect");
                     library-title: I18n.t("Effect library");
+                    shelf: 1;
                     group-labels: root.effect-groups;
                     catalogue: root.catalogue-effects;
                     applied: root.applied-visual;

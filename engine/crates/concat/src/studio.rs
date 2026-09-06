@@ -129,6 +129,28 @@ pub const START_RATES: [(&str, i64, i64); 5] = [
     ("60", 60, 1),
 ];
 
+/// What one effect library is showing: the words typed into it, the shelf
+/// picked, and whether the star is down.
+///
+/// Held here rather than in the panel because the filtering is done here:
+/// the model a library renders arrives already narrowed, which is what lets
+/// it be laid out as a grid - a tile's place is its index, and an index only
+/// means a place when every entry in the model is one that shows.
+#[derive(Clone, Debug, Default)]
+pub struct LibraryView {
+    /// The search box's text.
+    pub query: String,
+    /// The chosen shelf, as an index into the kind's group list.
+    pub group: i32,
+    /// Only starred packages show, whatever shelf they are on.
+    pub favourites: bool,
+}
+
+/// Which library a shelf index names. The numbers are the panel's own -
+/// `PresetStack.shelf` - and the order the tabs sit in.
+pub const SHELF_KINDS: [PackageKind; 3] =
+    [PackageKind::Filter, PackageKind::Effect, PackageKind::Audio];
+
 /// The transcriber's languages: the rows of the Auto / English / Chinese
 /// control in Settings > Transcriber, and the whisper code each means.
 pub const TRANSCRIBE_LANGUAGES: [&str; 3] = ["auto", "en", "zh"];
@@ -684,6 +706,9 @@ pub fn sync<T: Clone + PartialEq + 'static>(model: &VecModel<T>, next: Vec<T>) {
 pub struct Studio {
     pub host: Host,
     pub prefs: Preferences,
+    /// What each effect library is showing, indexed the way `SHELF_KINDS`
+    /// is: 0 filters, 1 effects, 2 audio.
+    pub library: [LibraryView; 3],
 
     // ── the edit ──
     pub session: Option<Session>,
@@ -726,7 +751,7 @@ pub struct Studio {
     pub tool: TimelineTool,
     pub snap: bool,
     /// 0 Full, 1 Half, 2 Quarter of the output size, for the monitor.
-    pub quality: usize,
+    pub quality: HashMap<String, usize>,
     pub playing: bool,
     transport: slint::Timer,
     /// Coalesces pointer-rate animation edits to one monitor request per UI
@@ -852,6 +877,7 @@ fn keyframe_property(field: ClipField) -> Option<KeyframeProperty> {
         ClipField::StretchX => Some(KeyframeProperty::StretchX),
         ClipField::StretchY => Some(KeyframeProperty::StretchY),
         ClipField::Opacity => Some(KeyframeProperty::Opacity),
+        ClipField::Volume => Some(KeyframeProperty::Volume),
         ClipField::LayerOrder => Some(KeyframeProperty::LayerOrder),
         _ => None,
     }
@@ -882,6 +908,7 @@ fn clip_property(clip: &Clip, property: KeyframeProperty) -> f64 {
         KeyframeProperty::StretchX => clip.stretch_x,
         KeyframeProperty::StretchY => clip.stretch_y,
         KeyframeProperty::Opacity => clip.opacity,
+        KeyframeProperty::Volume => clip.volume,
         KeyframeProperty::LayerOrder => clip.layer_order,
         KeyframeProperty::TimeRemap => clip.speed,
     }
@@ -900,6 +927,7 @@ fn clamp_keyframe_value(property: KeyframeProperty, value: f64) -> f64 {
         KeyframeProperty::PositionZ => value.clamp(-10.0, 10.0),
         KeyframeProperty::StretchX | KeyframeProperty::StretchY => value.clamp(0.01, 16.0),
         KeyframeProperty::Opacity => value.clamp(0.0, 1.0),
+        KeyframeProperty::Volume => value.max(0.0),
         KeyframeProperty::LayerOrder => value.clamp(-128.0, 128.0).round(),
         KeyframeProperty::TimeRemap => value.clamp(0.0625, 16.0),
     }
@@ -919,6 +947,7 @@ fn set_clip_property(clip: &mut Clip, property: KeyframeProperty, value: f64) {
         KeyframeProperty::StretchX => clip.stretch_x = value,
         KeyframeProperty::StretchY => clip.stretch_y = value,
         KeyframeProperty::Opacity => clip.opacity = value,
+        KeyframeProperty::Volume => clip.volume = value,
         KeyframeProperty::LayerOrder => clip.layer_order = value,
         KeyframeProperty::TimeRemap => clip.speed = value,
     }
@@ -1224,9 +1253,14 @@ fn new_title_style() -> TextStyle {
 /// A label for a catalogue id: "black-white" reads as "Black White".
 /// One kind's shelves for the inspector: the shelf labels, in catalogue
 /// order, and every package on them with the index of its shelf.
-fn shelves(kind: PackageKind) -> (Vec<SharedString>, Vec<CatalogueEntryData>) {
+fn shelves(
+    kind: PackageKind,
+    view: &LibraryView,
+    favourites: &[String],
+) -> (Vec<SharedString>, Vec<CatalogueEntryData>) {
     let mut groups: Vec<String> = Vec::new();
     let mut entries = Vec::new();
+    let query = view.query.trim().to_lowercase();
     for package in Catalogue::builtin().of_kind(kind) {
         let meta = &package.manifest.effect;
         // The colour panel's own package: every picture clip can carry it,
@@ -1248,12 +1282,32 @@ fn shelves(kind: PackageKind) -> (Vec<SharedString>, Vec<CatalogueEntryData>) {
                 groups.len() - 1
             }
         };
+        // The shelves are built from every package and only the entries are
+        // narrowed: a strip that lost a segment because a search matched
+        // nothing on it would move under the pointer as you typed.
+        let name = t(&meta.name);
+        let description = t(&meta.description);
+        let starred = favourites.iter().any(|held| held == &meta.id);
+        let shown = if view.favourites {
+            starred
+        } else if !query.is_empty() {
+            // Across every shelf while a query is live. Someone typing
+            // "echo" wants the echo, not the echo that happens to be filed
+            // where they were already looking.
+            name.to_lowercase().contains(&query) || description.to_lowercase().contains(&query)
+        } else {
+            group as i32 == view.group
+        };
+        if !shown {
+            continue;
+        }
         entries.push(CatalogueEntryData {
             id: meta.id.as_str().into(),
-            name: t(&meta.name).into(),
+            name: name.into(),
             category: t(&category).into(),
             group: group as i32,
-            description: t(&meta.description).into(),
+            description: description.into(),
+            favourite: starred,
         });
     }
     (
@@ -1336,6 +1390,19 @@ fn commit_key(commands: &[Command]) -> String {
         .join(",")
 }
 
+/// The field a keyable property is set through - the inverse of
+/// `Studio::key_property_of`, for handing a row back to the panel.
+fn key_field_of(property: model::KeyProperty) -> ClipField {
+    match property {
+        model::KeyProperty::Scale => ClipField::Scale,
+        model::KeyProperty::OffsetX => ClipField::OffsetX,
+        model::KeyProperty::OffsetY => ClipField::OffsetY,
+        model::KeyProperty::Rotation => ClipField::Rotation,
+        model::KeyProperty::Opacity => ClipField::Opacity,
+        model::KeyProperty::Volume => ClipField::Volume,
+    }
+}
+
 /// The menu row of a slot's animation: -1 for none.
 fn slot_index(
     slot: concat_project::model::AnimationSlot,
@@ -1388,6 +1455,7 @@ fn adjust_rows(chain: &[AppliedFilter]) -> Vec<AppliedParamData> {
             entry: -1,
             key: param.key.as_str().into(),
             label: t(&param.label).into(),
+            group: t(&param.group).into(),
             min: param.min as f32,
             max: param.max as f32,
             step: if param.step > 0.0 {
@@ -1450,6 +1518,7 @@ fn chain_rows(
                 entry: index as i32,
                 key: concat_effects::catalogue::INTENSITY.into(),
                 label: t("Intensity").into(),
+                group: "".into(),
                 min: 0.0,
                 max: 100.0,
                 step: 1.0,
@@ -1474,6 +1543,7 @@ fn chain_rows(
                 entry: index as i32,
                 key: param.key.as_str().into(),
                 label: t(&param.label).into(),
+                group: "".into(),
                 min: param.min as f32,
                 max: param.max as f32,
                 step: step as f32,
@@ -1531,6 +1601,7 @@ impl Studio {
         let text_presets = presets::all(&host.dirs);
         let mut studio = Self {
             prefs,
+            library: Default::default(),
             session: None,
             echo: None,
             empty: Project::new(),
@@ -1554,7 +1625,7 @@ impl Studio {
             seconds_per_pixel: 0.05,
             tool: TimelineTool::Select,
             snap: true,
-            quality: 1,
+            quality: HashMap::new(),
             playing: false,
             transport: slint::Timer::default(),
             preview_frame: slint::Timer::default(),
@@ -1636,23 +1707,34 @@ impl Studio {
         self.timeline().clip(id)
     }
 
-    /// The window's frame rate, from the session's settings.
+    /// The active timeline's frame rate. With no project open, the empty
+    /// project's one timeline answers, at the default.
     pub fn frame_rate(&self) -> f32 {
-        self.session
-            .as_ref()
-            .map(|session| {
-                let settings = session.settings();
-                settings.rate_num as f32 / settings.rate_den.max(1) as f32
-            })
-            .unwrap_or(30.0)
+        self.project().active().video.rate() as f32
     }
 
-    /// The output size, from the session's settings.
+    /// The active timeline's output size.
     pub fn output_size(&self) -> (u32, u32) {
-        self.session
-            .as_ref()
-            .map(|session| (session.settings().width, session.settings().height))
-            .unwrap_or((1920, 1080))
+        let video = self.project().active().video;
+        (video.width, video.height)
+    }
+
+    /// The monitor's quality tier for the active timeline: 0 full, 1 half,
+    /// 2 quarter. Kept per timeline because the cost it trades against is
+    /// the timeline's frame - a 4K cut wants the quarter setting that a
+    /// 1080p cut beside it does not - and the trade is the window's, not
+    /// the document's, so it is remembered here and not saved.
+    pub fn quality_of(&self) -> usize {
+        self.quality
+            .get(&self.project().active_timeline_id)
+            .copied()
+            .unwrap_or(1)
+    }
+
+    /// Picks the monitor's quality tier for the active timeline.
+    pub fn set_quality(&mut self, index: usize) {
+        let id = self.project().active_timeline_id.clone();
+        self.quality.insert(id, index.min(2));
     }
 
     /// The track a row index names. Rows count from the top of the panel and
@@ -1864,7 +1946,7 @@ impl Studio {
             return;
         };
         self.autosave.stop();
-        let (path, document) = session.prepare_save(None, None, None);
+        let (path, document) = session.prepare_save(None);
         self.dirty = false;
         spawn(
             move || projects::save(&path, &document),
@@ -1902,6 +1984,16 @@ impl Studio {
                 duration: piece.duration,
                 source_start: piece.source_start,
                 volume: piece.volume as f32,
+                volume_curve: piece
+                    .volume_curve
+                    .keys()
+                    .iter()
+                    .map(|key| concat_host::playback::GainKey {
+                        at: key.at,
+                        gain: key.value,
+                        ease: [key.ease.x1, key.ease.y1, key.ease.x2, key.ease.y2],
+                    })
+                    .collect(),
                 fade_in: piece.fade_in,
                 fade_out: piece.fade_out,
                 speed: piece.speed,
@@ -1951,7 +2043,7 @@ impl Studio {
         };
         let (width, height) = self.output_size();
         let clips = self.preview_clips(width, height);
-        let configured_scale: f64 = match self.quality {
+        let configured_scale: f64 = match self.quality_of() {
             0 => 1.0,
             1 => 0.5,
             _ => 0.25,
@@ -5151,7 +5243,7 @@ impl Studio {
         self.host.cutouts.cancel();
         self.cutout_jobs.clear();
         if let Some(session) = self.session.as_mut() {
-            let (path, document) = session.prepare_save(None, None, None);
+            let (path, document) = session.prepare_save(None);
             if let Err(error) = projects::save(&path, &document) {
                 self.notify(&tf("Could not save: {0}", &[&error]), true);
                 return;
@@ -5813,7 +5905,7 @@ impl Studio {
             return;
         };
         let document = session.document();
-        let settings = session.settings().clone();
+        let settings = session.settings();
         let path = session.path().to_owned();
         let name = format!("{} template", self.project_name);
         let config = self.host.dirs.config.clone();
@@ -6360,6 +6452,12 @@ impl Studio {
         });
 
         editor.set_selected_clip(self.selected());
+        // The keyframe cluster's state, on its own global: every keyable row
+        // in the inspector reads it, and none of them is threaded to.
+        let keys = app.global::<Keyframes>();
+        let rows = self.key_rows();
+        keys.set_available(!rows.is_empty());
+        keys.set_rows(slint::ModelRc::from(Rc::new(VecModel::from(rows))));
         editor.set_inspector_jump_token(self.inspector_jump.0);
         editor.set_inspector_jump_tab(self.inspector_jump.1.into());
         editor.set_inspector_jump_section(self.inspector_jump.2.into());
@@ -6436,6 +6534,179 @@ impl Studio {
                 _ => Vec::new(),
             },
         );
+    }
+
+    // ── the effect libraries ──
+
+    /// The view state of one library, or None for a shelf index the panel
+    /// should never have sent.
+    fn library_at(&mut self, shelf: i32) -> Option<&mut LibraryView> {
+        self.library.get_mut(usize::try_from(shelf).ok()?)
+    }
+
+    /// The search box was typed in. A live query searches every shelf, so
+    /// the strip is put away while one is running - see `shelves`.
+    pub fn library_query(&mut self, shelf: i32, text: &str) {
+        if let Some(view) = self.library_at(shelf) {
+            view.query = text.to_owned();
+        }
+    }
+
+    /// A shelf was picked. Typing and then picking a shelf means the shelf,
+    /// so the query goes.
+    pub fn library_group(&mut self, shelf: i32, index: i32) {
+        if let Some(view) = self.library_at(shelf) {
+            view.group = index.max(0);
+            view.query.clear();
+            view.favourites = false;
+        }
+    }
+
+    /// The star chip. Turning it on clears the query for the same reason
+    /// picking a shelf does: two filters at once is a list nobody can
+    /// predict the contents of.
+    pub fn library_favourites(&mut self, shelf: i32, on: bool) {
+        if let Some(view) = self.library_at(shelf) {
+            view.favourites = on;
+            view.query.clear();
+        }
+    }
+
+    /// Star or unstar a package, and remember it. Not per library: a star is
+    /// a fact about the package.
+    pub fn library_favourite(&mut self, id: &str, on: bool) {
+        let held = self.prefs.favourites.iter().any(|held| held == id);
+        if on && !held {
+            self.prefs.favourites.push(id.to_owned());
+        } else if !on && held {
+            self.prefs.favourites.retain(|held| held != id);
+        } else {
+            return;
+        }
+        self.prefs.save(&self.host.dirs);
+    }
+
+    // ── keyframes ──
+
+    /// The keyable property a field names, or None for a field that is a
+    /// constant and stays one.
+    pub fn key_property_of(field: ClipField) -> Option<model::KeyProperty> {
+        Some(match field {
+            ClipField::Scale => model::KeyProperty::Scale,
+            ClipField::OffsetX => model::KeyProperty::OffsetX,
+            ClipField::OffsetY => model::KeyProperty::OffsetY,
+            ClipField::Rotation => model::KeyProperty::Rotation,
+            ClipField::Opacity => model::KeyProperty::Opacity,
+            ClipField::Volume => model::KeyProperty::Volume,
+            _ => return None,
+        })
+    }
+
+    /// The selected clip and where the playhead is inside it, `0..=1`, or
+    /// None when there is no sole selection or the playhead is outside it.
+    ///
+    /// Outside is not clamped to an end: a key put on from outside the clip
+    /// would land on its first or last frame, which is never what the person
+    /// pressing the diamond meant.
+    pub fn key_point(&self) -> Option<(&Clip, f64)> {
+        let clip = self.sole_selection().and_then(|id| self.clip(&id))?;
+        if clip.duration <= 0.0 {
+            return None;
+        }
+        let local = f64::from(self.playhead) - clip.start;
+        (0.0..=clip.duration)
+            .contains(&local)
+            .then(|| (clip, local / clip.duration))
+    }
+
+    /// The keyframe cluster's six rows, in the order the `Keyframes` global
+    /// indexes them. Empty when nothing can be keyed, which is what greys
+    /// every cluster in the inspector at once.
+    pub fn key_rows(&self) -> Vec<ClipKeyData> {
+        let Some((clip, at)) = self.key_point() else {
+            return Vec::new();
+        };
+        model::KeyProperty::ALL
+            .iter()
+            .map(|&property| {
+                let (prev, next) = clip.keys_around(property, at);
+                ClipKeyData {
+                    field: key_field_of(property),
+                    keyed: clip.is_keyed(property),
+                    here: clip.key_at(property, at).is_some(),
+                    prev: prev.is_some(),
+                    next: next.is_some(),
+                }
+            })
+            .collect()
+    }
+
+    /// Puts a key on the field at the playhead, or takes off the one there.
+    ///
+    /// The value a new key gets is whatever the property is worth at that
+    /// instant - the constant on a clip with no keys, and the ride's own
+    /// value on one that has them. That is what makes the diamond safe to
+    /// press: it never moves the picture, it only says "hold this here".
+    pub fn toggle_key(&mut self, field: ClipField) {
+        let Some(property) = Self::key_property_of(field) else {
+            return;
+        };
+        let Some((clip, at)) = self.key_point() else {
+            return;
+        };
+        let clip_id = clip.id.clone();
+        let command = if clip.key_at(property, at).is_some() {
+            Command::ClearClipKey {
+                clip_id,
+                property,
+                at,
+            }
+        } else {
+            let value = clip.value_at(property, at);
+            // The ease of whichever key this one is joining behind, so
+            // laying a run of keys down does not alternate between shapes.
+            // The first key on a property has nothing to inherit and gets
+            // the straight line.
+            let ease = clip
+                .keys_on(property)
+                .rfind(|key| key.at < at)
+                .map_or(model::KeyEase::LINEAR, |key| key.ease);
+            Command::SetClipKey {
+                clip_id,
+                property,
+                at,
+                value,
+                ease,
+            }
+        };
+        self.apply(command);
+    }
+
+    /// Takes every key off a field, leaving it its constant.
+    pub fn clear_keys_on(&mut self, field: ClipField) {
+        let Some(property) = Self::key_property_of(field) else {
+            return;
+        };
+        let Some(clip_id) = self.sole_selection() else {
+            return;
+        };
+        self.apply(Command::ClearClipKeys { clip_id, property });
+    }
+
+    /// Moves the playhead to this field's previous (-1) or next (+1) key.
+    pub fn step_key(&mut self, field: ClipField, delta: i32) {
+        let Some(property) = Self::key_property_of(field) else {
+            return;
+        };
+        let Some((clip, at)) = self.key_point() else {
+            return;
+        };
+        let (start, duration) = (clip.start, clip.duration);
+        let (prev, next) = clip.keys_around(property, at);
+        let Some(target) = (if delta < 0 { prev } else { next }) else {
+            return;
+        };
+        self.seek((start + target * duration) as f32);
     }
 
     /// The selection, flattened for the inspector: exactly one clip or
@@ -6685,17 +6956,31 @@ impl Studio {
             words.set_lang(lang);
         }
 
-        // The catalogue's shelves. Built in, so they never change after
-        // start; `sync` makes republishing them a no-op.
-        let (groups, entries) = shelves(PackageKind::Effect);
-        sync(&models.effect_groups, groups);
-        sync(&models.catalogue_effects, entries);
-        let (groups, entries) = shelves(PackageKind::Filter);
+        // The catalogue's shelves. The groups are built in and never change;
+        // the entries are whatever each library's search, shelf and star let
+        // through, so they are rebuilt here and `sync` makes an unchanged
+        // one a no-op.
+        let starred = &self.prefs.favourites;
+        let (groups, entries) = shelves(SHELF_KINDS[0], &self.library[0], starred);
         sync(&models.filter_groups, groups);
         sync(&models.catalogue_filters, entries);
-        let (groups, entries) = shelves(PackageKind::Audio);
+        let (groups, entries) = shelves(SHELF_KINDS[1], &self.library[1], starred);
+        sync(&models.effect_groups, groups);
+        sync(&models.catalogue_effects, entries);
+        let (groups, entries) = shelves(SHELF_KINDS[2], &self.library[2], starred);
         sync(&models.audio_groups, groups);
         sync(&models.catalogue_audio, entries);
+        app.global::<Library>()
+            .set_views(slint::ModelRc::from(Rc::new(VecModel::from(
+                self.library
+                    .iter()
+                    .map(|view| LibraryViewData {
+                        query: view.query.as_str().into(),
+                        group: view.group,
+                        favourites: view.favourites,
+                    })
+                    .collect::<Vec<_>>(),
+            ))));
 
         app.set_on_start(self.on_start);
         app.set_project_name(self.project_name.as_str().into());
@@ -6830,17 +7115,21 @@ impl Studio {
                 .position(|size| *size == (width as i32, height as i32))
                 .map_or(-1, |index| index as i32),
         );
-        editor.set_quality_index(self.quality as i32);
+        editor.set_quality_index(self.quality_of() as i32);
 
-        // The Details panel, and the sheet its Modify button opens.
+        // The Details panel, and the sheet its Modify button opens. The
+        // frame, rate and duration are the active timeline's, and the panel
+        // says so by name; the name and folder are the project's.
         let folder: SharedString = self
             .session
             .as_ref()
             .map(|session| session.path().to_owned())
             .unwrap_or_else(|| "—".to_owned())
             .into();
+        let timeline_name: SharedString = self.timeline().name.as_str().into();
         editor.set_project_name(self.project_name.as_str().into());
         editor.set_project_folder(folder.clone());
+        editor.set_timeline_name(timeline_name.clone());
         editor.set_project_output(format!("{width} × {height}").into());
         editor.set_project_rate(format!("{:.2} fps", self.frame_rate()).into());
         editor.set_project_duration(frames_timecode(self.duration(), self.frame_rate()).into());
@@ -6851,6 +7140,7 @@ impl Studio {
             open: self.project_sheet.open,
             name: self.project_sheet.name.as_str().into(),
             folder,
+            timeline: timeline_name,
             size: self.project_sheet.size,
             rate: self.project_sheet.rate as i32,
         });
@@ -7353,27 +7643,30 @@ impl Studio {
         }
     }
 
-    /// Changes the project's output size from the monitor's picker.
+    /// Changes the active timeline's output size from the monitor's picker.
+    /// An edit like any other - undoable, and this timeline's alone.
     pub fn set_output(&mut self, index: usize) {
         let (width, height) = OUTPUTS[index.min(OUTPUTS.len() - 1)];
-        if let Some(session) = self.session.as_mut() {
-            session.prepare_save(None, Some(width as u32), Some(height as u32));
-            self.dirty = true;
-            self.preview_flattened = None;
-            self.schedule_autosave();
-            self.request_preview();
-        }
+        let Some(session) = self.session.as_ref() else {
+            return;
+        };
+        let video = model::VideoSettings {
+            width: width as u32,
+            height: height as u32,
+            ..session.video()
+        };
+        let timeline_id = self.project().active_timeline_id.clone();
+        self.apply(Command::SetTimelineVideo { timeline_id, video });
+        self.request_preview();
     }
 
     // ── the project sheet ──
 
-    /// Opens the sheet on the project as it stands.
+    /// Opens the sheet on the project and its active timeline as they stand.
     pub fn project_sheet_open(&mut self) {
         let (width, height) = self.output_size();
-        let (num, den) = self.session.as_ref().map_or((30, 1), |session| {
-            let settings = session.settings();
-            (settings.rate_num, settings.rate_den)
-        });
+        let video = self.project().active().video;
+        let (num, den) = (video.rate_num, video.rate_den);
         self.project_sheet = ProjectSheet {
             open: true,
             name: self.project_name.clone(),
@@ -7388,9 +7681,10 @@ impl Studio {
         };
     }
 
-    /// Applies the sheet - the name, the frame and the rate together - and
-    /// closes it. The frame goes the way the monitor's picker sends it, so
-    /// the two cannot disagree about what a size means.
+    /// Applies the sheet and closes it. The name is the project's; the frame
+    /// and the rate are the active timeline's, and go as one edit so an undo
+    /// takes both back together. The frame goes the way the monitor's picker
+    /// sends it, so the two cannot disagree about what a size means.
     pub fn project_apply(&mut self) {
         let sheet = std::mem::take(&mut self.project_sheet);
         let name = sheet.name.trim().to_owned();
@@ -7401,15 +7695,19 @@ impl Studio {
         let Some(session) = self.session.as_mut() else {
             return;
         };
-        session.prepare_save(
-            (!name.is_empty()).then_some(name.as_str()),
-            size.map(|(width, _)| width as u32),
-            size.map(|(_, height)| height as u32),
-        );
-        session.set_rate(num, den);
+        let mut video = session.video();
+        if let Some((width, height)) = size {
+            video.width = width as u32;
+            video.height = height as u32;
+        }
+        video.rate_num = num;
+        video.rate_den = den;
+        session.prepare_save((!name.is_empty()).then_some(name.as_str()));
         if !name.is_empty() {
             self.project_name = name;
         }
+        let timeline_id = self.project().active_timeline_id.clone();
+        self.apply(Command::SetTimelineVideo { timeline_id, video });
         self.dirty = true;
         self.preview_flattened = None;
         self.schedule_autosave();

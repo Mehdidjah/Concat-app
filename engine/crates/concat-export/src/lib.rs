@@ -28,7 +28,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use concat_core::SpeedCurve;
-use concat_core::animate::Animation;
+use concat_core::animate::{Animation, Ease as AnimEase, Key as AnimKey, Track as AnimTrack};
 use concat_core::frame::Frame;
 use concat_core::shader::ShaderPass;
 use concat_core::time::{FrameRate, Rational};
@@ -224,16 +224,18 @@ pub struct ExportClip {
 #[derive(Deserialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ExportKey {
-    /// "scale", "offsetX", "offsetY", "rotation" or "opacity".
+    /// "scale", "offsetX", "offsetY", "rotation", "opacity" or "volume".
     pub property: String,
     /// Where in the clip, `0..=1`.
     pub at: f64,
-    /// The value there, relative to the clip's own; see the engine's
-    /// `animate` module.
+    /// The value there. Relative to the clip's own for a key that came
+    /// from an animation preset, and absolute for one the user set - which
+    /// is the same thing, because `flatten::export_base` hands the engine a
+    /// neutral constant for every property the user has keyed.
     pub value: f64,
-    /// "linear", "in", "out" or "inOut".
-    #[serde(default)]
-    pub ease: String,
+    /// The timing function into this key as `[x1, y1, x2, y2]`.
+    #[serde(default = "linear_ease")]
+    pub ease: [f64; 4],
     /// Optional `[x1, y1, x2, y2]` temporal Bezier handles.
     #[serde(default)]
     pub curve: Option<[f64; 4]>,
@@ -245,6 +247,11 @@ pub struct ExportKey {
     /// `hold`, `reset`, `loop`, or `extrapolate` after the final key.
     #[serde(default)]
     pub post: String,
+}
+
+/// A straight line, for a spec that names no easing.
+fn linear_ease() -> [f64; 4] {
+    [0.0, 0.0, 1.0, 1.0]
 }
 
 /// A transition on the cut into a clip.
@@ -542,6 +549,76 @@ pub fn render(request: &ExportRequest, mut reporter: Reporter<'_>) -> Result<Str
     result.map(|()| output.to_string_lossy().into_owned())
 }
 
+/// The clip's gain track, or an empty one when its gain is the single number
+/// in `ExportClip::volume`.
+fn volume_track(clip: &ExportClip) -> AnimTrack {
+    animation_of(&clip.animation)
+        .map(|animation| animation.volume)
+        .unwrap_or_default()
+}
+
+/// A gain track re-expressed against a piece covering `[x0, x1]` of the clip.
+///
+/// A piece has its own clock starting at zero, so a key three-quarters of
+/// the way through the clip is nowhere near three-quarters of the way
+/// through the piece that holds it. The ends are pinned to what the whole
+/// track is worth there, which is what carries a ramp that started in an
+/// earlier piece into this one.
+fn track_slice(track: &AnimTrack, x0: f64, x1: f64) -> AnimTrack {
+    if track.is_empty() {
+        return AnimTrack::default();
+    }
+    let span = x1 - x0;
+    if span <= 0.0 {
+        return AnimTrack::new(vec![AnimKey {
+            at: 0.0,
+            value: track.value_at(x0, 1.0),
+            ease: AnimEase::LINEAR,
+            curve: None,
+            spatial_in: None,
+            spatial_out: None,
+        }]);
+    }
+    let mut keys = vec![AnimKey {
+        at: 0.0,
+        value: track.value_at(x0, 1.0),
+        ease: AnimEase::LINEAR,
+        curve: None,
+        spatial_in: None,
+        spatial_out: None,
+    }];
+    keys.extend(
+        track
+            .keys()
+            .iter()
+            .filter(|key| key.at > x0 && key.at < x1)
+            .map(|key| AnimKey {
+                at: (key.at - x0) / span,
+                value: key.value,
+                ease: key.ease,
+                curve: key.curve,
+                spatial_in: key.spatial_in,
+                spatial_out: key.spatial_out,
+            }),
+    );
+    // The ease of whichever segment this end falls inside, so a ramp that
+    // crosses the boundary keeps its shape rather than going linear at it.
+    let closing = track
+        .keys()
+        .iter()
+        .find(|key| key.at >= x1)
+        .map_or(AnimEase::LINEAR, |key| key.ease);
+    keys.push(AnimKey {
+        at: 1.0,
+        value: track.value_at(x1, 1.0),
+        ease: closing,
+        curve: None,
+        spatial_in: None,
+        spatial_out: None,
+    });
+    AnimTrack::new(keys)
+}
+
 /// The engine's view of one audible clip - or several, when its speed
 /// changes over it. Sound can only change tempo in steps, so a curve is cut
 /// into pieces of constant rate, each at the mean of its stretch of the
@@ -557,6 +634,7 @@ pub fn audio_pieces(clip: &ExportClip) -> Vec<AudioClip> {
             format!("areverse,{chain}")
         };
     }
+    let track = volume_track(clip);
     let Some(curve) = SpeedCurve::new(&clip.speed_curve) else {
         return vec![AudioClip {
             path: PathBuf::from(&clip.path),
@@ -566,6 +644,7 @@ pub fn audio_pieces(clip: &ExportClip) -> Vec<AudioClip> {
             speed: audio::clamp_speed(clip.speed),
             preserve_pitch: clip.preserve_pitch,
             volume: clip.volume,
+            volume_curve: track,
             fade_in: clip.fade_in,
             fade_out: clip.fade_out,
             filter_chain: chain,
@@ -602,6 +681,7 @@ pub fn audio_pieces(clip: &ExportClip) -> Vec<AudioClip> {
                 speed: audio::clamp_speed(mean),
                 preserve_pitch: clip.preserve_pitch,
                 volume: clip.volume,
+                volume_curve: track_slice(&track, x0, x1),
                 fade_in: if clip.fade_in > 0.0 { fade_in } else { 0.0 },
                 fade_out: if clip.fade_out > 0.0 { fade_out } else { 0.0 },
                 filter_chain: chain.clone(),
@@ -1423,15 +1503,11 @@ fn animation_of(keys: &[ExportKey]) -> Option<Animation> {
             .entry(key.property.clone())
             .or_insert_with(|| (Vec::new(), post));
         entry.1 = post;
+        let [x1, y1, x2, y2] = key.ease;
         entry.0.push(Key {
             at: key.at,
             value: key.value,
-            ease: match key.ease.as_str() {
-                "in" => Ease::In,
-                "out" => Ease::Out,
-                "inOut" => Ease::InOut,
-                _ => Ease::Linear,
-            },
+            ease: Ease::new(x1, y1, x2, y2),
             curve: key
                 .curve
                 .map(|[x1, y1, x2, y2]| CubicBezier { x1, y1, x2, y2 }),
@@ -1458,6 +1534,7 @@ fn animation_of(keys: &[ExportKey]) -> Option<Animation> {
     let stretch_x = take("stretchX");
     let stretch_y = take("stretchY");
     let opacity = take("opacity");
+    let volume = take("volume");
     let layer_order = take("layerOrder");
     let parameters = tracks
         .into_iter()
@@ -1476,6 +1553,7 @@ fn animation_of(keys: &[ExportKey]) -> Option<Animation> {
         stretch_x,
         stretch_y,
         opacity,
+        volume,
         layer_order,
         parameters,
     };
@@ -1710,6 +1788,17 @@ pub fn preview_sources_cached(
     }
     let entry = cache.entry.as_ref().expect("preview cache was prepared");
     preview_sources_from(pool, request, &entry.built, rate)
+}
+
+/// CPU-composited counterpart to [`preview_sources_cached`].
+pub fn preview_frame_cached(
+    pool: &concat_media::ReaderPool,
+    request: &PreviewFrameRequest,
+    cache: &mut PreviewCache,
+) -> Result<Vec<u8>, String> {
+    Ok(preview_sources_cached(pool, request, false, cache)?
+        .composite(&mut CpuCompositor)
+        .into_pixels())
 }
 
 fn preview_structure_matches(previous: &[ExportClip], next: &[ExportClip]) -> bool {
@@ -2070,7 +2159,7 @@ mod tests {
             property: "scale".to_owned(),
             at: 0.5,
             value: 1.25,
-            ease: "linear".to_owned(),
+            ease: [0.0, 0.0, 1.0, 1.0],
             curve: None,
             spatial_in: None,
             spatial_out: None,
@@ -2089,7 +2178,7 @@ mod tests {
             property: "opacity".to_owned(),
             at: 0.25,
             value: 0.5,
-            ease: "linear".to_owned(),
+            ease: [0.0, 0.0, 1.0, 1.0],
             curve: None,
             spatial_in: None,
             spatial_out: None,

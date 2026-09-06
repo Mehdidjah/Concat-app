@@ -13,8 +13,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::model::{
     AnimationSlot, AppliedFilter, Clip, ClipAnimation, ClipKeyframes, ClipKind, ClipMask, Crop,
-    CustomFont, Cutout, CutoutMode, MaskShape, MediaItem, MediaKind, Project, SpeedPoint, Stroke,
-    TextStyle, Timeline, Track, Transition,
+    CustomFont, Cutout, CutoutMode, KeyEase, KeyProperty, MaskShape, MediaItem, MediaKind, Project,
+    SpeedPoint, Stroke, TextStyle, Timeline, Track, Transition, VideoSettings,
 };
 
 /// Fallback length for media whose container reports no duration.
@@ -315,6 +315,41 @@ pub enum Command {
         /// The shape and its seconds, or None to take it off.
         animation: Option<ClipAnimation>,
     },
+    /// Puts a key on one property at one point of a clip, replacing
+    /// whichever key on that property was already within a hair of it.
+    ///
+    /// The value is the property's own - the number the inspector shows -
+    /// not the relative factor the engine plays; see `model::ClipKey`.
+    SetClipKey {
+        /// The clip.
+        clip_id: String,
+        /// Which property is being keyed.
+        property: KeyProperty,
+        /// Where in the clip, `0..=1`.
+        at: f64,
+        /// The value there.
+        value: f64,
+        /// How the key is approached from the one before it.
+        #[serde(default)]
+        ease: KeyEase,
+    },
+    /// Takes the key at `at` off one property, if there is one there. The
+    /// other half of the diamond: a filled diamond clicked is this.
+    ClearClipKey {
+        /// The clip.
+        clip_id: String,
+        /// Which property.
+        property: KeyProperty,
+        /// Where in the clip the key to remove sits, `0..=1`.
+        at: f64,
+    },
+    /// Takes every key off one property, returning it to its constant.
+    ClearClipKeys {
+        /// The clip.
+        clip_id: String,
+        /// Which property.
+        property: KeyProperty,
+    },
     /// Sets or clears a picture's cutout: the mask that takes its
     /// background away. Tidied on the way in; see [`Cutout::tidy`].
     SetClipCutout {
@@ -489,6 +524,15 @@ pub enum Command {
     RemoveTimeline {
         /// The timeline to delete. An unknown id is a no-op.
         timeline_id: String,
+    },
+    /// Sets a timeline's output frame and rate. A term no frame could have,
+    /// such as a zero dimension or a zero rate, is refused as a no-op rather
+    /// than clamped: there is no nearest real size to a zero.
+    SetTimelineVideo {
+        /// The timeline. An unknown id is a no-op.
+        timeline_id: String,
+        /// The frame and the rate, together.
+        video: VideoSettings,
     },
     /// Renames a timeline tab, with the same trim-and-ignore-blank rule as
     /// [`Command::RenameTrack`].
@@ -676,6 +720,7 @@ fn default_clip(id: String, track_id: String, media: &MediaItem, start: f64) -> 
         animation_out: None,
         animation_combo: None,
         keyframes: ClipKeyframes::default(),
+        keys: Vec::new(),
         flip_h: false,
         flip_v: false,
         blend: String::new(),
@@ -1029,6 +1074,7 @@ pub fn apply(
                 animation_out: None,
                 animation_combo: None,
                 keyframes: ClipKeyframes::default(),
+                keys: Vec::new(),
                 flip_h: false,
                 flip_v: false,
                 blend: String::new(),
@@ -1105,6 +1151,7 @@ pub fn apply(
                 animation_out: None,
                 animation_combo: None,
                 keyframes: ClipKeyframes::default(),
+                keys: Vec::new(),
                 flip_h: false,
                 flip_v: false,
                 blend: String::new(),
@@ -1522,6 +1569,69 @@ pub fn apply(
             })
         }
 
+        Command::SetClipKey {
+            clip_id,
+            property,
+            at,
+            value,
+            ease,
+        } => {
+            let timeline = project.active_mut();
+            let Some(clip) = timeline.clip_mut(&clip_id) else {
+                return Ok(Outcome::default());
+            };
+            if !at.is_finite() || !value.is_finite() {
+                return Ok(Outcome::default());
+            }
+            // Clamped the way the field itself is, so a key can never hold a
+            // value the constant would have been refused. The clamps are the
+            // ones ClipPatch applies; keeping them here as well is what stops
+            // a key being the back door round them.
+            let value = match property {
+                KeyProperty::Scale => value.clamp(MIN_SCALE, MAX_SCALE),
+                KeyProperty::Opacity => value.clamp(0.0, 1.0),
+                // No ceiling, matching ClipPatch: the level fader goes to
+                // +24 dB because quiet material needs it, and a key is the
+                // same value at a different instant.
+                KeyProperty::Volume => value.max(0.0),
+                KeyProperty::OffsetX | KeyProperty::OffsetY | KeyProperty::Rotation => value,
+            };
+            let before = clip.keys.clone();
+            clip.set_key(property, at, value, ease);
+            Ok(Outcome {
+                created_id: None,
+                applied: clip.keys != before,
+            })
+        }
+
+        Command::ClearClipKey {
+            clip_id,
+            property,
+            at,
+        } => {
+            let timeline = project.active_mut();
+            let Some(clip) = timeline.clip_mut(&clip_id) else {
+                return Ok(Outcome::default());
+            };
+            let applied = clip.clear_key(property, at);
+            Ok(Outcome {
+                created_id: None,
+                applied,
+            })
+        }
+
+        Command::ClearClipKeys { clip_id, property } => {
+            let timeline = project.active_mut();
+            let Some(clip) = timeline.clip_mut(&clip_id) else {
+                return Ok(Outcome::default());
+            };
+            let applied = clip.clear_keys(property);
+            Ok(Outcome {
+                created_id: None,
+                applied,
+            })
+        }
+
         Command::SetClipSpeedCurve { clip_id, curve } => {
             let timeline = project.active_mut();
             let Some(clip) = timeline.clip_mut(&clip_id) else {
@@ -1783,9 +1893,14 @@ pub fn apply(
                     muted: false,
                 })
                 .collect();
+            // Born at the frame of the timeline you were looking at: the
+            // likeliest second timeline is another cut of the same picture,
+            // and the one that is not is a sheet away from being told so.
+            let video = project.active().video;
             project.timelines.push(Timeline {
                 id: id.clone(),
                 name,
+                video,
                 tracks,
                 clips: Vec::new(),
             });
@@ -1793,6 +1908,21 @@ pub fn apply(
             Ok(Outcome {
                 created_id: Some(id),
                 applied: true,
+            })
+        }
+
+        Command::SetTimelineVideo { timeline_id, video } => {
+            if !video.is_sane() {
+                return Ok(Outcome::default());
+            }
+            let applied = project
+                .timelines
+                .iter_mut()
+                .find(|timeline| timeline.id == timeline_id)
+                .is_some_and(|timeline| assign(&mut timeline.video, video));
+            Ok(Outcome {
+                created_id: None,
+                applied,
             })
         }
 

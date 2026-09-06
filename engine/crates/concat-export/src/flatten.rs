@@ -15,7 +15,9 @@
 
 use std::path::Path;
 
-use concat_project::model::{ClipKind as ModelClipKind, KeyframeProperty, Project, Timeline};
+use concat_project::model::{
+    ClipKind as ModelClipKind, KeyProperty, KeyframeProperty, Project, Timeline,
+};
 
 use crate::chains::{audio_filter_chain, video_effect_chain};
 use crate::{ClipKind, ExportClip, ExportKey, TransitionSpec};
@@ -216,10 +218,37 @@ fn pick_timeline<'a>(project: &'a Project, timeline_id: Option<&str>) -> Option<
         .or_else(|| project.timelines.first())
 }
 
-/// The clip's animation presets, materialised for its current length as
-/// the keys the engine plays. See `concat_project::animation`.
+/// The constant the engine should receive for a keyable property.
+///
+/// The clip's own, until that property is keyed - and then the *neutral*
+/// value, because a keyed property's keys travel absolutely rather than as a
+/// factor on this base. Absolute is not a preference: `Animation` multiplies
+/// the base by the scale and opacity tracks, so a clip sitting at zero
+/// opacity could never be keyed back up if its keys were relative to it.
+///
+/// Presets stay relative, which is what lets a Fade preset ride on top of a
+/// hand-keyed opacity without either knowing about the other.
+pub fn export_base(clip: &concat_project::model::Clip, property: KeyProperty) -> f64 {
+    if !clip.is_keyed(property) {
+        return clip.constant(property);
+    }
+    match property {
+        // A factor's neutral is one; an addition's is zero.
+        KeyProperty::Scale | KeyProperty::Opacity | KeyProperty::Volume => 1.0,
+        KeyProperty::OffsetX | KeyProperty::OffsetY | KeyProperty::Rotation => 0.0,
+    }
+}
+
+/// The keys the engine plays: the clip's own where it has them, and its
+/// animation presets - materialised for its current length - everywhere it
+/// does not. See `concat_project::animation`.
+///
+/// A property the user has keyed does not also get its preset's track. Two
+/// sets of keys on one property is a question with no good answer, and the
+/// hand-set ones are the ones someone will be looking at when they wonder
+/// why the clip is not doing what they said.
 pub fn export_keys(clip: &concat_project::model::Clip) -> Vec<ExportKey> {
-    use concat_core::animate::{Ease, PostBehavior};
+    use concat_core::animate::PostBehavior;
     let Some(animation) = concat_project::animation::animation_of(clip) else {
         return Vec::new();
     };
@@ -237,6 +266,7 @@ pub fn export_keys(clip: &concat_project::model::Clip) -> Vec<ExportKey> {
         ("stretchX", &animation.stretch_x),
         ("stretchY", &animation.stretch_y),
         ("opacity", &animation.opacity),
+        ("volume", &animation.volume),
         ("layerOrder", &animation.layer_order),
     ] {
         for key in track.keys() {
@@ -244,13 +274,7 @@ pub fn export_keys(clip: &concat_project::model::Clip) -> Vec<ExportKey> {
                 property: property.to_owned(),
                 at: key.at,
                 value: key.value,
-                ease: match key.ease {
-                    Ease::Linear => "linear",
-                    Ease::In => "in",
-                    Ease::Out => "out",
-                    Ease::InOut => "inOut",
-                }
-                .to_owned(),
+                ease: [key.ease.x1, key.ease.y1, key.ease.x2, key.ease.y2],
                 curve: key
                     .curve
                     .map(|curve| [curve.x1, curve.y1, curve.x2, curve.y2]),
@@ -272,13 +296,7 @@ pub fn export_keys(clip: &concat_project::model::Clip) -> Vec<ExportKey> {
                 property: property.clone(),
                 at: key.at,
                 value: key.value,
-                ease: match key.ease {
-                    Ease::Linear => "linear",
-                    Ease::In => "in",
-                    Ease::Out => "out",
-                    Ease::InOut => "inOut",
-                }
-                .to_owned(),
+                ease: [key.ease.x1, key.ease.y1, key.ease.x2, key.ease.y2],
                 curve: key
                     .curve
                     .map(|curve| [curve.x1, curve.y1, curve.x2, curve.y2]),
@@ -295,6 +313,18 @@ pub fn export_keys(clip: &concat_project::model::Clip) -> Vec<ExportKey> {
         }
     }
     out
+}
+
+/// The clip's gain over its length, as `(fraction, gain)` pairs, or empty
+/// for a clip whose gain is the one number in `ExportClip::volume`.
+pub fn volume_curve(clip: &concat_project::model::Clip) -> Vec<(f64, f64)> {
+    let generic = clip.keyframes.track(KeyframeProperty::Volume);
+    if !generic.is_empty() {
+        return generic.iter().map(|key| (key.at, key.value)).collect();
+    }
+    clip.keys_on(KeyProperty::Volume)
+        .map(|key| (key.at, key.value))
+        .collect()
 }
 
 #[cfg(test)]
