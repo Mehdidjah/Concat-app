@@ -40,7 +40,7 @@ mod tests {
     use crate::commands::{ClipMove, ClipPatch, Command, TrackFlag, TrimEdge};
     use crate::doc::DocumentSettings;
     use crate::editor::Editor;
-    use crate::model::{ClipKind, MediaKind, TextStyle};
+    use crate::model::{ClipKind, MaskShape, MediaKind, TextStyle};
 
     fn media(path: &str, duration: f64, has_audio: bool) -> Command {
         Command::AddMedia {
@@ -96,6 +96,45 @@ mod tests {
         let editor = Editor::new();
         assert_eq!(editor.project().timelines.len(), 1);
         assert_eq!(editor.project().active().tracks.len(), 4);
+    }
+
+    #[test]
+    fn clip_masks_are_persistent_and_undoable() {
+        let (mut editor, _, clip_id) = fixture();
+        let mask_id = editor
+            .apply(Command::AddClipMask {
+                clip_id: clip_id.clone(),
+                shape: MaskShape::Circle,
+            })
+            .expect("adds mask")
+            .created_id
+            .expect("mask id");
+
+        let mut mask = editor.project().active().clips[0].masks[0].clone();
+        mask.position_x = 0.25;
+        editor
+            .apply(Command::UpdateClipMask {
+                clip_id: clip_id.clone(),
+                mask,
+            })
+            .expect("updates mask");
+
+        let document = editor.to_document(&settings());
+        let restored = Editor::from_document(&document).expect("loads masks");
+        let clip = &restored.project().active().clips[0];
+        assert!(clip.masks_enabled);
+        assert_eq!(clip.masks[0].shape, MaskShape::Circle);
+        assert_eq!(clip.masks[0].position_x, 0.25);
+
+        editor
+            .apply(Command::RemoveClipMask {
+                clip_id,
+                mask_id,
+            })
+            .expect("removes mask");
+        assert!(editor.project().active().clips[0].masks.is_empty());
+        assert!(editor.undo());
+        assert_eq!(editor.project().active().clips[0].masks.len(), 1);
     }
 
     #[test]
