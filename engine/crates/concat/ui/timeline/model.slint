@@ -249,6 +249,9 @@ export enum ClipField {
     font-size, font-weight, italic, text-opacity, align,
     stroke-width, shadow, line-height, tracking,
     cutout-feather,
+    /// which of the media's audio tracks the clip plays, as a row of
+    /// Editor.audio-tracks
+    audio-track,
 }
 
 /// One keyable property's state at the playhead, as the inspector needs it.
@@ -290,6 +293,13 @@ export global Keyframes {
     /// number under a ride that is still running would change nothing a
     /// person could see.
     callback clear(field: ClipField);
+
+    /// The same three verbs for a knob named rather than enumerated - the
+    /// Adjust panel's, whose rows come from the colour package's manifest
+    /// and carry their own key state; see AppliedParamData.
+    callback toggle-param(key: string);
+    callback step-param(key: string, delta: int);
+    callback clear-param(key: string);
 
     /// A row for a field with no keys and nowhere to step.
     pure public function blank(field: ClipField) -> ClipKeyData {
@@ -368,6 +378,10 @@ export struct SelectedClipData {
     // sound — everything but a still
     /// linear gain; the fader works in decibels and converts
     volume: float,
+    /// which of the media's audio tracks plays, as a row of
+    /// Editor.audio-tracks; 0 is the file's first, and the only row a file
+    /// with one track has
+    audio-track: int,
     speed: float,
     preserve-pitch: bool,
     /// Which preset shape the speed curve is: -1 for a constant rate, the
@@ -395,13 +409,19 @@ export struct SelectedClipData {
     fade-in: float,
     fade-out: float,
 
-    // the cutout: 0 none, 1 automatic, 2 custom; how soft its edge is; how
-    // many strokes it carries; and the analysis finding its masks, -1 when
-    // none is running, else how far along it is
+    // the cutout: 0 none, 1 automatic, 2 custom; what it keeps, 0 auto,
+    // 1 person, 2 object; how soft its edge is; how many strokes it
+    // carries; the analysis finding its masks, -1 when none is running,
+    // else how far along it is, and whether that is a model downloading
+    // rather than frames being read; and whether the model found nothing
+    // at the playhead, so the picture is showing as shot
     cutout: int,
+    cutout-subject: int,
     cutout-feather: float,
     cutout-strokes: int,
     cutout-progress: float,
+    cutout-fetching: bool,
+    cutout-empty: bool,
 
     // the overlay, when this is a text clip
     content: string,

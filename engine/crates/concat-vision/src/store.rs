@@ -3,12 +3,13 @@
 
 //! Where masks live between runs.
 //!
-//! One directory per media file per model, inside the project's `cache/`
+//! One directory per media file per subject, inside the project's `cache/`
 //! folder so it travels with the project and vanishes with it, holding one
-//! PNG per analysed source instant, named by that instant in milliseconds.
-//! The host writes them as it analyses; the renderer opens the directory,
-//! reads the names, and asks for the mask nearest a source time. Nothing
-//! is ever indexed: the file names are the index.
+//! PNG per analysed source instant, named by that instant in milliseconds,
+//! and a `model` file naming the model that made them. The host writes
+//! them as it analyses; the renderer opens the directory, reads the names,
+//! and asks for the mask nearest a source time. Nothing is ever indexed:
+//! the file names are the index.
 //!
 //! Decoded masks are kept in a process-wide cache, since a preview asks for
 //! the same handful over and over while the playhead sits still, and an
@@ -18,9 +19,9 @@ use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
-use concat_project::model::{Cutout, CutoutMode};
+use concat_project::model::{Cutout, CutoutMode, Stroke, Subject};
 
-use crate::{MASK_RATE, MODEL_ID, Mask, strokes};
+use crate::{MASK_RATE, Mask, strokes};
 
 /// A mask further than this from the instant asked for is nobody's answer:
 /// two and a half analysis steps, so a gap in the cache reads as "not yet"
@@ -31,17 +32,33 @@ const REACH_MS: u64 = 2500 / MASK_RATE as u64;
 /// mask is 64 KB; both together stay under forty megabytes.
 const CACHED: usize = 300;
 
-/// The directory a media file's masks live in under `project`.
+/// The directory a media file's masks for `subject` live in under
+/// `project`.
 ///
 /// Named by a hash of the path rather than the path, like the peaks cache
 /// and for the same reason: a flat, portable name that cannot escape the
-/// folder. The model's id is in it too, so a different model never
-/// answers for this one.
-pub fn mask_dir(project: &Path, media_path: &str) -> PathBuf {
-    project
-        .join("cache")
-        .join("masks")
-        .join(format!("{:016x}-{MODEL_ID}", fnv1a(media_path.as_bytes())))
+/// folder. The subject is in it too, so a clip asked to keep the person
+/// and one asked to keep the object never read each other's answer.
+pub fn mask_dir(project: &Path, media_path: &str, subject: Subject) -> PathBuf {
+    project.join("cache").join("masks").join(format!(
+        "{:016x}-{}",
+        fnv1a(media_path.as_bytes()),
+        subject.key()
+    ))
+}
+
+/// The file naming the model that made a directory's masks.
+fn model_file(dir: &Path) -> PathBuf {
+    dir.join("model")
+}
+
+/// The directory a smart stroke's regions are kept in, under the masks'
+/// own directory: the thing the brush model read under that stroke, one
+/// PNG per analysed instant like the masks themselves, since the thing
+/// moves and the region follows it.
+pub fn region_dir(dir: &Path, stroke: &Stroke) -> PathBuf {
+    dir.join("strokes")
+        .join(format!("{:016x}", strokes::stroke_key(stroke)))
 }
 
 /// The file for the mask at `millis` of source.
@@ -65,6 +82,8 @@ pub struct MaskStore {
     dir: PathBuf,
     /// The analysed instants, ascending, in milliseconds of source.
     times: Vec<u64>,
+    /// The model that made them, as the directory's `model` file says.
+    model: Option<String>,
 }
 
 impl MaskStore {
@@ -83,15 +102,42 @@ impl MaskStore {
             .collect();
         times.sort_unstable();
         times.dedup();
+        let model = std::fs::read_to_string(model_file(dir))
+            .ok()
+            .map(|name| name.trim().to_owned())
+            .filter(|name| !name.is_empty());
         MaskStore {
             dir: dir.to_path_buf(),
             times,
+            model,
         }
     }
 
     /// Where the store is.
     pub fn dir(&self) -> &Path {
         &self.dir
+    }
+
+    /// The model that made the masks here, once one has.
+    pub fn model(&self) -> Option<&str> {
+        self.model.as_deref()
+    }
+
+    /// Records the model about to fill the store. Masks from another
+    /// model go first: one directory, one model.
+    pub fn set_model(&mut self, name: &str) -> Result<(), String> {
+        if self.model.as_deref() == Some(name) {
+            return Ok(());
+        }
+        if self.model.is_some() {
+            self.clear();
+        }
+        std::fs::create_dir_all(&self.dir)
+            .map_err(|error| format!("could not create {}: {error}", self.dir.display()))?;
+        std::fs::write(model_file(&self.dir), name)
+            .map_err(|error| format!("could not write {}: {error}", self.dir.display()))?;
+        self.model = Some(name.to_owned());
+        Ok(())
     }
 
     /// How many instants are analysed.
@@ -133,13 +179,34 @@ impl MaskStore {
 
     /// The mask to cut with at `seconds`: the model's, with the cutout's
     /// strokes painted on when it is custom, and softened by its feather.
+    /// `None` when the instant has no mask yet, and also when the model
+    /// found nothing there and no stroke says otherwise: a picture with
+    /// no subject shows as shot rather than vanishing.
     /// `aspect` is the source's width over its height, for round brushes.
     pub fn resolved(&self, seconds: f64, cutout: &Cutout, aspect: f32) -> Option<Arc<Mask>> {
         let millis = self.nearest_millis(seconds)?;
         let file = mask_file(&self.dir, millis);
+        // The smart strokes' regions, opened once for the key and the
+        // painting both: what is there changes as the brush model works
+        // its way along the clip.
+        let region_stores: Vec<(u64, MaskStore)> = if cutout.mode == CutoutMode::Custom {
+            cutout
+                .strokes
+                .iter()
+                .filter(|stroke| stroke.is_smart())
+                .map(|stroke| {
+                    (
+                        strokes::stroke_key(stroke),
+                        MaskStore::open(&region_dir(&self.dir, stroke)),
+                    )
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
         let key = ResolvedKey {
             file: file.clone(),
-            settings: settings_key(cutout, aspect),
+            settings: settings_key(cutout, aspect, &region_stores, millis),
         };
         if let Some(hit) = resolved_cache()
             .lock()
@@ -149,9 +216,19 @@ impl MaskStore {
             return Some(hit);
         }
         let auto = load(&file)?;
+        let corrected = cutout.mode == CutoutMode::Custom && !cutout.strokes.is_empty();
+        if !corrected && auto.is_blank() {
+            return None;
+        }
         let painted = match cutout.mode {
             CutoutMode::Custom if !cutout.strokes.is_empty() => {
-                strokes::paint(&auto, &cutout.strokes, aspect)
+                let regions = move |stroke: &Stroke| {
+                    region_stores
+                        .iter()
+                        .find(|(key, _)| *key == strokes::stroke_key(stroke))
+                        .and_then(|(_, store)| store.mask_at(seconds))
+                };
+                strokes::paint(&auto, &cutout.strokes, aspect, &regions)
             }
             _ => (*auto).clone(),
         };
@@ -213,13 +290,25 @@ impl MaskStore {
             cache.retain(|key| !key.file.starts_with(&self.dir));
         }
         self.times.clear();
+        let _ = std::fs::remove_file(model_file(&self.dir));
+        self.model = None;
+        // The regions the brushes read are the same footage's; they go
+        // with the masks, and any resolved mask that used one.
+        let _ = std::fs::remove_dir_all(self.dir.join("strokes"));
         let _ = std::fs::remove_dir(&self.dir);
     }
 }
 
 /// What besides the file decides a resolved mask: the mode, the feather
-/// and every stroke, hashed, with the aspect the brushes were sized by.
-fn settings_key(cutout: &Cutout, aspect: f32) -> u64 {
+/// and every stroke, hashed, with the aspect the brushes were sized by,
+/// and for each smart stroke which region, if any, answers for the
+/// instant.
+fn settings_key(
+    cutout: &Cutout,
+    aspect: f32,
+    region_stores: &[(u64, MaskStore)],
+    millis: u64,
+) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     (cutout.mode == CutoutMode::Custom).hash(&mut hasher);
@@ -227,12 +316,13 @@ fn settings_key(cutout: &Cutout, aspect: f32) -> u64 {
     aspect.to_bits().hash(&mut hasher);
     if cutout.mode == CutoutMode::Custom {
         for stroke in &cutout.strokes {
-            (stroke.tool as u8).hash(&mut hasher);
-            stroke.size.to_bits().hash(&mut hasher);
-            for [x, y] in &stroke.points {
-                x.to_bits().hash(&mut hasher);
-                y.to_bits().hash(&mut hasher);
-            }
+            strokes::stroke_key(stroke).hash(&mut hasher);
+        }
+        for (key, store) in region_stores {
+            key.hash(&mut hasher);
+            store
+                .nearest_millis(millis as f64 / 1000.0)
+                .hash(&mut hasher);
         }
     }
     hasher.finish()
@@ -332,11 +422,13 @@ mod tests {
 
     #[test]
     fn the_directory_is_named_by_the_file_and_the_model() {
-        let a = mask_dir(Path::new("/p"), "/footage/a.mp4");
-        let b = mask_dir(Path::new("/p"), "/footage/b.mp4");
+        let a = mask_dir(Path::new("/p"), "/footage/a.mp4", Subject::Auto);
+        let b = mask_dir(Path::new("/p"), "/footage/b.mp4", Subject::Auto);
+        let c = mask_dir(Path::new("/p"), "/footage/a.mp4", Subject::Object);
+        assert_ne!(a, c);
         assert_ne!(a, b);
         assert!(a.starts_with("/p/cache/masks"));
-        assert!(a.to_string_lossy().ends_with(MODEL_ID));
+        assert!(a.to_string_lossy().ends_with("-auto"));
     }
 
     #[test]
@@ -374,16 +466,18 @@ mod tests {
     fn a_resolved_mask_carries_the_strokes_and_the_feather() {
         let dir = scratch("resolved");
         let mut store = MaskStore::open(&dir);
-        store.put(0, &Mask::filled(16, 16, 0)).expect("writes");
+        store.put(0, &Mask::filled(16, 16, 20)).expect("writes");
         let plain = Cutout::auto();
         assert_eq!(
             store.resolved(0.0, &plain, 1.0).map(|m| m.at(8, 8)),
-            Some(0)
+            Some(20)
         );
         let custom = Cutout {
             mode: CutoutMode::Custom,
+            subject: Subject::Auto,
             feather: 0.0,
             strokes: vec![Stroke {
+                at: None,
                 tool: BrushTool::Brush,
                 size: 0.5,
                 points: vec![[0.5, 0.5]],
@@ -400,8 +494,45 @@ mod tests {
         };
         assert_eq!(
             store.resolved(0.0, &back_to_auto, 1.0).map(|m| m.at(8, 8)),
-            Some(0)
+            Some(20)
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_blank_mask_shows_the_picture_as_shot_unless_painted() {
+        let dir = scratch("blank");
+        let mut store = MaskStore::open(&dir);
+        store.put(0, &Mask::filled(16, 16, 0)).expect("writes");
+        assert!(store.resolved(0.0, &Cutout::auto(), 1.0).is_none());
+        let painted = Cutout {
+            mode: CutoutMode::Custom,
+            subject: Subject::Auto,
+            feather: 0.0,
+            strokes: vec![Stroke {
+                at: None,
+                tool: BrushTool::Brush,
+                size: 0.5,
+                points: vec![[0.5, 0.5]],
+            }],
+        };
+        assert_eq!(
+            store.resolved(0.0, &painted, 1.0).map(|m| m.at(8, 8)),
+            Some(255)
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_store_remembers_its_model_and_clears_for_another() {
+        let dir = scratch("model");
+        let mut store = MaskStore::open(&dir);
+        store.set_model("first").expect("writes");
+        store.put(0, &Mask::filled(4, 4, 200)).expect("writes");
+        assert_eq!(MaskStore::open(&dir).model(), Some("first"));
+        store.set_model("second").expect("writes");
+        assert!(store.is_empty());
+        assert_eq!(store.model(), Some("second"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

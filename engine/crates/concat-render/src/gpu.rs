@@ -29,10 +29,10 @@
 use std::collections::HashMap;
 
 use concat_core::frame::Frame;
-use concat_core::shader::ShaderPass;
+use concat_core::shader::{Lut, ShaderPass};
 use concat_core::timeline::Blend;
 
-use crate::compositor::{Compositor, CpuCompositor, Layer};
+use crate::compositor::{Compositor, CpuCompositor, Layer, Treatment};
 
 /// Bytes per row must be a multiple of this for a texture-to-buffer copy.
 const ROW_ALIGN: usize = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT as usize;
@@ -104,11 +104,19 @@ struct CompiledShader {
     bind_group: wgpu::BindGroup,
 }
 
+/// One draw of a composite: the pooled texture's size and index, and how
+/// it meets the ground.
+type Draw = (u32, u32, usize, Blend);
+
 /// A cached layer texture and its bind group, reusable for any layer of the
 /// same size.
 struct PooledTexture {
     texture: wgpu::Texture,
     bind_group: wgpu::BindGroup,
+    /// The identity of the frame uploaded into it, or zero for a texture
+    /// a pass drew: what lets a frame the device already holds - a still,
+    /// a title, a paused clip - skip its upload.
+    holds: u64,
 }
 
 /// The reusable output target and its readback buffer, for one output size.
@@ -142,6 +150,10 @@ pub struct WgpuCompositor {
     bind_layout: wgpu::BindGroupLayout,
     /// Group 1 of a shader pass: the frame block and the package's params.
     uniform_layout: wgpu::BindGroupLayout,
+    /// Group 2 of a shader pass: the package's look-up table, a 3D texture.
+    lut_layout: wgpu::BindGroupLayout,
+    /// Uploaded tables by their id, the identity among them; see `lut_group`.
+    luts: HashMap<u64, wgpu::BindGroup>,
     /// Compiled passes by their key; see `ShaderPass::key`.
     shaders: HashMap<String, CompiledShader>,
     sampler: wgpu::Sampler,
@@ -227,6 +239,29 @@ impl WgpuCompositor {
         let uniform_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("concat pass uniforms"),
             entries: &[uniform_entry(0), uniform_entry(1)],
+        });
+        // Group 2: a look-up table. Every pass binds one - the identity when
+        // the package has none - so one pipeline layout serves them all.
+        let lut_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("concat pass lut"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D3,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("concat compositor"),
@@ -337,6 +372,8 @@ impl WgpuCompositor {
             pipelines,
             bind_layout,
             uniform_layout,
+            lut_layout,
+            luts: HashMap::new(),
             shaders: HashMap::new(),
             sampler,
             vertices,
@@ -404,32 +441,76 @@ impl WgpuCompositor {
         layers: &[Layer<'_>],
     ) -> Vec<(u32, u32, usize, Blend)> {
         self.used.values_mut().for_each(|used| *used = 0);
-
         let mut draws: Vec<(u32, u32, usize, Blend)> = Vec::with_capacity(layers.len());
         let mut vertices: Vec<Vertex> = Vec::with_capacity(layers.len() * 6);
         for layer in layers {
-            if layer.opacity <= 0.0 {
-                continue;
-            }
-            let mut index = self.upload(layer.frame);
-            if !layer.passes.is_empty() {
-                index = self.run_passes(
-                    layer.frame.width(),
-                    layer.frame.height(),
-                    index,
-                    layer.passes,
-                    layer.time,
-                );
-            }
-            draws.push((
+            self.push_layer(&mut draws, &mut vertices, width, height, layer);
+        }
+        self.write_vertices(&vertices);
+        draws
+    }
+
+    /// One layer's draw: its pixels uploaded, its passes run, its quad
+    /// placed in an output `width` by `height`.
+    fn push_layer(
+        &mut self,
+        draws: &mut Vec<(u32, u32, usize, Blend)>,
+        vertices: &mut Vec<Vertex>,
+        width: u32,
+        height: u32,
+        layer: &Layer<'_>,
+    ) {
+        if layer.opacity <= 0.0 {
+            return;
+        }
+        let mut index = self.upload(layer.frame);
+        if !layer.passes.is_empty() {
+            index = self.run_passes(
                 layer.frame.width(),
                 layer.frame.height(),
                 index,
-                layer.blend,
-            ));
-            vertices.extend_from_slice(&Self::quad(layer, width, height));
+                layer.passes,
+                layer.time,
+            );
         }
+        draws.push((
+            layer.frame.width(),
+            layer.frame.height(),
+            index,
+            layer.blend,
+        ));
+        vertices.extend_from_slice(&Self::quad(layer, width, height));
+    }
 
+    /// A draw of a pooled texture the size of the output, over the whole
+    /// of it: how a stack already drawn is used as the ground for more.
+    fn push_pooled(
+        draws: &mut Vec<(u32, u32, usize, Blend)>,
+        vertices: &mut Vec<Vertex>,
+        width: u32,
+        height: u32,
+        index: usize,
+        opacity: f32,
+    ) {
+        draws.push((width, height, index, Blend::Normal));
+        let corner = |x: f32, y: f32, u: f32, v: f32| Vertex {
+            position: [x, y],
+            uv: [u, v],
+            opacity: opacity.clamp(0.0, 1.0),
+        };
+        vertices.extend_from_slice(&[
+            corner(-1.0, 1.0, 0.0, 0.0),
+            corner(1.0, 1.0, 1.0, 0.0),
+            corner(-1.0, -1.0, 0.0, 1.0),
+            corner(1.0, 1.0, 1.0, 0.0),
+            corner(1.0, -1.0, 1.0, 1.0),
+            corner(-1.0, -1.0, 0.0, 1.0),
+        ]);
+    }
+
+    /// Writes the quads for the next render, growing the buffer when a
+    /// frame has more layers than any before it.
+    fn write_vertices(&mut self, vertices: &[Vertex]) {
         if vertices.len() > self.vertex_capacity {
             self.vertex_capacity = vertices.len().next_power_of_two();
             self.vertices = self.device.create_buffer(&wgpu::BufferDescriptor {
@@ -441,9 +522,106 @@ impl WgpuCompositor {
         }
         if !vertices.is_empty() {
             self.queue
-                .write_buffer(&self.vertices, 0, as_bytes(&vertices));
+                .write_buffer(&self.vertices, 0, as_bytes(vertices));
         }
-        draws
+    }
+
+    /// Renders `draws` into a fresh pooled texture of the output size and
+    /// returns its index: a stack drawn so far, kept on the GPU as the
+    /// ground for a treatment or for the layers above it.
+    fn render_pooled(
+        &mut self,
+        width: u32,
+        height: u32,
+        draws: &[(u32, u32, usize, Blend)],
+        vertices: &[Vertex],
+    ) -> usize {
+        let target = self.claim(width, height);
+        self.write_vertices(vertices);
+        let view = self.pool[&(width, height)][target]
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        let encoder = self.encode(&view, draws);
+        self.queue.submit([encoder.finish()]);
+        target
+    }
+
+    /// The draws of a treated frame, every treatment applied over the
+    /// stack beneath its track without a pixel leaving the GPU: the stack
+    /// below is drawn into a pooled texture, the passes run over that, and
+    /// the result, blended back over the untreated stack by the strength,
+    /// becomes the ground the rest is drawn on. What comes back are the
+    /// draws for the final render, into whichever target the caller wants.
+    fn prepare_treated(
+        &mut self,
+        width: u32,
+        height: u32,
+        time: f32,
+        layers: &[(Layer<'_>, usize)],
+        treatments: &[Treatment<'_>],
+    ) -> (Vec<Draw>, Vec<Vertex>) {
+        self.used.values_mut().for_each(|used| *used = 0);
+        let mut ground: Option<usize> = None;
+        let mut next = 0;
+        for treatment in treatments {
+            let mut draws = Vec::new();
+            let mut vertices = Vec::new();
+            if let Some(index) = ground {
+                Self::push_pooled(&mut draws, &mut vertices, width, height, index, 1.0);
+            }
+            while next < layers.len() && layers[next].1 < treatment.track {
+                self.push_layer(&mut draws, &mut vertices, width, height, &layers[next].0);
+                next += 1;
+            }
+            let below = self.render_pooled(width, height, &draws, &vertices);
+            let strength = treatment.strength.clamp(0.0, 1.0);
+            if strength <= 0.0 || treatment.passes.is_empty() {
+                ground = Some(below);
+                continue;
+            }
+            let treated = self.run_passes(width, height, below, treatment.passes, time);
+            ground = Some(if strength >= 1.0 {
+                treated
+            } else {
+                let mut draws = Vec::new();
+                let mut vertices = Vec::new();
+                Self::push_pooled(&mut draws, &mut vertices, width, height, below, 1.0);
+                Self::push_pooled(&mut draws, &mut vertices, width, height, treated, strength);
+                self.render_pooled(width, height, &draws, &vertices)
+            });
+        }
+        let mut draws = Vec::new();
+        let mut vertices = Vec::new();
+        if let Some(index) = ground {
+            Self::push_pooled(&mut draws, &mut vertices, width, height, index, 1.0);
+        }
+        for (layer, _) in &layers[next..] {
+            self.push_layer(&mut draws, &mut vertices, width, height, layer);
+        }
+        (draws, vertices)
+    }
+
+    /// [`WgpuCompositor::composite_texture`] with treatments; see
+    /// [`Treatment`] and `prepare_treated`.
+    pub fn composite_texture_treated(
+        &mut self,
+        width: u32,
+        height: u32,
+        time: f32,
+        layers: &[(Layer<'_>, usize)],
+        treatments: &[Treatment<'_>],
+    ) -> Option<wgpu::Texture> {
+        if self.dead {
+            return None;
+        }
+        let (draws, vertices) = self.prepare_treated(width, height, time, layers, treatments);
+        self.write_vertices(&vertices);
+        let texture = self.presentable(width, height);
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let encoder = self.encode(&view, &draws);
+        self.queue.submit([encoder.finish()]);
+        self.retire();
+        Some(texture)
     }
 
     /// The render pass: every draw over black into `view`. Returns the
@@ -575,10 +753,24 @@ impl WgpuCompositor {
         self.target.as_ref().expect("just ensured")
     }
 
-    /// Claims a pooled texture of the layer's size, uploading its pixels.
+    /// Claims a pooled texture of the layer's size holding the frame's
+    /// pixels: the one that already does, moved into this frame's claimed
+    /// run, or a fresh claim with the pixels uploaded into it.
     fn upload(&mut self, frame: &Frame) -> usize {
+        let key = (frame.width(), frame.height());
+        let identity = frame.id();
+        let used = self.used.get(&key).copied().unwrap_or(0);
+        if let Some(pool) = self.pool.get_mut(&key)
+            && let Some(found) = (used..pool.len()).find(|&slot| pool[slot].holds == identity)
+        {
+            pool.swap(used, found);
+            *self.used.entry(key).or_insert(0) = used + 1;
+            return used;
+        }
         let index = self.claim(frame.width(), frame.height());
-        let texture = &self.pool[&(frame.width(), frame.height())][index].texture;
+        let pooled = &mut self.pool.get_mut(&key).expect("just claimed")[index];
+        pooled.holds = identity;
+        let texture = &pooled.texture;
         self.queue.write_texture(
             wgpu::TexelCopyTextureInfo {
                 texture,
@@ -644,11 +836,14 @@ impl WgpuCompositor {
             pool.push(PooledTexture {
                 texture,
                 bind_group,
+                holds: 0,
             });
         }
 
         let index = *used;
         *used += 1;
+        // Whatever is drawn into it next is not the frame it held.
+        pool[index].holds = 0;
         index
     }
 
@@ -670,7 +865,11 @@ impl WgpuCompositor {
             .device
             .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some(&pass.key),
-                bind_group_layouts: &[Some(&self.bind_layout), Some(&self.uniform_layout)],
+                bind_group_layouts: &[
+                    Some(&self.bind_layout),
+                    Some(&self.uniform_layout),
+                    Some(&self.lut_layout),
+                ],
                 immediate_size: 0,
             });
         let pipeline = self
@@ -739,6 +938,68 @@ impl WgpuCompositor {
         );
     }
 
+    /// The bind group for a pass's table, uploaded the first time its id is
+    /// seen, and the identity's for a pass without one. Returns the id the
+    /// group is filed under.
+    fn lut_group(&mut self, lut: Option<&Lut>) -> u64 {
+        static IDENTITY: std::sync::OnceLock<Lut> = std::sync::OnceLock::new();
+        let lut = lut.unwrap_or_else(|| IDENTITY.get_or_init(|| Lut::identity(2)));
+        if self.luts.contains_key(&lut.id) {
+            return lut.id;
+        }
+        let size = lut.size;
+        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("concat lut"),
+            size: wgpu::Extent3d {
+                width: size,
+                height: size,
+                depth_or_array_layers: size,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D3,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        self.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &lut.rgba,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(size * 4),
+                rows_per_image: Some(size),
+            },
+            wgpu::Extent3d {
+                width: size,
+                height: size,
+                depth_or_array_layers: size,
+            },
+        );
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("concat lut"),
+            layout: &self.lut_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
+            ],
+        });
+        self.luts.insert(lut.id, bind_group);
+        lut.id
+    }
+
     /// Runs `passes` over the pooled texture `source` of `width` × `height`,
     /// each drawing into a fresh pooled texture of the same size, and
     /// returns the index of the last one drawn. Each pass is its own
@@ -755,7 +1016,9 @@ impl WgpuCompositor {
         for pass in passes {
             let target = self.claim(width, height);
             self.shader(pass);
+            let lut_id = self.lut_group(pass.lut.as_deref());
             let shader = &self.shaders[&pass.key];
+            let lut_group = &self.luts[&lut_id];
             let frame_block: [f32; 4] = [width as f32, height as f32, time, pass.intensity];
             let frame_bytes: Vec<u8> = frame_block.iter().flat_map(|v| v.to_le_bytes()).collect();
             self.queue.write_buffer(&shader.frame, 0, &frame_bytes);
@@ -792,6 +1055,7 @@ impl WgpuCompositor {
                 render.set_pipeline(&shader.pipeline);
                 render.set_bind_group(0, &pool[current].bind_group, &[]);
                 render.set_bind_group(1, &shader.bind_group, &[]);
+                render.set_bind_group(2, lut_group, &[]);
                 render.draw(0..3, 0..1);
             }
             self.queue.submit([encoder.finish()]);
@@ -905,12 +1169,51 @@ impl Compositor for WgpuCompositor {
         }
 
         let draws = self.prepare(width, height, layers);
+        match self.render_and_read(width, height, &draws) {
+            Some(frame) => frame,
+            None => {
+                self.dead = true;
+                CpuCompositor.composite(width, height, layers)
+            }
+        }
+    }
+
+    fn composite_treated(
+        &mut self,
+        width: u32,
+        height: u32,
+        time: f32,
+        layers: &[(Layer<'_>, usize)],
+        treatments: &[Treatment<'_>],
+    ) -> Option<Frame> {
+        if self.dead {
+            return None;
+        }
+        let (draws, vertices) = self.prepare_treated(width, height, time, layers, treatments);
+        self.write_vertices(&vertices);
+        let frame = self.render_and_read(width, height, &draws);
+        if frame.is_none() {
+            self.dead = true;
+        }
+        frame
+    }
+}
+
+impl WgpuCompositor {
+    /// Draws into the readback target and copies it out: one submit, one
+    /// wait. `None` when the device did not deliver the pixels.
+    fn render_and_read(
+        &mut self,
+        width: u32,
+        height: u32,
+        draws: &[(u32, u32, usize, Blend)],
+    ) -> Option<Frame> {
         self.target(width, height);
         let target = self.target.as_ref().expect("just ensured");
         let view = target
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
-        let mut encoder = self.encode(&view, &draws);
+        let mut encoder = self.encode(&view, draws);
         encoder.copy_texture_to_buffer(
             wgpu::TexelCopyTextureInfo {
                 texture: &target.texture,
@@ -934,14 +1237,7 @@ impl Compositor for WgpuCompositor {
         );
         self.queue.submit([encoder.finish()]);
         self.retire();
-
-        match self.read_back() {
-            Some(frame) => frame,
-            None => {
-                self.dead = true;
-                CpuCompositor.composite(width, height, layers)
-            }
-        }
+        self.read_back()
     }
 }
 
@@ -972,12 +1268,89 @@ mod tests {
             }
             frame
         };
-        let full = [shader.pass(&Default::default(), &[], 1.0)];
+        let full = [shader.pass(&Default::default(), &[], 1.0, None)];
         let out = gpu.composite(4, 4, &[Layer::new(&red).with_passes(&full)]);
         assert_eq!(&out.pixels()[..3], &[0, 255, 255]);
-        let half = [shader.pass(&Default::default(), &[], 0.5)];
+        let half = [shader.pass(&Default::default(), &[], 0.5, None)];
         let out = gpu.composite(4, 4, &[Layer::new(&red).with_passes(&half)]);
         let p = &out.pixels()[..3];
+        assert!(
+            p[0] > 120 && p[0] < 136 && p[1] > 120 && p[1] < 136,
+            "{p:?}"
+        );
+    }
+
+    /// A pass reads its table through `lut()`: a table that answers green
+    /// to every colour turns a red frame green, and a pass without one is
+    /// handed the identity and changes nothing.
+    #[test]
+    fn a_pass_samples_its_table_and_the_identity_without_one() {
+        let Some(mut gpu) = gpu() else { return };
+        let manifest = concat_effects::Manifest::parse(
+            "[effect]\nid = \"test.table\"\nname = \"Table\"\nkind = \"effect\"\n[wgsl]\nentry = \"effect.wgsl\"\n",
+        )
+        .expect("a manifest");
+        let shader = concat_effects::Shader::compile(
+            &manifest,
+            "fn effect(uv: vec2<f32>) -> vec4<f32> { let c = sample(uv); return vec4<f32>(lut(c.rgb), c.a); }",
+        )
+        .expect("compiles");
+        let red = solid(4, 4, [255, 0, 0, 255]);
+        let green = Lut::from_rgb(2, &[0.0, 1.0, 0.0].repeat(8)).expect("a table");
+        let tabled = [shader.pass(
+            &Default::default(),
+            &[],
+            1.0,
+            Some(std::sync::Arc::new(green)),
+        )];
+        let out = gpu.composite(4, 4, &[Layer::new(&red).with_passes(&tabled)]);
+        assert_eq!(&out.pixels()[..3], &[0, 255, 0]);
+        let plain = [shader.pass(&Default::default(), &[], 1.0, None)];
+        let out = gpu.composite(4, 4, &[Layer::new(&red).with_passes(&plain)]);
+        assert_eq!(&out.pixels()[..3], &[255, 0, 0]);
+    }
+
+    /// A treatment runs its passes over the stack beneath its track and
+    /// nothing above it, blended back by its strength, without the frame
+    /// leaving the GPU: an invert over a red ground under a blue quarter
+    /// turns the ground cyan and leaves the blue alone.
+    #[test]
+    fn a_treatment_treats_the_stack_beneath_its_track_only() {
+        let Some(mut gpu) = gpu() else { return };
+        let manifest = concat_effects::Manifest::parse(
+            "[effect]\nid = \"test.invert2\"\nname = \"Invert\"\nkind = \"effect\"\n[wgsl]\nentry = \"effect.wgsl\"\n",
+        )
+        .expect("a manifest");
+        let shader = concat_effects::Shader::compile(
+            &manifest,
+            "fn effect(uv: vec2<f32>) -> vec4<f32> { let c = sample(uv); return vec4<f32>(vec3<f32>(1.0) - c.rgb, c.a); }",
+        )
+        .expect("compiles");
+        let passes = [shader.pass(&Default::default(), &[], 1.0, None)];
+        let red = solid(8, 8, [255, 0, 0, 255]);
+        let blue = solid(4, 4, [0, 0, 255, 255]);
+        let layers = [(Layer::new(&red), 0), (Layer::new(&blue), 2)];
+        let full = [Treatment {
+            track: 1,
+            passes: &passes,
+            strength: 1.0,
+        }];
+        let out = gpu
+            .composite_treated(8, 8, 0.0, &layers, &full)
+            .expect("drawn");
+        // Top-left is under the blue quarter; bottom-right is treated ground.
+        assert_eq!(&out.pixels()[..3], &[0, 0, 255]);
+        let last = out.pixels().len() - 4;
+        assert_eq!(&out.pixels()[last..last + 3], &[0, 255, 255]);
+        let half = [Treatment {
+            track: 1,
+            passes: &passes,
+            strength: 0.5,
+        }];
+        let out = gpu
+            .composite_treated(8, 8, 0.0, &layers, &half)
+            .expect("drawn");
+        let p = &out.pixels()[last..last + 3];
         assert!(
             p[0] > 120 && p[0] < 136 && p[1] > 120 && p[1] < 136,
             "{p:?}"

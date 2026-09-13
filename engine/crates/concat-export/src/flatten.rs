@@ -61,6 +61,7 @@ pub fn flatten_timeline_in(
                 return Some(ExportClip {
                     source_id: clip.id.clone(),
                     path: String::new(),
+                    audio_stream: None,
                     kind: ClipKind::Layer,
                     start: clip.start,
                     duration: clip.duration,
@@ -106,6 +107,7 @@ pub fn flatten_timeline_in(
                     mask_dir: String::new(),
                     masks: Vec::new(),
                     masks_enabled: false,
+                    highlighted: false,
                 });
             }
 
@@ -114,6 +116,7 @@ pub fn flatten_timeline_in(
             Some(ExportClip {
                 source_id: clip.id.clone(),
                 path: media.path.clone(),
+                audio_stream: clip.audio_stream,
                 kind: match clip.kind {
                     ModelClipKind::Video => ClipKind::Video,
                     ModelClipKind::Audio => ClipKind::Audio,
@@ -195,13 +198,16 @@ pub fn flatten_timeline_in(
                 has_audio: Some(media.has_audio),
                 cutout: clip.cutout.clone(),
                 mask_dir: match (&clip.cutout, project_dir) {
-                    (Some(_), Some(dir)) => concat_vision::mask_dir(dir, &media.path)
-                        .to_string_lossy()
-                        .into_owned(),
+                    (Some(cutout), Some(dir)) => {
+                        concat_vision::mask_dir(dir, &media.path, cutout.subject)
+                            .to_string_lossy()
+                            .into_owned()
+                    }
                     _ => String::new(),
                 },
                 masks: clip.masks.clone(),
                 masks_enabled: clip.masks_enabled,
+                highlighted: false,
             })
         })
         .collect()
@@ -329,7 +335,6 @@ pub fn volume_curve(clip: &concat_project::model::Clip) -> Vec<(f64, f64)> {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
 
     use concat_project::commands::{ClipPatch, NewMedia, TrackFlag};
     use concat_project::model::AppliedFilter;
@@ -355,6 +360,7 @@ mod tests {
                     video_codec: None,
                     audio_codec: None,
                     has_audio: true,
+                    audio_tracks: Vec::new(),
                 },
             })
             .expect("adds media")
@@ -422,11 +428,7 @@ mod tests {
             .apply(Command::UpdateClip {
                 clip_id,
                 patch: ClipPatch {
-                    video_effects: Some(vec![AppliedFilter {
-                        id: "sepia".into(),
-                        params: BTreeMap::new(),
-                        enabled: true,
-                    }]),
+                    video_effects: Some(vec![AppliedFilter::new("sepia")]),
                     ..Default::default()
                 },
             })

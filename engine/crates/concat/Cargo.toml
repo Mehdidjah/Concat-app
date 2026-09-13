@@ -79,6 +79,9 @@ slint = { version = "1.17", default-features = false, features = [
 ] }
 
 [dependencies]
+# Writes the card still an imported look gets, rendered here from the
+# reference picture through the table.
+png = "0.17"
 # The one device: created in gpu.rs, handed to Slint and to the monitor.
 wgpu.workspace = true
 pollster.workspace = true
@@ -102,6 +105,9 @@ serde = { version = "1", features = ["derive"] }
 serde_json.workspace = true
 # Text presets are TOML files, as the effect manifests are.
 toml = "1.1"
+
+# JPEG encoding for the media artwork cache.
+image = { version = "0.25", default-features = false, features = ["jpeg"] }
 
 # The renderer is picked by a feature here rather than by editing the
 # dependency, so both variants build from one tree and can be compared:

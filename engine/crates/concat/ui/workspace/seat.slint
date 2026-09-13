@@ -102,6 +102,7 @@ export component Seat inherits Rectangle {
 
             import-media => { Editor.import-media(); }
             filter-changed(filter) => { Editor.media-filter-changed(filter); }
+            sort-changed(index) => { Editor.media-sort-changed(index); }
             floor-pressed => { Editor.blur(); }
             select(id, additive) => {
                 Editor.blur();
@@ -116,12 +117,21 @@ export component Seat inherits Rectangle {
             activate(id) => { Editor.media-activate(id); }
 
             presets: Editor.text-presets;
+            catalogue-effects: Editor.catalogue-effects;
+            catalogue-audio: Editor.catalogue-audio;
+            catalogue-filters: Editor.catalogue-filters;
+            effect-groups: Editor.effect-groups;
+            audio-groups: Editor.audio-groups;
+            filter-groups: Editor.filter-groups;
             add-text(preset) => { Editor.library-add-text(preset); }
             apply-effect(id) => { Editor.library-apply-effect(id); }
             apply-transition(id) => { Editor.library-apply-transition(id); }
             apply-filter(id, label) => { Editor.library-apply-filter(id, label); }
+            audition: Editor.library-audition;
+            audition-filter(id) => { Editor.library-audition-filter(id); }
             apply-audio(id) => { Editor.library-apply-audio(id); }
             save-template => { Editor.library-save-template(); }
+            import-lut => { Editor.library-import-lut(); }
         }
 
     if root.kind == PaneKind.preview: PreviewPane {
@@ -142,6 +152,7 @@ export component Seat inherits Rectangle {
             quality-index: Editor.quality-index;
             playhead: Editor.playhead;
             duration: Editor.preview-duration;
+            playhead-free: Editor.playhead-free;
             playing: Editor.playing;
             has-picture: Editor.has-picture;
             clip-name: Editor.preview-clip-name;
@@ -183,16 +194,15 @@ export component Seat inherits Rectangle {
 
             video-effects: Editor.video-effects;
             audio-effects: Editor.audio-effects;
+            audio-tracks: Editor.audio-tracks;
             level: Editor.level;
             peak: Editor.peak;
             add-effect(audio) => { Editor.add-effect(audio); }
             remove-effect(id) => { Editor.remove-effect(id); }
 
             catalogue-effects: Editor.catalogue-effects;
-            catalogue-filters: Editor.catalogue-filters;
             catalogue-audio: Editor.catalogue-audio;
             effect-groups: Editor.effect-groups;
-            filter-groups: Editor.filter-groups;
             audio-groups: Editor.audio-groups;
             applied-visual: Editor.applied-visual;
             applied-audio: Editor.applied-audio;
@@ -220,6 +230,7 @@ export component Seat inherits Rectangle {
             cutout-tool(index) => { Editor.cutout-tool(index); }
             cutout-size(size) => { Editor.cutout-size(size); }
             cutout-painting(on) => { Editor.cutout-painting(on); }
+            cutout-subject(index) => { Editor.cutout-subject(index); }
             cutout-clear => { Editor.cutout-clear(); }
 
             masks: Editor.masks;
@@ -315,8 +326,8 @@ export component Seat inherits Rectangle {
             snap: Editor.snap;
             selected-count: Editor.selected-count;
             merge-blocked-because: Editor.merge-blocked-because;
-            can-caption: Editor.can-caption;
-            can-speak: Editor.can-speak;
+            sound-selected: Editor.sound-selected;
+            title-selected: Editor.title-selected;
             can-detach: Editor.can-detach;
             can-reattach: Editor.can-reattach;
             playhead: Editor.playhead;

@@ -4,19 +4,40 @@
 import { I18n } from "../i18n.slint";
 import { Theme } from "../theme/theme.slint";
 import { Glyph, Icon } from "../icons.slint";
-import { IconButton, Row, Section, SectionBody, SectionHeader } from "../primitives/panel.slint";
+import {
+    IconButton,
+    Row,
+    Section,
+    SectionBody,
+    SectionHeader,
+} from "../primitives/panel.slint";
 import { Button } from "../primitives/modal.slint";
 import { SegmentedControl } from "../primitives/segmented-control.slint";
 import { Select } from "../primitives/select.slint";
 import {
-    Fader, HelpButton, InspectorFmt, Note, Param, ParamFormat,
-    Rail, ResetButton, SearchField, Subhead, Switch, SwitchRow,
+    Check,
+    HelpButton,
+    InspectorFmt,
+    Note,
+    Param,
+    ParamFormat,
+    Rail,
+    ResetButton,
+    SearchField,
+    Subhead,
+    Switch,
+    SwitchRow,
 } from "controls.slint";
-import { ClipField, ClipKind, Keyframes, SelectedClipData } from "../timeline/model.slint";
+import {
+    ClipField,
+    ClipKind,
+    Keyframes,
+    SelectedClipData,
+} from "../timeline/model.slint";
 
 // The editor's clip inspector: one panel, three tabs. Adjust is direct
-// controls; Filters and Effects differ only in their catalogue, so both are
-// PresetStack with different data.
+// controls; Effects and Audio are each a PresetStack over their chain. A
+// filter is a layer on the lanes and gets FilterPanel, not a chain.
 
 /// One parameter a preset exposes. `value` doubles as the default in the
 /// catalogue: applying a preset copies the row, and double-click restores
@@ -33,6 +54,10 @@ export struct CatalogueEntryData {
     category: string,
     group: int,
     description: string,
+    /// The card's still, when the package brings its own - a user's
+    /// imported look does. Empty for a built-in, whose still the pane
+    /// looks up by id.
+    art: image,
 }
 
 /// What one effect library is currently showing.
@@ -97,12 +122,25 @@ export struct AppliedParamData {
     /// The subhead this knob sits under; empty for none. Rows that share
     /// one in a run share one subhead.
     group: string,
+    /// The unit the manifest gives the value: `%`, `K`, `EV`, or nothing.
+    unit: string,
     min: float,
     max: float,
     step: float,
     default-value: float,
     value: float,
     fmt: ParamFormat,
+    /// The knob can carry keys - the Adjust panel's can, a chain's cannot
+    /// yet - and, when it can, the same four facts a ClipKeyData holds:
+    /// it rides at all, a key sits under the playhead, and there is one
+    /// behind or ahead to step to.
+    keyable: bool,
+    keyed: bool,
+    here: bool,
+    prev: bool,
+    next: bool,
+    /// Generic effect-track compatibility while the owner migrates all
+    /// chain knobs to the shared named-key system.
     keyframed: bool,
     animatable: bool,
 }
@@ -122,7 +160,10 @@ component StarChip inherits Rectangle {
         : touch.has-hover ? Theme.field-hover
         : Theme.field;
 
-    animate background, border-color { duration: 100ms; easing: cubic-bezier(0.4, 0, 0.2, 1); }
+    animate background, border-color {
+        duration: 100ms;
+        easing: cubic-bezier(0.4, 0, 0.2, 1);
+    }
 
     Icon {
         glyph: Glyph.sparkle;
@@ -175,8 +216,6 @@ export component PresetStack inherits VerticalLayout {
     callback keyframe-param(index: int, key: string, on: bool);
     callback commit();
 
-    property <bool> help;
-
     // The grid. Three columns at the inspector's width, which puts a tile at
     // about 70px - wide enough for "Voice Focus" on two lines and narrow
     // enough that a shelf of twenty is four rows rather than seven.
@@ -188,11 +227,24 @@ export component PresetStack inherits VerticalLayout {
     property <length> cell-h: 44px;
     property <int> rows: ceil(root.catalogue.length / root.columns);
 
-    // The field owns its own text once it has been typed in - a TextInput
-    // assigns to `text`, and an assignment replaces the binding declared on
-    // it - so the box has to be put back by hand when Rust clears the query,
-    // which picking a shelf and pressing the star both do.
-    changed query => { search.text = root.query; }
+    /// Links that belong to another section's controls - the audio
+    /// treatments, which have switches of their own - and so are not shown
+    /// as cards here. Three at most; the scan is as deep as the list.
+    in property <[string]> hidden: [];
+    /// Whether the stack offers the library at all. Off for the picture's
+    /// chains, whose libraries are the Library pane's Effects and Filters
+    /// pages: the stack is then the chain alone, with a word on where to
+    /// find more when it is empty.
+    in property <bool> library: true;
+    /// The words for an empty chain without a library.
+    in property <string> empty-note;
+
+    pure function is-hidden(id: string) -> bool {
+        return root.hidden.length > 0 && (root.hidden[0] == id
+            || (root.hidden.length > 1 && root.hidden[1] == id)
+            || (root.hidden.length > 2 && root.hidden[2] == id)
+            || (root.hidden.length > 3 && root.hidden[3] == id));
+    }
 
     function in-chain(id: string) -> bool {
         // A real member test wants a model lookup Slint cannot express, so
@@ -208,145 +260,158 @@ export component PresetStack inherits VerticalLayout {
             || (root.applied.length > 7 && root.applied[7].id == id));
     }
 
-    // No empty shell: the section arrives with the first link, so an
-    // untouched clip shows only its library.
-    if root.applied.length > 0: Section {
+    Section {
         first: true;
 
         SectionHeader {
-            title: I18n.t("Applied");
+            title: root.library-title;
             HelpButton {
-                open: root.help;
-                toggled => { root.help = self.open; }
+                text: I18n.t("The chain runs top to bottom — reorder it with the chevrons. The eye bypasses one link without losing the values you dialled into it.");
             }
         }
 
-        if root.help: Note {
-            text: I18n.t("The chain runs top to bottom — reorder it with the chevrons. The eye bypasses one link without losing the values you dialled into it.");
+        if !root.library && root.applied.length == 0: Note {
+            text: root.empty-note;
         }
 
+        // What is on the chain, first and in its own library: a link is a
+        // card with its knobs, its bypass and its place in the order, and
+        // it sits where it was picked from rather than in a list of its
+        // own that says nothing about what kind of thing it is.
         VerticalLayout {
             padding-left: Theme.pad;
             padding-right: Theme.pad;
-            padding-bottom: 6px;
-            spacing: 6px;
 
-            for item[index] in root.applied: Rectangle {
-                border-radius: Theme.r;
-                background: Theme.raised;
-                border-width: 1px;
-                border-color: Theme.line;
-                opacity: item.on ? 1.0 : 0.55;
+            for item[index] in root.applied: VerticalLayout {
+                property <bool> hidden: root.is-hidden(item.id);
+                padding-bottom: self.hidden ? 0px : 6px;
 
-                VerticalLayout {
-                    padding-bottom: 8px;
-                    spacing: 4px;
+                if !self.hidden: Rectangle {
+                    border-radius: Theme.r;
+                    background: Theme.raised;
+                    border-width: 1px;
+                    border-color: Theme.line;
+                    opacity: item.on ? 1.0 : 0.55;
 
-                    HorizontalLayout {
-                        padding-left: 10px;
-                        padding-right: 6px;
-                        padding-top: 6px;
-                        spacing: 2px;
+                    VerticalLayout {
+                        padding-bottom: 8px;
+                        spacing: 4px;
 
-                        Text {
-                            horizontal-stretch: 1;
-                            text: item.name;
-                            color: item.known ? Theme.fg : Theme.fg-dim;
-                            font-size: Theme.fs;
-                            font-weight: Theme.weight-title;
-                            vertical-alignment: center;
-                            overflow: elide;
+                        HorizontalLayout {
+                            padding-left: 10px;
+                            padding-right: 6px;
+                            padding-top: 6px;
+                            spacing: 2px;
+
+                            Text {
+                                horizontal-stretch: 1;
+                                text: item.name;
+                                color: item.known ? Theme.fg : Theme.fg-dim;
+                                font-size: Theme.fs;
+                                font-weight: Theme.weight-title;
+                                vertical-alignment: center;
+                                overflow: elide;
+                            }
+
+                            if !item.known: Text {
+                                text: I18n.t("not installed");
+                                color: Theme.fg-dim;
+                                font-size: Theme.fs-xs;
+                                vertical-alignment: center;
+                            }
+
+                            IconButton {
+                                glyph: Glyph.eye;
+                                label: item.on ? I18n.t1("Bypass {0}", "\{item.name}") : I18n.t1("Enable {0}", "\{item.name}");
+                                checked: item.on;
+                                clicked => { root.toggle(index); }
+                            }
+
+                            IconButton {
+                                glyph: Glyph.chevron-up;
+                                label: I18n.t1("Move {0} up", "\{item.name}");
+                                enabled: index > 0;
+                                clicked => { root.move-by(index, -1); }
+                            }
+
+                            IconButton {
+                                glyph: Glyph.chevron-down;
+                                label: I18n.t1("Move {0} down", "\{item.name}");
+                                enabled: index < root.applied.length - 1;
+                                clicked => { root.move-by(index, 1); }
+                            }
+
+                            IconButton {
+                                glyph: Glyph.close;
+                                label: I18n.t1("Remove {0}", "\{item.name}");
+                                clicked => { root.remove(index); }
+                            }
                         }
 
-                        if !item.known: Text {
-                            text: I18n.t("not installed");
-                            color: Theme.fg-dim;
-                            font-size: Theme.fs-xs;
-                            vertical-alignment: center;
-                        }
-
-                        IconButton {
-                            glyph: Glyph.eye;
-                            label: item.on ? I18n.t1("Bypass {0}", "\{item.name}") : I18n.t1("Enable {0}", "\{item.name}");
-                            checked: item.on;
-                            clicked => { root.toggle(index); }
-                        }
-                        IconButton {
-                            glyph: Glyph.chevron-up;
-                            label: I18n.t1("Move {0} up", "\{item.name}");
-                            enabled: index > 0;
-                            clicked => { root.move-by(index, -1); }
-                        }
-                        IconButton {
-                            glyph: Glyph.chevron-down;
-                            label: I18n.t1("Move {0} down", "\{item.name}");
-                            enabled: index < root.applied.length - 1;
-                            clicked => { root.move-by(index, 1); }
-                        }
-                        IconButton {
-                            glyph: Glyph.close;
-                            label: I18n.t1("Remove {0}", "\{item.name}");
-                            clicked => { root.remove(index); }
-                        }
-                    }
-
-                    // One control per parameter the package declares. The
+                        // One control per parameter the package declares. The
                     // knob writes to its own `value`, which drops a binding,
                     // so the row re-seeds it whenever Rust republishes the
                     // parameter — a new clip, an undo — and the control
                     // never shows a number that is not the document's.
                     for p in root.params: Rectangle {
-                        property <AppliedParamData> data: p;
-                        visible: p.entry == index;
-                        height: p.entry == index ? knob.preferred-height : 0;
-                        changed data => { knob.value = self.data.value; }
+                            property <AppliedParamData> data: p;
+                            visible: p.entry == index;
+                            height: p.entry == index ? knob.preferred-height : 0;
+                            changed data => { knob.value = self.data.value; }
 
-                        knob := Param {
-                            label: p.label;
-                            value: p.value;
-                            minimum: p.min;
-                            maximum: p.max;
-                            step: p.step;
-                            default-value: p.default-value;
-                            fmt: p.fmt;
-                            enabled: item.on;
-                            keyframe: p.animatable;
-                            keyframed: p.keyframed;
-                            changed(v) => {
-                                root.set-param(index, p.key, v);
-                                root.commit();
+                            knob := Param {
+                                label: p.label;
+                                value: p.value;
+                                minimum: p.min;
+                                maximum: p.max;
+                                step: p.step;
+                                default-value: p.default-value;
+                                fmt: p.fmt;
+                                unit: p.unit;
+                                enabled: item.on;
+                                keyframe: p.animatable;
+                                keyframed: p.keyframed;
+                                changed(v) => {
+                                    root.set-param(index, p.key, v);
+                                    root.commit();
+                                }
+                                keyframe-toggled(on) => {
+                                    root.keyframe-param(index, p.key, on);
+                                }
                             }
-                            keyframe-toggled(on) => { root.keyframe-param(index, p.key, on); }
                         }
                     }
                 }
             }
         }
-    }
 
-    Section {
-        first: root.applied.length == 0;
-
-        SectionHeader { title: root.library-title; }
-
-        Row {
+        if root.library: Row {
             search := SearchField {
                 text: root.query;
                 placeholder: I18n.t1("Search {0}s", "\{root.noun}");
                 edited(text) => { Library.query-changed(root.shelf, text); }
+                // The field owns its own text once typed in - a TextInput
+                // assigns to `text`, and an assignment replaces the binding
+                // declared on it - so the box is put back by hand when Rust
+                // clears the query, which picking a shelf and pressing the
+                // star both do.
+                property <string> held: root.query;
+                changed held => { self.text = self.held; }
             }
         }
 
         // Air between the field and the strip under it: two rows butted
         // together read as one control, and they are not.
-        Rectangle { height: 8px; }
+        if root.library: Rectangle {
+            height: 8px;
+        }
 
         // The star and the shelves. Favourites is not one more shelf: it
         // cuts across all of them, so it is a chip beside the strip rather
         // than a segment inside it, and it takes the strip's place when it
         // is on because a shelf inside a starred set is a filter of a filter
         // nobody asked for.
-        Row {
+        if root.library: Row {
             StarChip {
                 on: root.favourites-only;
                 clicked => { Library.favourites-changed(root.shelf, !root.favourites-only); }
@@ -366,7 +431,9 @@ export component PresetStack inherits VerticalLayout {
             }
         }
 
-        Rectangle { height: 6px; }
+        if root.library: Rectangle {
+            height: 6px;
+        }
 
         // The shelf itself, as tiles rather than rows.
         //
@@ -376,7 +443,7 @@ export component PresetStack inherits VerticalLayout {
         // model is one that shows. Filtering in Slint - the `visible: false`
         // trick a vertical list can get away with - would leave holes in the
         // grid where the hidden ones were.
-        Rectangle {
+        if root.library: Rectangle {
             height: root.rows * (root.cell-h + root.cell-gap);
 
             for entry[index] in root.catalogue: tile := Rectangle {
@@ -396,7 +463,8 @@ export component PresetStack inherits VerticalLayout {
                     : Theme.field;
 
                 animate background, border-color {
-                    duration: 100ms; easing: cubic-bezier(0.4, 0, 0.2, 1);
+                    duration: 100ms;
+                    easing: cubic-bezier(0.4, 0, 0.2, 1);
                 }
 
                 // The name, centred and given the whole cell: at this size a
@@ -466,15 +534,22 @@ export component PresetStack inherits VerticalLayout {
     }
 }
 
-/// One treatment: a switch, its name, and one line saying what it does.
+/// One treatment: a switch, its name, one line saying what it does, and
+/// its knobs under that while it is on.
 component Processor inherits VerticalLayout {
     in property <string> label;
     in property <string> note;
     in property <bool> on;
+    /// Where the treatment sits on the chain, or -1: which knobs are its.
+    in property <int> entry;
+    in property <[AppliedParamData]> params;
 
     callback toggled();
+    callback set-param(index: int, key: string, value: float);
+    callback commit();
 
     padding-bottom: 6px;
+    spacing: 4px;
 
     SwitchRow {
         label: root.label;
@@ -495,6 +570,29 @@ component Processor inherits VerticalLayout {
             wrap: word-wrap;
         }
     }
+
+    // The knobs, re-seeded the way PresetStack's are; see there.
+    for p in root.params: Rectangle {
+        property <AppliedParamData> data: p;
+        visible: root.on && p.entry == root.entry;
+        height: root.on && p.entry == root.entry ? knob.preferred-height : 0;
+        changed data => { knob.value = self.data.value; }
+
+        knob := Param {
+            label: p.label;
+            value: p.value;
+            minimum: p.min;
+            maximum: p.max;
+            step: p.step;
+            default-value: p.default-value;
+            fmt: p.fmt;
+            unit: p.unit;
+            changed(v) => {
+                root.set-param(root.entry, p.key, v);
+                root.commit();
+            }
+        }
+    }
 }
 
 /// The three treatments a sound clip almost always wants, promoted out of
@@ -506,13 +604,17 @@ component Processor inherits VerticalLayout {
 /// person opening the Sound tab to fix a noisy lavalier should not have to
 /// know that "Reduce noise" is filed under a shelf.
 ///
-/// Their knobs stay in the chain's Applied section rather than being
-/// duplicated here. One set of controls per link, in the order the link runs.
+/// Each one's knobs sit under its switch while it is on; the library
+/// below leaves these three out of its cards, so a control is in one
+/// place.
 export component ProcessorRows inherits VerticalLayout {
     in property <[AppliedEntryData]> applied;
+    in property <[AppliedParamData]> params;
 
     callback add(id: string);
     callback remove(index: int);
+    callback set-param(index: int, key: string, value: float);
+    callback commit();
 
     /// Where a package sits on the chain, or -1. The same eight-deep scan
     /// PresetStack does, and for the same reason: Slint has no lookup.
@@ -537,25 +639,42 @@ export component ProcessorRows inherits VerticalLayout {
     }
 
     Section {
-        SectionHeader { title: I18n.t("Treatments"); }
+        SectionHeader {
+            title: I18n.t("Treatments");
+        }
+
         SectionBody {
             Processor {
                 label: I18n.t("Normalize loudness");
                 note: I18n.t("Brings the clip to a broadcast level without riding the fader.");
                 on: root.at("concat.loudness") >= 0;
+                entry: root.at("concat.loudness");
+                params: root.params;
                 toggled => { root.toggle("concat.loudness"); }
+                set-param(index, key, value) => { root.set-param(index, key, value); }
+                commit => { root.commit(); }
             }
+
             Processor {
                 label: I18n.t("Reduce noise");
                 note: I18n.t("Takes the room's hiss and hum out from under the voice.");
                 on: root.at("concat.denoise") >= 0;
+                entry: root.at("concat.denoise");
+                params: root.params;
                 toggled => { root.toggle("concat.denoise"); }
+                set-param(index, key, value) => { root.set-param(index, key, value); }
+                commit => { root.commit(); }
             }
+
             Processor {
                 label: I18n.t("Enhance voice");
                 note: I18n.t("Lifts speech out of the mix: a little presence, a little control.");
                 on: root.at("concat.enhance-voice") >= 0;
+                entry: root.at("concat.enhance-voice");
+                params: root.params;
                 toggled => { root.toggle("concat.enhance-voice"); }
+                set-param(index, key, value) => { root.set-param(index, key, value); }
+                commit => { root.commit(); }
             }
         }
     }
@@ -571,6 +690,118 @@ export component ProcessorRows inherits VerticalLayout {
 // binding the parent declared on that property — so binding these straight
 // to `selected` would work exactly once and then go deaf to the model. They
 // are seeded instead, on init and whenever the selection changes under us.
+
+// One way of removing the background, as a line: a tick, the name, and
+// whatever trails on the right - a reset, when the block has one.
+component RemovalBlock inherits HorizontalLayout {
+    in property <string> title;
+    in property <bool> on;
+
+    callback toggled(on: bool);
+
+    padding-left: Theme.pad;
+    padding-right: Theme.pad;
+    spacing: 8px;
+    min-height: Theme.h;
+
+    VerticalLayout {
+        alignment: center;
+        Check {
+            checked: root.on;
+            toggled(on) => { root.toggled(on); }
+        }
+    }
+
+    head := Rectangle {
+        horizontal-stretch: 1;
+        Text {
+            x: 0;
+            width: parent.width;
+            height: parent.height;
+            text: root.title;
+            color: Theme.fg;
+            font-size: Theme.fs;
+            font-weight: Theme.weight-title;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+
+        TouchArea {
+            mouse-cursor: pointer;
+            clicked => { root.toggled(!root.on); }
+        }
+    }
+
+    VerticalLayout {
+        alignment: center;
+        HorizontalLayout {
+            spacing: 2px;
+            @children
+        }
+    }
+}
+
+// A brush in the custom cutout's tray. The smart ones wear a spark, since
+// the glyph is the same brush either way and what differs is whether it
+// listens to the mask.
+component ToolButton inherits Rectangle {
+    in property <Glyph> glyph;
+    in property <bool> smart;
+    in property <string> label;
+    in property <bool> checked;
+
+    callback clicked();
+
+    width: 30px;
+    height: 30px;
+
+    IconButton {
+        x: 0;
+        width: 30px;
+        glyph: root.glyph;
+        label: root.label;
+        checked: root.checked;
+        icon-size: 15px;
+        clicked => { root.clicked(); }
+    }
+
+    if root.smart: Icon {
+        x: parent.width - self.width - 2px;
+        y: 2px;
+        glyph: Glyph.sparkle;
+        size: 8px;
+        tint: root.checked ? Theme.accent : Theme.fg-muted;
+    }
+}
+
+// The cutout model at work, while it runs: the masks are found in the
+// background and the picture is shown as shot until they are.
+component AnalysisRow inherits Row {
+    in property <float> progress;
+    /// The model is still being downloaded; the frames come after.
+    in property <bool> fetching;
+
+    label: I18n.t("Analysis");
+    Text {
+        text: root.fetching
+            ? I18n.t1("Fetching the model… {0}%", "\{Math.round(root.progress * 100)}")
+            : I18n.t1("Finding the subject… {0}%", "\{Math.round(root.progress * 100)}");
+        color: Theme.fg-muted;
+        font-size: Theme.fs;
+        vertical-alignment: center;
+    }
+}
+
+// A rule between blocks inside one section, inset to the section's padding
+// where a Section's own hairline runs edge to edge.
+component Hairline inherits HorizontalLayout {
+    padding-left: Theme.pad;
+    padding-right: Theme.pad;
+    Rectangle {
+        height: 1px;
+        background: Theme.line;
+    }
+}
 
 /// Video: how the picture sits in the frame, how solid it is, and whether
 /// its background is keyed out.
@@ -599,6 +830,8 @@ export component VideoPanel inherits VerticalLayout {
     callback cutout-tool(index: int);
     callback cutout-size(size: float);
     callback cutout-painting(on: bool);
+    /// What the automatic cutout keeps: 0 auto, 1 person, 2 object.
+    callback cutout-subject(index: int);
     callback cutout-clear();
 
     /// Which keyer is on the chain, and where: -1 for none. Scans the first
@@ -624,6 +857,22 @@ export component VideoPanel inherits VerticalLayout {
     /// be two removals at once.
     property <int> removal: root.keyer == 1 ? 3 : root.keyer == 2 ? 4 : root.selected.cutout;
     property <bool> masked: root.removal == 1 || root.removal == 2;
+
+    /// Puts one removal on and the others off: 0 none, 1 auto, 2 custom,
+    /// 3 green key, 4 blue key. The keyer comes off the chain before
+    /// anything else goes on, and the cutout is set or cleared to match.
+    function remove-by(index: int) {
+        if (root.keyer-index >= 0) {
+            root.chain-remove(root.keyer-index);
+        }
+        root.cutout-mode(index == 1 ? 1 : index == 2 ? 2 : 0);
+        if (index == 3) {
+            root.chain-add("concat.green-screen");
+        } else if (index == 4) {
+            root.chain-add("concat.blue-screen");
+        }
+        root.commit();
+    }
 
     property <float> scale;
     property <float> offset-x;
@@ -665,13 +914,17 @@ export component VideoPanel inherits VerticalLayout {
         root.crop-bottom = root.selected.crop-bottom;
     }
 
-    property <[string]> blends: [I18n.t("Normal"), I18n.t("Multiply"), I18n.t("Screen"), I18n.t("Add"), I18n.t("Lighten"), I18n.t("Darken")];
+    property <[string]> blends: [
+        I18n.t("Normal"),
+        I18n.t("Multiply"),
+        I18n.t("Screen"),
+        I18n.t("Add"),
+        I18n.t("Lighten"),
+        I18n.t("Darken")
+    ];
 
     init => { root.seed(); }
     changed selected => { root.seed(); }
-
-    property <bool> transform-help;
-    property <bool> cutout-help;
 
     Section {
         first: true;
@@ -680,188 +933,96 @@ export component VideoPanel inherits VerticalLayout {
             collapsible: true;
             summary: "\{Math.round(root.scale * 100)}% · \{Math.round(root.rotation)}°";
             HelpButton {
-                open: root.transform-help;
-                toggled => { root.transform-help = self.open; }
+                text: I18n.t("Scale and position are fractions of the output frame, so a clip keeps its framing if the project is re-sized. The same numbers move with the box on the monitor. Width and height pull one axis beyond the scale; the edge grips on the monitor do the same.");
             }
         }
 
         if transform.open: SectionBody {
 
-        if root.transform-help: Note {
-            text: I18n.t("Scale and position are fractions of the output frame, so a clip keeps its framing if the project is re-sized. The same numbers move with the box on the monitor. Width and height pull one axis beyond the scale; the edge grips on the monitor do the same.");
-        }
+            Param {
+                label: I18n.t("Scale");
+                keyable: true;
+                field: ClipField.scale;
+                value <=> root.scale;
+                minimum: 0.05;
+                maximum: 8;
+                step: 0.01;
+                default-value: 1;
+                fmt: ParamFormat.fraction;
+                unit: "%";
+                unit-scale: 100;
+                changed(v) => { root.set(ClipField.scale, v); root.commit(); }
+            }
 
-        Param {
-            slider: false;
-            label: I18n.t("Scale");
-            keyable: true;
-            field: ClipField.scale;
-            value <=> root.scale;
-            minimum: 0.05;
-            maximum: 8;
-            step: 0.01;
-            default-value: 1;
-            fmt: ParamFormat.fraction;
-            keyframe: true;
-            keyframed: root.selected.scale-keyframed;
-            changed(v) => { root.set(ClipField.scale, v); root.commit(); }
-            keyframe-toggled(on) => { root.keyframe-toggle(ClipField.scale, on); }
-        }
-        Param {
-            slider: false;
-            label: I18n.t("Position X");
-            keyable: true;
-            field: ClipField.offset-x;
-            value <=> root.offset-x;
-            minimum: -1;
-            maximum: 1;
-            step: 0.005;
-            default-value: 0;
-            fmt: ParamFormat.centred;
-            keyframe: true;
-            keyframed: root.selected.offset-x-keyframed;
-            changed(v) => { root.set(ClipField.offset-x, v); root.commit(); }
-            keyframe-toggled(on) => { root.keyframe-toggle(ClipField.offset-x, on); }
-        }
-        Param {
-            slider: false;
-            label: I18n.t("Position Y");
-            keyable: true;
-            field: ClipField.offset-y;
-            value <=> root.offset-y;
-            minimum: -1;
-            maximum: 1;
-            step: 0.005;
-            default-value: 0;
-            fmt: ParamFormat.centred;
-            keyframe: true;
-            keyframed: root.selected.offset-y-keyframed;
-            changed(v) => { root.set(ClipField.offset-y, v); root.commit(); }
-            keyframe-toggled(on) => { root.keyframe-toggle(ClipField.offset-y, on); }
-        }
-        Param {
-            slider: false;
-            label: I18n.t("Rotation");
-            keyable: true;
-            field: ClipField.rotation;
-            value <=> root.rotation;
-            minimum: -180;
-            maximum: 180;
-            step: 1;
-            default-value: 0;
-            fmt: ParamFormat.degrees;
-            keyframe: true;
-            keyframed: root.selected.rotation-keyframed;
-            changed(v) => { root.set(ClipField.rotation, v); root.commit(); }
-            keyframe-toggled(on) => { root.keyframe-toggle(ClipField.rotation, on); }
-        }
-        Param {
-            label: I18n.t("Anchor X");
-            value <=> root.anchor-x;
-            minimum: -1;
-            maximum: 1;
-            step: 0.005;
-            default-value: 0;
-            fmt: ParamFormat.centred;
-            keyframe: true;
-            keyframed: root.selected.anchor-x-keyframed;
-            changed(v) => { root.set(ClipField.anchor-x, v); root.commit(); }
-            keyframe-toggled(on) => { root.keyframe-toggle(ClipField.anchor-x, on); }
-        }
-        Param {
-            label: I18n.t("Anchor Y");
-            value <=> root.anchor-y;
-            minimum: -1;
-            maximum: 1;
-            step: 0.005;
-            default-value: 0;
-            fmt: ParamFormat.centred;
-            keyframe: true;
-            keyframed: root.selected.anchor-y-keyframed;
-            changed(v) => { root.set(ClipField.anchor-y, v); root.commit(); }
-            keyframe-toggled(on) => { root.keyframe-toggle(ClipField.anchor-y, on); }
-        }
-        Param {
-            label: I18n.t("Rotation X");
-            value <=> root.rotation-x;
-            minimum: -180;
-            maximum: 180;
-            step: 1;
-            default-value: 0;
-            fmt: ParamFormat.degrees;
-            keyframe: true;
-            keyframed: root.selected.rotation-x-keyframed;
-            changed(v) => { root.set(ClipField.rotation-x, v); root.commit(); }
-            keyframe-toggled(on) => { root.keyframe-toggle(ClipField.rotation-x, on); }
-        }
-        Param {
-            label: I18n.t("Rotation Y");
-            value <=> root.rotation-y;
-            minimum: -180;
-            maximum: 180;
-            step: 1;
-            default-value: 0;
-            fmt: ParamFormat.degrees;
-            keyframe: true;
-            keyframed: root.selected.rotation-y-keyframed;
-            changed(v) => { root.set(ClipField.rotation-y, v); root.commit(); }
-            keyframe-toggled(on) => { root.keyframe-toggle(ClipField.rotation-y, on); }
-        }
-        Param {
-            label: I18n.t("Position Z");
-            value <=> root.position-z;
-            minimum: -2;
-            maximum: 2;
-            step: 0.01;
-            default-value: 0;
-            fmt: ParamFormat.centred;
-            keyframe: true;
-            keyframed: root.selected.position-z-keyframed;
-            changed(v) => { root.set(ClipField.position-z, v); root.commit(); }
-            keyframe-toggled(on) => { root.keyframe-toggle(ClipField.position-z, on); }
-        }
-        Param {
-            slider: false;
-            label: I18n.t("Width");
-            value <=> root.stretch-x;
-            minimum: 0.1;
-            maximum: 4;
-            step: 0.01;
-            default-value: 1;
-            fmt: ParamFormat.fraction;
-            keyframe: true;
-            keyframed: root.selected.stretch-x-keyframed;
-            changed(v) => { root.set(ClipField.stretch-x, v); root.commit(); }
-            keyframe-toggled(on) => { root.keyframe-toggle(ClipField.stretch-x, on); }
-        }
-        Param {
-            slider: false;
-            label: I18n.t("Height");
-            value <=> root.stretch-y;
-            minimum: 0.1;
-            maximum: 4;
-            step: 0.01;
-            default-value: 1;
-            fmt: ParamFormat.fraction;
-            keyframe: true;
-            keyframed: root.selected.stretch-y-keyframed;
-            changed(v) => { root.set(ClipField.stretch-y, v); root.commit(); }
-            keyframe-toggled(on) => { root.keyframe-toggle(ClipField.stretch-y, on); }
-        }
-        Param {
-            label: I18n.t("Layer order");
-            value <=> root.layer-order;
-            minimum: -128;
-            maximum: 128;
-            step: 1;
-            default-value: 0;
-            fmt: ParamFormat.plain;
-            keyframe: true;
-            keyframed: root.selected.layer-order-keyframed;
-            changed(v) => { root.set(ClipField.layer-order, v); root.commit(); }
-            keyframe-toggled(on) => { root.keyframe-toggle(ClipField.layer-order, on); }
-        }
+            Param {
+                label: I18n.t("Position X");
+                keyable: true;
+                field: ClipField.offset-x;
+                value <=> root.offset-x;
+                minimum: -1;
+                maximum: 1;
+                step: 0.005;
+                default-value: 0;
+                fmt: ParamFormat.centred;
+                unit: "%";
+                unit-scale: 100;
+                changed(v) => { root.set(ClipField.offset-x, v); root.commit(); }
+            }
 
+            Param {
+                label: I18n.t("Position Y");
+                keyable: true;
+                field: ClipField.offset-y;
+                value <=> root.offset-y;
+                minimum: -1;
+                maximum: 1;
+                step: 0.005;
+                default-value: 0;
+                fmt: ParamFormat.centred;
+                unit: "%";
+                unit-scale: 100;
+                changed(v) => { root.set(ClipField.offset-y, v); root.commit(); }
+            }
+
+            Param {
+                label: I18n.t("Rotation");
+                keyable: true;
+                field: ClipField.rotation;
+                value <=> root.rotation;
+                minimum: -180;
+                maximum: 180;
+                step: 1;
+                default-value: 0;
+                fmt: ParamFormat.degrees;
+                unit: "°";
+                changed(v) => { root.set(ClipField.rotation, v); root.commit(); }
+            }
+
+            Param {
+                label: I18n.t("Width");
+                value <=> root.stretch-x;
+                minimum: 0.1;
+                maximum: 4;
+                step: 0.01;
+                default-value: 1;
+                fmt: ParamFormat.fraction;
+                unit: "%";
+                unit-scale: 100;
+                changed(v) => { root.set(ClipField.stretch-x, v); root.commit(); }
+            }
+
+            Param {
+                label: I18n.t("Height");
+                value <=> root.stretch-y;
+                minimum: 0.1;
+                maximum: 4;
+                step: 0.01;
+                default-value: 1;
+                fmt: ParamFormat.fraction;
+                unit: "%";
+                unit-scale: 100;
+                changed(v) => { root.set(ClipField.stretch-y, v); root.commit(); }
+            }
         }
     }
 
@@ -872,176 +1033,247 @@ export component VideoPanel inherits VerticalLayout {
             summary: "\{Math.round(root.alpha * 100)}% · "
                 + root.blends[Math.max(0, Math.min(root.selected.blend, root.blends.length - 1))];
         }
+
         if blend.open: SectionBody {
-        Param {
-            label: I18n.t("Opacity");
-            keyable: true;
-            field: ClipField.opacity;
-            value <=> root.alpha;
-            minimum: 0;
-            maximum: 1;
-            step: 0.01;
-            default-value: 1;
-            fmt: ParamFormat.fraction;
-            keyframe: true;
-            keyframed: root.selected.opacity-keyframed;
-            changed(v) => { root.set(ClipField.opacity, v); root.commit(); }
-            keyframe-toggled(on) => { root.keyframe-toggle(ClipField.opacity, on); }
-        }
-        Row {
-            label: I18n.t("Mode");
-            Select {
-                options: root.blends;
-                current: root.selected.blend;
-                changed(index) => { root.set(ClipField.blend, index); root.commit(); }
+            Param {
+                label: I18n.t("Opacity");
+                keyable: true;
+                field: ClipField.opacity;
+                value <=> root.alpha;
+                minimum: 0;
+                maximum: 1;
+                step: 0.01;
+                default-value: 1;
+                fmt: ParamFormat.fraction;
+                unit: "%";
+                unit-scale: 100;
+                changed(v) => { root.set(ClipField.opacity, v); root.commit(); }
             }
-        }
-        SwitchRow {
-            label: I18n.t("Flip horizontal");
-            checked: root.selected.flip-h;
-            toggled(on) => { root.set(ClipField.flip-h, on ? 1 : 0); root.commit(); }
-        }
-        SwitchRow {
-            label: I18n.t("Flip vertical");
-            checked: root.selected.flip-v;
-            toggled(on) => { root.set(ClipField.flip-v, on ? 1 : 0); root.commit(); }
-        }
+
+            Row {
+                label: I18n.t("Mode");
+                Select {
+                    options: root.blends;
+                    current: root.selected.blend;
+                    changed(index) => { root.set(ClipField.blend, index); root.commit(); }
+                }
+            }
+
+            SwitchRow {
+                label: I18n.t("Flip horizontal");
+                checked: root.selected.flip-h;
+                toggled(on) => { root.set(ClipField.flip-h, on ? 1 : 0); root.commit(); }
+            }
+
+            SwitchRow {
+                label: I18n.t("Flip vertical");
+                checked: root.selected.flip-v;
+                toggled(on) => { root.set(ClipField.flip-v, on ? 1 : 0); root.commit(); }
+            }
         }
     }
 
-    // The background taken away. Automatic and custom cut by the mask the
-    // cutout model finds for the person in the picture - custom with
-    // strokes painted on the monitor over it - and the two screens key a
-    // colour out. A screen is the chroma package on the chain, which is why
-    // its knobs read from the chain's own rows.
+    // The background taken away, one of three ways, each a block with a
+    // tick: automatic and custom cut by the mask the cutout model finds
+    // for the person in the picture - custom with strokes painted on the
+    // monitor over it - and chroma key drops a colour. A key is the chroma
+    // package on the chain, which is why its knobs read from the chain's
+    // own rows. One at a time: ticking a block unticks the others.
     Section {
         cutout := SectionHeader {
             title: I18n.t("Remove background");
             collapsible: true;
             summary: root.removal == 0 ? I18n.t("off")
-                : root.removal == 1 ? I18n.t("Automatic")
-                : root.removal == 2 ? I18n.t("Custom")
-                : root.removal == 3 ? I18n.t("Green screen") : I18n.t("Blue screen");
+                : root.removal == 1 ? I18n.t("Auto removal")
+                : root.removal == 2 ? I18n.t("Custom removal") : I18n.t("Chroma key");
             HelpButton {
-                open: root.cutout-help;
-                toggled => { root.cutout-help = self.open; }
+                text: I18n.t("Auto removal keeps what the model finds and drops the rest: a person, or the one thing the picture is of. Custom removal starts from the same mask and takes corrections painted on the monitor: the smart brush keeps the whole thing it touches and the smart eraser removes it, the plain ones do exactly what you paint; Apply ends the painting. Chroma key drops one colour instead; similarity is how far from the colour still counts, softness feathers the edge.");
             }
         }
+
         if cutout.open: SectionBody {
 
-        if root.cutout-help: Note {
-            text: I18n.t("Automatic keeps the person the cutout model finds and drops the rest. Custom starts from the same mask and takes corrections painted on the monitor: the smart brush and smart eraser follow the model's confidence, the plain ones do exactly what you paint. Green and blue screen key one colour out instead; similarity is how far from the colour still counts, softness feathers the edge.");
-        }
+            RemovalBlock {
+                title: I18n.t("Auto removal");
+                on: root.removal == 1;
+                toggled(on) => { root.remove-by(on ? 1 : 0); }
+            }
 
-        Row {
-            label: I18n.t("Mode");
-            Select {
-                options: [I18n.t("Off"), I18n.t("Automatic"), I18n.t("Custom"), I18n.t("Green screen"), I18n.t("Blue screen")];
-                current: root.removal;
-                changed(index) => {
-                    // One removal at a time: the keyer comes off the chain
-                    // before anything else goes on, and the cutout is set
-                    // or cleared to match.
-                    if (root.keyer-index >= 0) {
-                        root.chain-remove(root.keyer-index);
-                    }
-                    root.cutout-mode(index == 1 ? 1 : index == 2 ? 2 : 0);
-                    if (index == 3) {
-                        root.chain-add("concat.green-screen");
-                    } else if (index == 4) {
-                        root.chain-add("concat.blue-screen");
-                    }
-                    root.commit();
+            if root.removal == 1: Row {
+                label: I18n.t("Subject");
+                Select {
+                    options: [I18n.t("Auto"), I18n.t("Person"), I18n.t("Object")];
+                    current: root.selected.cutout-subject;
+                    changed(index) => { root.cutout-subject(index); }
                 }
             }
-        }
-
-        if root.masked: Param {
-            label: I18n.t("Feather");
-            value <=> root.feather;
-            minimum: 0;
-            maximum: 0.1;
-            step: 0.002;
-            default-value: 0.01;
-            fmt: ParamFormat.percent;
-            changed(v) => { root.set(ClipField.cutout-feather, v); root.commit(); }
-        }
-
-        // The analysis, while it runs: the masks are found in the
-        // background and the picture is shown as shot until they are.
-        if root.masked && root.selected.cutout-progress >= 0: Row {
-            label: I18n.t("Analysis");
-            Text {
-                text: I18n.t1("Finding the subject… {0}%", "\{Math.round(root.selected.cutout-progress * 100)}");
-                color: Theme.fg-muted;
-                font-size: Theme.fs;
-                vertical-alignment: center;
+            if root.removal == 1: Param {
+                label: I18n.t("Feather");
+                value <=> root.feather;
+                minimum: 0;
+                maximum: 0.1;
+                step: 0.002;
+                default-value: 0.01;
+                fmt: ParamFormat.fraction;
+                unit: "%";
+                unit-scale: 100;
+                changed(v) => { root.set(ClipField.cutout-feather, v); root.commit(); }
             }
-        }
-
-        if root.removal == 2: Row {
-            label: I18n.t("Tool");
-            Select {
-                options: [I18n.t("Smart brush"), I18n.t("Brush"), I18n.t("Smart eraser"), I18n.t("Eraser")];
-                current: root.brush-tool;
-                changed(index) => { root.cutout-tool(index); }
+            if root.removal == 1 && root.selected.cutout-progress >= 0: AnalysisRow {
+                progress: root.selected.cutout-progress;
+                fetching: root.selected.cutout-fetching;
             }
-        }
-        if root.removal == 2: Param {
-            label: I18n.t("Brush size");
-            value: root.brush-size;
-            minimum: 0.005;
-            maximum: 0.5;
-            step: 0.005;
-            default-value: 0.06;
-            fmt: ParamFormat.percent;
-            changed(v) => { root.cutout-size(v); }
-        }
-        if root.removal == 2: SwitchRow {
-            label: I18n.t("Paint on the monitor");
-            checked: root.painting;
-            toggled(on) => { root.cutout-painting(on); }
-        }
-        if root.removal == 2: Row {
-            label: root.selected.cutout-strokes == 1 ? "1 stroke"
-                : "\{root.selected.cutout-strokes} strokes";
-            Button {
-                label: I18n.t("Clear strokes");
-                ghost: true;
-                enabled: root.selected.cutout-strokes > 0;
-                clicked => { root.cutout-clear(); }
+            if root.removal == 1 && root.selected.cutout-progress < 0 && root.selected.cutout-empty: Note {
+                text: I18n.t("Nothing found to keep here, so the picture shows as shot. Try another subject, or custom removal.");
             }
-        }
 
-        // The keyer's own knobs, re-seeded from the chain the way the
+            Hairline { }
+
+            RemovalBlock {
+                title: I18n.t("Custom removal");
+                on: root.removal == 2;
+                toggled(on) => { root.remove-by(on ? 2 : 0); }
+                ResetButton {
+                    dirty: root.removal == 2 && root.selected.cutout-strokes > 0;
+                    reset => { root.cutout-clear(); }
+                }
+            }
+        // The brushes, CapCut's way round: the two that follow the mask,
+        // then the two that do as they are told. Picking one starts the
+        // painting; Apply ends it.
+        if root.removal == 2: HorizontalLayout {
+                padding-left: Theme.pad;
+                padding-right: Theme.pad;
+                spacing: 6px;
+                ToolButton {
+                    glyph: Glyph.brush;
+                    smart: true;
+                    label: I18n.t("Smart brush");
+                    checked: root.painting && root.brush-tool == 0;
+                    clicked => { root.cutout-tool(0); root.cutout-painting(true); }
+                }
+
+                ToolButton {
+                    glyph: Glyph.eraser;
+                    smart: true;
+                    label: I18n.t("Smart eraser");
+                    checked: root.painting && root.brush-tool == 2;
+                    clicked => { root.cutout-tool(2); root.cutout-painting(true); }
+                }
+
+                Rectangle {
+                    width: 1px;
+                    height: 18px;
+                    background: Theme.line;
+                }
+
+                ToolButton {
+                    glyph: Glyph.brush;
+                    label: I18n.t("Brush");
+                    checked: root.painting && root.brush-tool == 1;
+                    clicked => { root.cutout-tool(1); root.cutout-painting(true); }
+                }
+
+                ToolButton {
+                    glyph: Glyph.eraser;
+                    label: I18n.t("Eraser");
+                    checked: root.painting && root.brush-tool == 3;
+                    clicked => { root.cutout-tool(3); root.cutout-painting(true); }
+                }
+
+                Rectangle {
+                    horizontal-stretch: 1;
+                }
+            }
+            if root.removal == 2: Param {
+                label: I18n.t("Size");
+                value: root.brush-size;
+                minimum: 0.005;
+                maximum: 0.5;
+                step: 0.005;
+                default-value: 0.06;
+                fmt: ParamFormat.fraction;
+                unit: "%";
+                unit-scale: 100;
+                changed(v) => { root.cutout-size(v); }
+            }
+            if root.removal == 2: Param {
+                label: I18n.t("Feather");
+                value <=> root.feather;
+                minimum: 0;
+                maximum: 0.1;
+                step: 0.002;
+                default-value: 0.01;
+                fmt: ParamFormat.fraction;
+                unit: "%";
+                unit-scale: 100;
+                changed(v) => { root.set(ClipField.cutout-feather, v); root.commit(); }
+            }
+            if root.removal == 2 && root.selected.cutout-progress >= 0: AnalysisRow {
+                progress: root.selected.cutout-progress;
+                fetching: root.selected.cutout-fetching;
+            }
+            if root.removal == 2: Row {
+                label: root.selected.cutout-strokes == 1 ? I18n.t("1 stroke")
+                    : I18n.t1("{0} strokes", "\{root.selected.cutout-strokes}");
+                Rectangle {
+                    horizontal-stretch: 1;
+                }
+
+                Button {
+                    label: I18n.t("Apply");
+                    primary: true;
+                    enabled: root.painting;
+                    clicked => { root.cutout-painting(false); }
+                }
+            }
+
+            Hairline { }
+
+            RemovalBlock {
+                title: I18n.t("Chroma key");
+                on: root.keyer > 0;
+                toggled(on) => { root.remove-by(on ? 3 : 0); }
+            }
+
+            if root.keyer > 0: Row {
+                label: I18n.t("Color");
+                Select {
+                    options: [I18n.t("Green"), I18n.t("Blue")];
+                    current: root.keyer - 1;
+                    changed(index) => { root.remove-by(index + 3); }
+                }
+            }
+
+            // The keyer's own knobs, re-seeded from the chain the way the
         // stack's rows are; see PresetStack.
         for p in root.params: Rectangle {
-            property <AppliedParamData> data: p;
-            visible: root.keyer-index >= 0 && p.entry == root.keyer-index;
-            height: root.keyer-index >= 0 && p.entry == root.keyer-index
-                ? knob.preferred-height : 0;
-            changed data => { knob.value = self.data.value; }
+                property <AppliedParamData> data: p;
+                visible: root.keyer-index >= 0 && p.entry == root.keyer-index;
+                height: root.keyer-index >= 0 && p.entry == root.keyer-index
+                    ? knob.preferred-height : 0;
+                changed data => { knob.value = self.data.value; }
 
-            knob := Param {
-                label: p.label;
-                value: p.value;
-                minimum: p.min;
-                maximum: p.max;
-                step: p.step;
-                default-value: p.default-value;
-                fmt: p.fmt;
-                keyframe: p.animatable;
-                keyframed: p.keyframed;
-                changed(v) => {
-                    root.chain-set-param(root.keyer-index, p.key, v);
-                    root.commit();
-                }
-                keyframe-toggled(on) => {
-                    root.chain-keyframe-param(root.keyer-index, p.key, on);
+                knob := Param {
+                    label: p.label;
+                    value: p.value;
+                    minimum: p.min;
+                    maximum: p.max;
+                    step: p.step;
+                    default-value: p.default-value;
+                    fmt: p.fmt;
+                    unit: p.unit;
+                    keyframe: p.animatable;
+                    keyframed: p.keyframed;
+                    changed(v) => {
+                        root.chain-set-param(root.keyer-index, p.key, v);
+                        root.commit();
+                    }
+                    keyframe-toggled(on) => {
+                        root.chain-keyframe-param(root.keyer-index, p.key, on);
+                    }
                 }
             }
-        }
-
         }
     }
 
@@ -1055,51 +1287,59 @@ export component VideoPanel inherits VerticalLayout {
                 && root.crop-right == 0 && root.crop-bottom == 0) ? I18n.t("none")
                 : "\{Math.round(root.crop-left * 100)} · \{Math.round(root.crop-top * 100)} · \{Math.round(root.crop-right * 100)} · \{Math.round(root.crop-bottom * 100)}";
         }
+
         if crop.open: SectionBody {
-        Param {
-            slider: false;
-            label: I18n.t("Left");
-            value <=> root.crop-left;
-            minimum: 0;
-            maximum: 0.9;
-            step: 0.005;
-            default-value: 0;
-            fmt: ParamFormat.fraction;
-            changed(v) => { root.set(ClipField.crop-left, v); root.commit(); }
-        }
-        Param {
-            slider: false;
-            label: I18n.t("Top");
-            value <=> root.crop-top;
-            minimum: 0;
-            maximum: 0.9;
-            step: 0.005;
-            default-value: 0;
-            fmt: ParamFormat.fraction;
-            changed(v) => { root.set(ClipField.crop-top, v); root.commit(); }
-        }
-        Param {
-            slider: false;
-            label: I18n.t("Right");
-            value <=> root.crop-right;
-            minimum: 0;
-            maximum: 0.9;
-            step: 0.005;
-            default-value: 0;
-            fmt: ParamFormat.fraction;
-            changed(v) => { root.set(ClipField.crop-right, v); root.commit(); }
-        }
-        Param {
-            slider: false;
-            label: I18n.t("Bottom");
-            value <=> root.crop-bottom;
-            minimum: 0;
-            maximum: 0.9;
-            step: 0.005;
-            default-value: 0;
-            fmt: ParamFormat.fraction;
-            changed(v) => { root.set(ClipField.crop-bottom, v); root.commit(); }
-        }
+            Param {
+                label: I18n.t("Left");
+                value <=> root.crop-left;
+                minimum: 0;
+                maximum: 0.9;
+                step: 0.005;
+                default-value: 0;
+                fmt: ParamFormat.fraction;
+                unit: "%";
+                unit-scale: 100;
+                changed(v) => { root.set(ClipField.crop-left, v); root.commit(); }
+            }
+
+            Param {
+                label: I18n.t("Top");
+                value <=> root.crop-top;
+                minimum: 0;
+                maximum: 0.9;
+                step: 0.005;
+                default-value: 0;
+                fmt: ParamFormat.fraction;
+                unit: "%";
+                unit-scale: 100;
+                changed(v) => { root.set(ClipField.crop-top, v); root.commit(); }
+            }
+
+            Param {
+                label: I18n.t("Right");
+                value <=> root.crop-right;
+                minimum: 0;
+                maximum: 0.9;
+                step: 0.005;
+                default-value: 0;
+                fmt: ParamFormat.fraction;
+                unit: "%";
+                unit-scale: 100;
+                changed(v) => { root.set(ClipField.crop-right, v); root.commit(); }
+            }
+
+            Param {
+                label: I18n.t("Bottom");
+                value <=> root.crop-bottom;
+                minimum: 0;
+                maximum: 0.9;
+                step: 0.005;
+                default-value: 0;
+                fmt: ParamFormat.fraction;
+                unit: "%";
+                unit-scale: 100;
+                changed(v) => { root.set(ClipField.crop-bottom, v); root.commit(); }
+            }
         }
     }
 }
@@ -1112,6 +1352,12 @@ export component VideoPanel inherits VerticalLayout {
 /// ear works and how anyone mixing thinks.
 export component AudioPanel inherits VerticalLayout {
     in property <SelectedClipData> selected;
+    /// The media's audio tracks, one label each. A recording that kept the
+    /// desktop and the microphone apart has two, and gets a row to choose
+    /// which one this clip plays; a file with one has nothing to choose and
+    /// shows no row.
+    in property <[string]> audio-tracks;
+    property <bool> choosing: root.audio-tracks.length > 1;
 
     callback set(field: ClipField, value: float);
     callback commit();
@@ -1132,8 +1378,32 @@ export component AudioPanel inherits VerticalLayout {
     init => { root.seed(); }
     changed selected => { root.seed(); }
 
-    Section {
+    if root.choosing: Section {
         first: true;
+        source := SectionHeader {
+            title: I18n.t("Source");
+            collapsible: true;
+            summary: (root.selected.audio-track >= 0
+                && root.selected.audio-track < root.audio-tracks.length)
+                ? root.audio-tracks[root.selected.audio-track] : "";
+        }
+        if source.open: SectionBody {
+        Row {
+            label: I18n.t("Audio track");
+            Select {
+                options: root.audio-tracks;
+                current: root.selected.audio-track;
+                changed(index) => {
+                    root.set(ClipField.audio-track, index);
+                    root.commit();
+                }
+            }
+        }
+        }
+    }
+
+    Section {
+        first: !root.choosing;
         volume := SectionHeader {
             title: I18n.t("Volume");
             collapsible: true;
@@ -1148,27 +1418,28 @@ export component AudioPanel inherits VerticalLayout {
                 }
             }
         }
+
         if volume.open: SectionBody {
-        Param {
-            label: I18n.t("Level");
-            keyable: true;
-            field: ClipField.volume;
-            rail: true;
-            value <=> root.level;
+            Param {
+                label: I18n.t("Level");
+                keyable: true;
+                field: ClipField.volume;
+                rail: true;
+                value <=> root.level;
             // The bottom is silence, not -60. +24 at the top because quiet
             // material genuinely needs it — a distant lavalier is routinely
             // 15-20 dB under, and a limit that cannot fix that is in the
             // wrong place.
             minimum: -60;
-            maximum: 24;
-            step: 0.5;
-            default-value: 0;
-            fmt: ParamFormat.gain;
-            changed(v) => {
-                root.set(ClipField.volume, InspectorFmt.from-decibels(v));
-                root.commit();
+                maximum: 24;
+                step: 0.5;
+                default-value: 0;
+                fmt: ParamFormat.gain;
+                changed(v) => {
+                    root.set(ClipField.volume, InspectorFmt.from-decibels(v));
+                    root.commit();
+                }
             }
-        }
         }
     }
 
@@ -1178,7 +1449,7 @@ export component AudioPanel inherits VerticalLayout {
             collapsible: true;
             summary: (root.fade-in == 0 && root.fade-out == 0) ? I18n.t("none")
                 : InspectorFmt.format(ParamFormat.seconds2, root.fade-in)
-                    + " / " + InspectorFmt.format(ParamFormat.seconds2, root.fade-out);
+                + " / " + InspectorFmt.format(ParamFormat.seconds2, root.fade-out);
 
             ResetButton {
                 dirty: root.fade-in != 0 || root.fade-out != 0;
@@ -1189,27 +1460,31 @@ export component AudioPanel inherits VerticalLayout {
                 }
             }
         }
+
         if fades.open: SectionBody {
-        Param {
-            label: I18n.t("Fade in");
-            rail: true;
-            value <=> root.fade-in;
-            minimum: 0;
-            maximum: root.fade-limit;
-            step: 0.05;
-            fmt: ParamFormat.seconds2;
-            changed(v) => { root.set(ClipField.fade-in, v); root.commit(); }
-        }
-        Param {
-            label: I18n.t("Fade out");
-            rail: true;
-            value <=> root.fade-out;
-            minimum: 0;
-            maximum: root.fade-limit;
-            step: 0.05;
-            fmt: ParamFormat.seconds2;
-            changed(v) => { root.set(ClipField.fade-out, v); root.commit(); }
-        }
+            Param {
+                label: I18n.t("Fade in");
+                rail: true;
+                value <=> root.fade-in;
+                minimum: 0;
+                maximum: root.fade-limit;
+                step: 0.05;
+                fmt: ParamFormat.seconds2;
+                unit: "s";
+                changed(v) => { root.set(ClipField.fade-in, v); root.commit(); }
+            }
+
+            Param {
+                label: I18n.t("Fade out");
+                rail: true;
+                value <=> root.fade-out;
+                minimum: 0;
+                maximum: root.fade-limit;
+                step: 0.05;
+                fmt: ParamFormat.seconds2;
+                unit: "s";
+                changed(v) => { root.set(ClipField.fade-out, v); root.commit(); }
+            }
         }
     }
 }
@@ -1226,11 +1501,18 @@ export component SpeedPanel inherits VerticalLayout {
     init => { root.seed(); }
     changed selected => { root.seed(); }
 
-    property <bool> speed-help;
     /// The Select's rows: the constant rate first, then the shapes in the
     /// order Rust keeps them, then Custom for a shape that is none of them.
-    property <[string]> curves: [I18n.t("Normal"), I18n.t("Montage"), I18n.t("Hero"), I18n.t("Bullet"),
-        I18n.t("Jump Cut"), I18n.t("Flash In"), I18n.t("Flash Out"), I18n.t("Custom")];
+    property <[string]> curves: [
+        I18n.t("Normal"),
+        I18n.t("Montage"),
+        I18n.t("Hero"),
+        I18n.t("Bullet"),
+        I18n.t("Jump Cut"),
+        I18n.t("Flash In"),
+        I18n.t("Flash Out"),
+        I18n.t("Custom")
+    ];
     property <bool> curved: root.selected.speed-curve >= 0;
 
     Section {
@@ -1240,38 +1522,33 @@ export component SpeedPanel inherits VerticalLayout {
             collapsible: true;
             summary: InspectorFmt.format(ParamFormat.rate, root.speed);
             HelpButton {
-                open: root.speed-help;
-                toggled => { root.speed-help = self.open; }
+                text: I18n.t("Rate re-times the clip in place, so the timeline length changes with it. Trim afterwards, not before. A curve varies the rate over the clip; the same footage plays, faster here and slower there.");
             }
         }
 
         if speed.open: SectionBody {
 
-        if root.speed-help: Note {
-            text: I18n.t("Rate re-times the clip in place, so the timeline length changes with it. Trim afterwards, not before. A curve varies the rate over the clip; the same footage plays, faster here and slower there.");
-        }
-
-        Row {
-            label: I18n.t("Curve");
-            Select {
-                options: root.curves;
+            Row {
+                label: I18n.t("Curve");
+                Select {
+                    options: root.curves;
                 // Custom is one past the presets; Rust says so with their
                 // count, which lands on the same row.
                 current: root.curved ? Math.min(root.selected.speed-curve + 1,
                     root.curves.length - 1) : 0;
-                changed(index) => {
+                    changed(index) => {
                     // Custom cannot be chosen, only arrived at.
                     if (index < root.curves.length - 1) {
-                        root.set(ClipField.speed-curve, index - 1);
-                        root.commit();
+                            root.set(ClipField.speed-curve, index - 1);
+                            root.commit();
+                        }
                     }
                 }
             }
-        }
 
-        Param {
-            label: I18n.t("Rate");
-            value <=> root.speed;
+            Param {
+                label: I18n.t("Rate");
+                value <=> root.speed;
             // With a curve the rate is the curve's mean, read-only: the
             // shape decides it.
             enabled: !root.curved;
@@ -1279,31 +1556,31 @@ export component SpeedPanel inherits VerticalLayout {
             // 0.25-4x band sits left of centre and the number field beside it
             // is how the extremes are actually dialled in.
             minimum: 0.0625;
-            maximum: 16;
-            step: 0.05;
-            default-value: 1;
-            fmt: ParamFormat.rate;
-            changed(v) => { root.set(ClipField.speed, v); root.commit(); }
-        }
-
-        SwitchRow {
-            label: I18n.t("Change pitch with speed");
-            checked: !root.selected.preserve-pitch;
-            toggled(on) => {
-                root.set(ClipField.preserve-pitch, on ? 0 : 1);
-                root.commit();
+                maximum: 16;
+                step: 0.05;
+                default-value: 1;
+                fmt: ParamFormat.rate;
+                unit: "x";
+                changed(v) => { root.set(ClipField.speed, v); root.commit(); }
             }
-        }
 
-        SwitchRow {
-            label: I18n.t("Reverse");
-            checked: root.selected.reverse;
-            toggled(on) => {
-                root.set(ClipField.reverse, on ? 1 : 0);
-                root.commit();
+            SwitchRow {
+                label: I18n.t("Change pitch with speed");
+                checked: !root.selected.preserve-pitch;
+                toggled(on) => {
+                    root.set(ClipField.preserve-pitch, on ? 0 : 1);
+                    root.commit();
+                }
             }
-        }
 
+            SwitchRow {
+                label: I18n.t("Reverse");
+                checked: root.selected.reverse;
+                toggled(on) => {
+                    root.set(ClipField.reverse, on ? 1 : 0);
+                    root.commit();
+                }
+            }
         }
     }
 }
@@ -1318,11 +1595,36 @@ export component AnimationPanel inherits VerticalLayout {
     callback set(field: ClipField, value: float);
     callback commit();
 
-    property <[string]> in-shapes: [I18n.t("None"), I18n.t("Fade"), I18n.t("Zoom In"), I18n.t("Zoom Out"),
-        I18n.t("Slide Up"), I18n.t("Slide Down"), I18n.t("Slide Left"), I18n.t("Slide Right"), I18n.t("Spin")];
-    property <[string]> out-shapes: [I18n.t("None"), I18n.t("Fade"), I18n.t("Zoom In"), I18n.t("Zoom Out"),
-        I18n.t("Slide Up"), I18n.t("Slide Down"), I18n.t("Slide Left"), I18n.t("Slide Right"), I18n.t("Spin")];
-    property <[string]> combo-shapes: [I18n.t("None"), I18n.t("Pulse"), I18n.t("Shake"), I18n.t("Spin"), I18n.t("Bounce"), I18n.t("Drift")];
+    property <[string]> in-shapes: [
+        I18n.t("None"),
+        I18n.t("Fade"),
+        I18n.t("Zoom In"),
+        I18n.t("Zoom Out"),
+        I18n.t("Slide Up"),
+        I18n.t("Slide Down"),
+        I18n.t("Slide Left"),
+        I18n.t("Slide Right"),
+        I18n.t("Spin")
+    ];
+    property <[string]> out-shapes: [
+        I18n.t("None"),
+        I18n.t("Fade"),
+        I18n.t("Zoom In"),
+        I18n.t("Zoom Out"),
+        I18n.t("Slide Up"),
+        I18n.t("Slide Down"),
+        I18n.t("Slide Left"),
+        I18n.t("Slide Right"),
+        I18n.t("Spin")
+    ];
+    property <[string]> combo-shapes: [
+        I18n.t("None"),
+        I18n.t("Pulse"),
+        I18n.t("Shake"),
+        I18n.t("Spin"),
+        I18n.t("Bounce"),
+        I18n.t("Drift")
+    ];
 
     property <float> in-seconds;
     property <float> out-seconds;
@@ -1336,77 +1638,83 @@ export component AnimationPanel inherits VerticalLayout {
     /// The longest a head or tail shape may take: half the clip, so the
     /// two cannot cross.
     property <float> limit: Math.max(0.1, Math.min(10, root.selected.duration / 2));
-    property <bool> help;
 
     Section {
         first: true;
         SectionHeader {
             title: I18n.t("In");
             HelpButton {
-                open: root.help;
-                toggled => { root.help = self.open; }
+                text: I18n.t("In and Out play over the clip's first and last seconds; Combo runs its whole length. Each moves the clip from where you placed it, so position it first.");
             }
         }
+
         SectionBody {
-        if root.help: Note {
-            text: I18n.t("In and Out play over the clip's first and last seconds; Combo runs its whole length. Each moves the clip from where you placed it, so position it first.");
-        }
-        Row {
-            label: I18n.t("Shape");
-            Select {
-                options: root.in-shapes;
-                current: root.selected.anim-in + 1;
-                changed(index) => { root.set(ClipField.anim-in, index - 1); root.commit(); }
+            Row {
+                label: I18n.t("Shape");
+                Select {
+                    options: root.in-shapes;
+                    current: root.selected.anim-in + 1;
+                    changed(index) => { root.set(ClipField.anim-in, index - 1); root.commit(); }
+                }
             }
-        }
-        if root.selected.anim-in >= 0: Param {
-            label: I18n.t("Length");
-            value <=> root.in-seconds;
-            minimum: 0.1;
-            maximum: root.limit;
-            step: 0.05;
-            default-value: 0.5;
-            fmt: ParamFormat.seconds2;
-            changed(v) => { root.set(ClipField.anim-in-duration, v); root.commit(); }
-        }
+
+            if root.selected.anim-in >= 0: Param {
+                label: I18n.t("Length");
+                value <=> root.in-seconds;
+                minimum: 0.1;
+                maximum: root.limit;
+                step: 0.05;
+                default-value: 0.5;
+                fmt: ParamFormat.seconds2;
+                unit: "s";
+                changed(v) => { root.set(ClipField.anim-in-duration, v); root.commit(); }
+            }
         }
     }
 
     Section {
-        SectionHeader { title: I18n.t("Out"); }
+        SectionHeader {
+            title: I18n.t("Out");
+        }
+
         SectionBody {
-        Row {
-            label: I18n.t("Shape");
-            Select {
-                options: root.out-shapes;
-                current: root.selected.anim-out + 1;
-                changed(index) => { root.set(ClipField.anim-out, index - 1); root.commit(); }
+            Row {
+                label: I18n.t("Shape");
+                Select {
+                    options: root.out-shapes;
+                    current: root.selected.anim-out + 1;
+                    changed(index) => { root.set(ClipField.anim-out, index - 1); root.commit(); }
+                }
             }
-        }
-        if root.selected.anim-out >= 0: Param {
-            label: I18n.t("Length");
-            value <=> root.out-seconds;
-            minimum: 0.1;
-            maximum: root.limit;
-            step: 0.05;
-            default-value: 0.5;
-            fmt: ParamFormat.seconds2;
-            changed(v) => { root.set(ClipField.anim-out-duration, v); root.commit(); }
-        }
+
+            if root.selected.anim-out >= 0: Param {
+                label: I18n.t("Length");
+                value <=> root.out-seconds;
+                minimum: 0.1;
+                maximum: root.limit;
+                step: 0.05;
+                default-value: 0.5;
+                fmt: ParamFormat.seconds2;
+                unit: "s";
+                changed(v) => { root.set(ClipField.anim-out-duration, v); root.commit(); }
+            }
         }
     }
 
     Section {
-        SectionHeader { title: I18n.t("Combo"); }
-        SectionBody {
-        Row {
-            label: I18n.t("Shape");
-            Select {
-                options: root.combo-shapes;
-                current: root.selected.anim-combo + 1;
-                changed(index) => { root.set(ClipField.anim-combo, index - 1); root.commit(); }
-            }
+        SectionHeader {
+            title: I18n.t("Combo");
         }
+
+        SectionBody {
+            Row {
+                label: I18n.t("Shape");
+                Select {
+                    options: root.combo-shapes;
+                    current: root.selected.anim-combo + 1;
+                    changed(index) => { root.set(ClipField.anim-combo, index - 1); root.commit(); }
+                }
+            }
         }
     }
 }
@@ -1422,20 +1730,13 @@ export component AdjustPanel inherits VerticalLayout {
     callback set(key: string, value: float);
     callback commit();
 
-    property <bool> help;
-
     Section {
         first: true;
         SectionHeader {
             title: I18n.t("Adjust");
             HelpButton {
-                open: root.help;
-                toggled => { root.help = self.open; }
+                text: I18n.t("Exposure is in stops; the rest is a signed percent of the picture as shot, and zero everywhere is the picture as shot. Double-click a label to put it back; the diamond keys the knob at the playhead.");
             }
-        }
-
-        if root.help: Note {
-            text: I18n.t("Exposure is in stops; the rest is a signed percent of the picture as shot, and zero everywhere is the picture as shot. Double-click a knob to put it back.");
         }
 
         // See PresetStack for why each row re-seeds its knob. A subhead
@@ -1454,7 +1755,7 @@ export component AdjustPanel inherits VerticalLayout {
                     changed data => { knob.value = self.data.value; }
 
                     knob := Param {
-                        slider: false;
+                        unit: p.unit;
                         label: p.label;
                         value: p.value;
                         minimum: p.min;
@@ -1462,6 +1763,15 @@ export component AdjustPanel inherits VerticalLayout {
                         step: p.step;
                         default-value: p.default-value;
                         fmt: p.fmt;
+                        keyable: p.keyable;
+                        key-name: p.key;
+                        key-state: {
+                            field: ClipField.scale,
+                            keyed: p.keyed,
+                            here: p.here,
+                            prev: p.prev,
+                            next: p.next,
+                        };
                         changed(v) => { root.set(p.key, v); root.commit(); }
                     }
                 }
@@ -1505,8 +1815,6 @@ export component FilterPanel inherits VerticalLayout {
     init => { root.seed(); }
     changed selected => { root.seed(); }
 
-    property <bool> layer-help;
-
     Section {
         first: true;
         layer := SectionHeader {
@@ -1514,28 +1822,24 @@ export component FilterPanel inherits VerticalLayout {
             collapsible: true;
             summary: InspectorFmt.format(ParamFormat.fraction, root.strength);
             HelpButton {
-                open: root.layer-help;
-                toggled => { root.layer-help = self.open; }
+                text: I18n.t("A layer treats everything under it for as long as it runs. Trim it on the timeline to change what it covers.");
             }
         }
 
         if layer.open: SectionBody {
 
-        if root.layer-help: Note {
-            text: I18n.t("A layer treats everything under it for as long as it runs. Trim it on the timeline to change what it covers.");
-        }
-
-        Param {
-            label: I18n.t("Strength");
-            value <=> root.strength;
-            minimum: 0;
-            maximum: 1;
-            step: 0.01;
-            default-value: 1;
-            fmt: ParamFormat.fraction;
-            changed(v) => { root.set(ClipField.opacity, v); root.commit(); }
-        }
-
+            Param {
+                label: I18n.t("Strength");
+                value <=> root.strength;
+                minimum: 0;
+                maximum: 1;
+                step: 0.01;
+                default-value: 1;
+                fmt: ParamFormat.fraction;
+                unit: "%";
+                unit-scale: 100;
+                changed(v) => { root.set(ClipField.opacity, v); root.commit(); }
+            }
         }
     }
 
@@ -1545,27 +1849,31 @@ export component FilterPanel inherits VerticalLayout {
             collapsible: true;
             summary: (root.fade-in == 0 && root.fade-out == 0) ? I18n.t("none")
                 : InspectorFmt.format(ParamFormat.seconds2, root.fade-in)
-                    + " / " + InspectorFmt.format(ParamFormat.seconds2, root.fade-out);
+                + " / " + InspectorFmt.format(ParamFormat.seconds2, root.fade-out);
         }
+
         if ramps.open: SectionBody {
-        Param {
-            label: I18n.t("Ramp in");
-            value <=> root.fade-in;
-            minimum: 0;
-            maximum: root.ramp-limit;
-            step: 0.05;
-            fmt: ParamFormat.seconds2;
-            changed(v) => { root.set(ClipField.fade-in, v); root.commit(); }
-        }
-        Param {
-            label: I18n.t("Ramp out");
-            value <=> root.fade-out;
-            minimum: 0;
-            maximum: root.ramp-limit;
-            step: 0.05;
-            fmt: ParamFormat.seconds2;
-            changed(v) => { root.set(ClipField.fade-out, v); root.commit(); }
-        }
+            Param {
+                label: I18n.t("Ramp in");
+                value <=> root.fade-in;
+                minimum: 0;
+                maximum: root.ramp-limit;
+                step: 0.05;
+                fmt: ParamFormat.seconds2;
+                unit: "s";
+                changed(v) => { root.set(ClipField.fade-in, v); root.commit(); }
+            }
+
+            Param {
+                label: I18n.t("Ramp out");
+                value <=> root.fade-out;
+                minimum: 0;
+                maximum: root.ramp-limit;
+                step: 0.05;
+                fmt: ParamFormat.seconds2;
+                unit: "s";
+                changed(v) => { root.set(ClipField.fade-out, v); root.commit(); }
+            }
         }
     }
 }

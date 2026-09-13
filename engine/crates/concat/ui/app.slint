@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Jareer and Concat contributors
 
-// Inter is bundled rather than assumed: a desktop binary should look the same
-// on a machine that has never installed it. One file per weight the design
-// uses — 400 body, 500 titles, 600 the page heading.
+// Helvetica Neue is bundled rather than assumed: a desktop binary should look
+// the same on a machine that has never installed it. One file per weight the
+// design uses — Roman for body, Medium for titles, Bold for the page heading.
 import { I18n } from "i18n.slint";
-import "fonts/Inter-Regular.ttf";
-import "fonts/Inter-Medium.ttf";
-import "fonts/Inter-SemiBold.ttf";
+import "fonts/HelveticaNeue-Roman.otf";
+import "fonts/HelveticaNeue-Medium.otf";
+import "fonts/HelveticaNeue-Bold.otf";
 
 // Synonym, the interface's text face. It is published as one variable font,
 // which Slint cannot load, so these are static instances cut from it at the
@@ -18,7 +18,7 @@ import "fonts/Synonym-Medium.ttf";
 import "fonts/Synonym-SemiBold.ttf";
 
 import { Theme } from "theme/theme.slint";
-import { Bezier, Curves, Fmt, Payload } from "util.slint";
+import { Bezier, Curves, Fmt, Focus, Payload } from "util.slint";
 import { EffectData } from "demo/effects-panel.slint";
 import { MediaFilter, MediaItemData, MediaKind, TextPresetData } from "workspace/media-pane.slint";
 import { ContextMenu, MenuItemData, MenuRow } from "primitives/context-menu.slint";
@@ -48,7 +48,7 @@ import {
 
 // Re-exported so main.rs can reach the globals and the struct.
 export {
-    Curves, Fmt, Payload, Theme, Bezier, Editor, I18n,
+    Curves, Fmt, Focus, Payload, Theme, Bezier, Editor, I18n,
     AppliedEntryData, AppliedParamData, CatalogueEntryData, Library, LibraryViewData, ParamFormat,
     DockDivider, DockSide, PaneKind, SeatBox,
     EffectData, MediaFilter, MediaItemData, MediaKind, TextPresetData,
@@ -78,6 +78,27 @@ export component App inherits Window {
     // window opens with nothing focused, and a key would have nowhere to be
     // delivered from until the first press landed somewhere.
     forward-focus: keys;
+
+    // The same hole opens again later, and `forward-focus` does not close
+    // it: it is read once, when the window first focuses. Slint delivers a
+    // key to the focused item and its ancestors, and when that item has
+    // been torn down - the launch screen's name field once a project opens,
+    // a sheet's field once the sheet closes - there is no item and the key
+    // is dropped. Nothing walks up to `keys`, so every shortcut is dead
+    // until a press lands on a pane's floor. Each of those teardowns hands
+    // the focus back here on the way out.
+    changed on-start => {
+        if (!root.on-start) {
+            keys.focus();
+        }
+    }
+    property <bool> sheet-open: root.export.open || root.settings.open
+        || root.project-sheet.open || root.captions.open || root.speech.open;
+    changed sheet-open => {
+        if (!root.sheet-open) {
+            keys.focus();
+        }
+    }
 
     // The editor's own state and actions live on the Editor global rather
     // than here — see editor.slint. What is left on the window is the window:
@@ -165,7 +186,8 @@ export component App inherits Window {
     callback settings-page-changed(index: int);
     callback settings-language-changed(index: int);
     callback settings-theme-changed(dark: bool);
-    callback settings-transcribe-language-changed(index: int);
+    callback settings-audio-tracks-changed(index: int);
+    callback settings-playhead-stops-changed(on: bool);
     callback model-activated(id: string);
     callback model-download(id: string);
     callback model-cancel(id: string);
@@ -188,7 +210,7 @@ export component App inherits Window {
     in property <CaptionsSheetData> captions;
     in property <[string]> caption-models;
     callback captions-closed();
-    callback captions-language-changed(index: int);
+    callback captions-text-edited(text: string);
     callback captions-model-changed(index: int);
     callback captions-placement-changed(index: int);
     callback captions-size-changed(index: int);
@@ -442,9 +464,8 @@ export component App inherits Window {
         page-changed(index) => { root.settings-page-changed(index); }
         language-changed(index) => { root.settings-language-changed(index); }
         theme-changed(dark) => { root.settings-theme-changed(dark); }
-        transcribe-language-changed(index) => {
-            root.settings-transcribe-language-changed(index);
-        }
+        audio-tracks-changed(index) => { root.settings-audio-tracks-changed(index); }
+        playhead-stops-changed(on) => { root.settings-playhead-stops-changed(on); }
         model-activated(id) => { root.model-activated(id); }
         model-download(id) => { root.model-download(id); }
         model-cancel(id) => { root.model-cancel(id); }
@@ -474,7 +495,7 @@ export component App inherits Window {
         models: root.caption-models;
 
         closed => { root.captions-closed(); }
-        language-changed(index) => { root.captions-language-changed(index); }
+        text-edited(text) => { root.captions-text-edited(text); }
         model-changed(index) => { root.captions-model-changed(index); }
         placement-changed(index) => { root.captions-placement-changed(index); }
         size-changed(index) => { root.captions-size-changed(index); }

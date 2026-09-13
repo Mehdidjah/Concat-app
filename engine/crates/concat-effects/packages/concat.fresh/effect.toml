@@ -1,0 +1,32 @@
+[effect]
+id = "concat.fresh"
+name = "Fresh"
+kind = "filter"
+category = "Everyday"
+order = 10
+intensity = "pop"
+description = "Daylight footage made to pop: midtones lifted, colour brought up where it is muted, a breath of mint in the brightest whites, skin left alone."
+
+[[param]]
+key = "pop"
+label = "Pop"
+min = 0
+max = 100
+default = 50
+step = 1
+unit = "%"
+
+[[param]]
+key = "brightness"
+label = "Brightness"
+min = 0
+max = 100
+default = 40
+step = 1
+unit = "%"
+
+[ffmpeg]
+chain = "curves=all='0/0 0.5/{fixed(0.5 + brightness / 100 * 0.08, 3)} 1/1',vibrance=intensity={fixed(pop / 100 * 0.9, 3)},colorbalance=gh={fixed(pop / 100 * 0.05, 3)}:bh={fixed(pop / 100 * 0.03, 3)}"
+
+[wgsl]
+entry = "effect.wgsl"

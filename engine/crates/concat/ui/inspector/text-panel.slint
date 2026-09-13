@@ -26,7 +26,7 @@ import {
 export component TextPanel inherits VerticalLayout {
     in property <SelectedClipData> selected;
     /// The faces this build bundles.
-    in property <[string]> families: ["Inter", "Synonym"];
+    in property <[string]> families: ["Helvetica Neue", "Synonym"];
 
     callback set(field: ClipField, value: float);
     callback set-text(field: ClipTextField, value: string);
@@ -64,8 +64,6 @@ export component TextPanel inherits VerticalLayout {
     init => { root.seed(); }
     changed selected => { root.seed(); }
 
-    property <bool> shadow-help;
-    property <bool> plate-help;
 
     // ── content ──────────────────────────────────────────────────────────
     Section {
@@ -157,6 +155,8 @@ export component TextPanel inherits VerticalLayout {
             step: 0.005;
             default-value: 0.09;
             fmt: ParamFormat.height;
+            unit: "%";
+            unit-scale: 100;
             changed(v) => { root.set(ClipField.font-size, v); root.commit(); }
         }
 
@@ -193,6 +193,8 @@ export component TextPanel inherits VerticalLayout {
             step: 0.01;
             default-value: 1;
             fmt: ParamFormat.fraction;
+            unit: "%";
+            unit-scale: 100;
             changed(v) => { root.set(ClipField.text-opacity, v); root.commit(); }
         }
 
@@ -200,26 +202,16 @@ export component TextPanel inherits VerticalLayout {
             label: I18n.t("Drop shadow");
             checked: root.selected.shadow;
 
-            HelpButton {
-                open: root.shadow-help;
-                toggled => { root.shadow-help = self.open; }
-            }
+            HelpButton { text: I18n.t("A soft shadow under the words, for titles that have to sit over footage you do not control."); }
 
             toggled(on) => { root.set(ClipField.shadow, on ? 1 : 0); root.commit(); }
-        }
-
-        if root.shadow-help: Note {
-            text: I18n.t("A soft shadow under the words, for titles that have to sit over footage you do not control.");
         }
 
         SwitchRow {
             label: I18n.t("Plate");
             checked: root.selected.plated;
 
-            HelpButton {
-                open: root.plate-help;
-                toggled => { root.plate-help = self.open; }
-            }
+            HelpButton { text: I18n.t("A solid band behind the words. Where a shadow softens the background, a plate replaces it — use it when the footage underneath is busy enough that neither weight nor outline will hold."); }
 
             toggled(on) => {
                 // A plate is a colour, not a flag: turning it off is clearing
@@ -228,10 +220,6 @@ export component TextPanel inherits VerticalLayout {
                     on ? Theme.plate-on : Colors.transparent);
                 root.commit();
             }
-        }
-
-        if root.plate-help: Note {
-            text: I18n.t("A solid band behind the words. Where a shadow softens the background, a plate replaces it — use it when the footage underneath is busy enough that neither weight nor outline will hold.");
         }
 
         if root.selected.plated: ColourField {
@@ -264,6 +252,8 @@ export component TextPanel inherits VerticalLayout {
             step: 0.005;
             default-value: 0;
             fmt: ParamFormat.outline;
+            unit: "%";
+            unit-scale: 100;
             changed(v) => { root.set(ClipField.stroke-width, v); root.commit(); }
         }
 
@@ -309,6 +299,7 @@ export component TextPanel inherits VerticalLayout {
             step: 0.05;
             default-value: 1.2;
             fmt: ParamFormat.rate;
+            unit: "x";
             changed(v) => { root.set(ClipField.line-height, v); root.commit(); }
         }
 
@@ -320,6 +311,8 @@ export component TextPanel inherits VerticalLayout {
             step: 0.005;
             default-value: 0;
             fmt: ParamFormat.outline;
+            unit: "%";
+            unit-scale: 100;
             changed(v) => { root.set(ClipField.tracking, v); root.commit(); }
         }
         }
@@ -343,6 +336,8 @@ export component TextPanel inherits VerticalLayout {
             step: 0.005;
             default-value: 0;
             fmt: ParamFormat.centred;
+            unit: "%";
+            unit-scale: 100;
             changed(v) => { root.set(ClipField.offset-x, v); root.commit(); }
         }
 
@@ -354,6 +349,8 @@ export component TextPanel inherits VerticalLayout {
             step: 0.005;
             default-value: 0;
             fmt: ParamFormat.centred;
+            unit: "%";
+            unit-scale: 100;
             changed(v) => { root.set(ClipField.offset-y, v); root.commit(); }
         }
         }

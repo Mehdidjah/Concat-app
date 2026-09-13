@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Jareer and Concat contributors
 
-// Small numeric and string helpers shared by the primitives, plus the two
+// Small numeric and string helpers shared by the primitives, plus the
 // globals whose bodies live in Rust.
 
 export struct Bezier {
@@ -112,7 +112,7 @@ export global Payload {
     /// a row of the bin or an entry of a catalogue, and this side has neither.
     /// It comes back as an SVG image — Slint rasterises those through the
     /// window's own font collection, so the name on the chip is set in the
-    /// same Inter the cards are. Unbound it returns an empty image, which
+    /// same face the cards are. Unbound it returns an empty image, which
     /// draws nothing: the drag still works, it just goes back to bare cursors.
     pure callback preview(text: string) -> image;
 
@@ -135,4 +135,18 @@ export global Geom {
     public pure function polar-y(cy: float, radius: float, degrees: float) -> float {
         return cy + radius * Math.sin(degrees * 1deg);
     }
+}
+
+/// Where focus goes when a field is done with it.
+///
+/// Slint delivers a key to the focused item and its ancestors, and to
+/// nothing at all when there is no focused item: `clear-focus()` leaves the
+/// window in exactly that state, and so does tearing down whatever had the
+/// focus. Every shortcut in the window then stops working until a press
+/// lands somewhere that takes focus - which reads as "the keybindings are
+/// broken". A field that is finished being typed into calls `release`
+/// instead, and the window answers by focusing the scope its shortcuts live
+/// on (App.blur), so the next keystroke has somewhere to go.
+export global Focus {
+    callback release();
 }

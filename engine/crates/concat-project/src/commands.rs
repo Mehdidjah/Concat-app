@@ -12,9 +12,9 @@ use std::collections::HashSet;
 use serde::{Deserialize, Serialize};
 
 use crate::model::{
-    AnimationSlot, AppliedFilter, Clip, ClipAnimation, ClipKeyframes, ClipKind, ClipMask, Crop,
-    CustomFont, Cutout, CutoutMode, KeyEase, KeyProperty, MaskShape, MediaItem, MediaKind, Project,
-    SpeedPoint, Stroke, TextStyle, Timeline, Track, Transition, VideoSettings,
+    AnimationSlot, AppliedFilter, AudioTrack, Clip, ClipAnimation, ClipKeyframes, ClipKind,
+    ClipMask, Crop, CustomFont, Cutout, CutoutMode, KeyEase, KeyProperty, MaskShape, MediaItem,
+    MediaKind, Project, SpeedPoint, Stroke, TextStyle, Timeline, Track, Transition, VideoSettings,
 };
 
 /// Fallback length for media whose container reports no duration.
@@ -26,6 +26,8 @@ const DEFAULT_TEXT_DURATION: f64 = 4.0;
 /// How long a layer covers when first placed. Editorial default, not a fact.
 const DEFAULT_LAYER_DURATION: f64 = 5.0;
 const MIN_CLIP_DURATION: f64 = 1.0 / 60.0;
+/// Default hold for a CapCut-style freeze when the caller omits duration.
+const DEFAULT_FREEZE_DURATION: f64 = 1.0;
 /// The engine's speed range (concat-media `SPEED_RANGE`), verbatim.
 const MIN_SPEED: f64 = 0.0625;
 const MAX_SPEED: f64 = 16.0;
@@ -142,6 +144,15 @@ pub struct ClipPatch {
         skip_serializing_if = "Option::is_none"
     )]
     pub text: Option<Option<TextStyle>>,
+    /// Which of the media's audio streams the clip plays, by stream index:
+    /// absent leaves it alone, null goes back to the file's first, a value
+    /// names one. See `Clip::audio_stream`.
+    #[serde(
+        default,
+        with = "double_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub audio_stream: Option<Option<u32>>,
 }
 
 /// `Option<Option<T>>` over JSON: absent → None, null → Some(None).
@@ -193,6 +204,10 @@ pub struct NewMedia {
     pub audio_codec: Option<String>,
     /// Whether the file carries an audio stream.
     pub has_audio: bool,
+    /// Every audio stream, in file order; see `MediaItem::audio_tracks`.
+    /// Defaulted so a caller from before the list can still add media.
+    #[serde(default)]
+    pub audio_tracks: Vec<AudioTrack>,
 }
 
 /// Every edit, as the window sends it: a tagged `op` plus camelCase
@@ -350,6 +365,47 @@ pub enum Command {
         /// Which property.
         property: KeyProperty,
     },
+    /// Puts a key on one parameter of one link of a clip's picture chain,
+    /// replacing whichever key on it was already within a hair of `at`.
+    /// The value is the parameter's own; the package's range is the
+    /// caller's to keep, the model not knowing it.
+    SetEffectKey {
+        /// The clip.
+        clip_id: String,
+        /// Which link, as an index into `video_effects`. Out of range is a
+        /// no-op.
+        entry: usize,
+        /// The parameter's manifest key.
+        key: String,
+        /// Where in the clip, `0..=1`.
+        at: f64,
+        /// The value there.
+        value: f64,
+        /// How the key is approached from the one before it.
+        #[serde(default)]
+        ease: KeyEase,
+    },
+    /// Takes the key at `at` off one parameter of one link, if there is one.
+    ClearEffectKey {
+        /// The clip.
+        clip_id: String,
+        /// Which link, as an index into `video_effects`.
+        entry: usize,
+        /// The parameter's manifest key.
+        key: String,
+        /// Where in the clip the key to remove sits, `0..=1`.
+        at: f64,
+    },
+    /// Takes every key off one parameter of one link, returning it to the
+    /// value it holds.
+    ClearEffectKeys {
+        /// The clip.
+        clip_id: String,
+        /// Which link, as an index into `video_effects`.
+        entry: usize,
+        /// The parameter's manifest key.
+        key: String,
+    },
     /// Sets or clears a picture's cutout: the mask that takes its
     /// background away. Tidied on the way in; see [`Cutout::tidy`].
     SetClipCutout {
@@ -424,6 +480,25 @@ pub enum Command {
         clip_ids: Vec<String>,
         /// The cut point, in timeline seconds.
         time: f64,
+    },
+    /// CapCut-style freeze at `time`: splits `clip_id`, inserts a still of
+    /// `duration` on the same track, and ripples later clips on that track
+    /// by `duration`. Video needs a probed `still` (host-extracted jpg);
+    /// image clips may omit it and reuse their media. Audio and text are
+    /// no-ops. `created_id` is the freeze clip.
+    FreezeFrame {
+        /// The picture clip under the playhead.
+        clip_id: String,
+        /// Timeline playhead; must fall strictly inside the clip.
+        time: f64,
+        /// Editorial length of the hold. Floored at [`MIN_CLIP_DURATION`];
+        /// when absent or non-positive, uses [`DEFAULT_FREEZE_DURATION`].
+        #[serde(default)]
+        duration: Option<f64>,
+        /// Probed still file. Required for video; ignored for image when
+        /// reusing the existing media.
+        #[serde(default)]
+        still: Option<NewMedia>,
     },
     /// Rejoins split pieces into the earliest piece, which keeps its id.
     /// Errs with a user-facing sentence ([`why_not_merge`]) unless the
@@ -730,6 +805,7 @@ fn default_clip(id: String, track_id: String, media: &MediaItem, start: f64) -> 
         masks_enabled: false,
         filters: Vec::new(),
         video_effects: Vec::new(),
+        audio_stream: None,
         muted: None,
         detached_from: None,
         transition_in: None,
@@ -862,6 +938,7 @@ pub fn apply(
                 video_codec: item.video_codec,
                 audio_codec: item.audio_codec,
                 has_audio: item.has_audio,
+                audio_tracks: item.audio_tracks,
                 placeholder: false,
             });
             Ok(Outcome {
@@ -908,6 +985,7 @@ pub fn apply(
             media.video_codec = item.video_codec;
             media.audio_codec = item.audio_codec;
             media.has_audio = item.has_audio;
+            media.audio_tracks = item.audio_tracks;
             media.placeholder = false;
             let kind = match item.kind {
                 MediaKind::Video => ClipKind::Video,
@@ -927,6 +1005,9 @@ pub fn apply(
                         clip.source_start = 0.0;
                         clip.kind = kind;
                         clip.name = item.name.clone();
+                        // A stream index named against the old file means
+                        // nothing against the new one.
+                        clip.audio_stream = None;
                     }
                 }
             }
@@ -1084,6 +1165,7 @@ pub fn apply(
                 masks_enabled: false,
                 filters: Vec::new(),
                 video_effects: Vec::new(),
+                audio_stream: None,
                 muted: None,
                 detached_from: None,
                 transition_in: None,
@@ -1160,11 +1242,8 @@ pub fn apply(
                 masks: Vec::new(),
                 masks_enabled: false,
                 filters: Vec::new(),
-                video_effects: vec![AppliedFilter {
-                    id: effect_id,
-                    params: Default::default(),
-                    enabled: true,
-                }],
+                video_effects: vec![AppliedFilter::new(effect_id)],
+                audio_stream: None,
                 muted: None,
                 detached_from: None,
                 transition_in: None,
@@ -1288,6 +1367,125 @@ pub fn apply(
             Ok(Outcome {
                 created_id: created,
                 applied,
+            })
+        }
+
+        Command::FreezeFrame {
+            clip_id,
+            time,
+            duration,
+            still,
+        } => {
+            let hold = duration
+                .filter(|value| *value > 0.0)
+                .unwrap_or(DEFAULT_FREEZE_DURATION)
+                .max(MIN_CLIP_DURATION);
+
+            let (kind, media_id, track_id, start, clip_duration, speed, source_start, picture) = {
+                let timeline = project.active();
+                let Some(clip) = timeline.clip(&clip_id) else {
+                    return Ok(Outcome::default());
+                };
+                if clip.kind != ClipKind::Video && clip.kind != ClipKind::Image {
+                    return Ok(Outcome::default());
+                }
+                let offset = time - clip.start;
+                if offset <= MIN_CLIP_DURATION || offset >= clip.duration - MIN_CLIP_DURATION {
+                    return Ok(Outcome::default());
+                }
+                (
+                    clip.kind,
+                    clip.media_id.clone(),
+                    clip.track_id.clone(),
+                    clip.start,
+                    clip.duration,
+                    clip.speed,
+                    clip.source_start,
+                    clip.clone(),
+                )
+            };
+
+            let freeze_media_id = if kind == ClipKind::Image && still.is_none() {
+                media_id
+            } else {
+                let Some(item) = still else {
+                    return Ok(Outcome::default());
+                };
+                if let Some(existing) = project.media.iter().find(|media| media.path == item.path) {
+                    existing.id.clone()
+                } else {
+                    let id = mint.next("m");
+                    project.media.push(MediaItem {
+                        id: id.clone(),
+                        path: item.path,
+                        name: item.name,
+                        duration: item.duration,
+                        kind: MediaKind::Image,
+                        width: item.width,
+                        height: item.height,
+                        frame_rate: item.frame_rate,
+                        frame_rate_fraction: item.frame_rate_fraction,
+                        video_codec: item.video_codec,
+                        audio_codec: None,
+                        has_audio: false,
+                        audio_tracks: Vec::new(),
+                        placeholder: false,
+                    });
+                    id
+                }
+            };
+
+            let timeline = project.active_mut();
+            let Some(index) = timeline.clips.iter().position(|clip| clip.id == clip_id) else {
+                return Ok(Outcome::default());
+            };
+            let offset = time - start;
+            let mut tail = timeline.clips[index].clone();
+            tail.id = mint.next("c");
+            tail.start = time;
+            tail.duration = clip_duration - offset;
+            tail.source_start = source_start + offset * speed;
+            tail.transition_in = None;
+            timeline.clips[index].duration = offset;
+            timeline.clips.insert(index + 1, tail);
+
+            // Ripple every later placement on this track (including the new
+            // tail) so the freeze does not sit on top of the remainder.
+            for clip in &mut timeline.clips {
+                if clip.track_id == track_id && clip.start >= time {
+                    clip.start += hold;
+                }
+            }
+
+            // The still is the source clip turned into a picture: cloning it
+            // first carries every look field - transform, effects, crop,
+            // flips, whatever the model grows - and then the hold's own
+            // facts overwrite the moving ones.
+            let freeze_id = mint.next("c");
+            let mut frozen = picture;
+            frozen.id = freeze_id.clone();
+            frozen.track_id = track_id;
+            frozen.kind = ClipKind::Image;
+            frozen.media_id = freeze_media_id;
+            frozen.start = time;
+            frozen.duration = hold;
+            frozen.source_start = 0.0;
+            frozen.speed = 1.0;
+            frozen.speed_curve = None;
+            frozen.reverse = false;
+            frozen.volume = 1.0;
+            frozen.fade_in = 0.0;
+            frozen.fade_out = 0.0;
+            frozen.filters = Vec::new();
+            frozen.muted = None;
+            frozen.detached_from = None;
+            frozen.transition_in = None;
+            frozen.text = None;
+            timeline.clips.push(frozen);
+
+            Ok(Outcome {
+                created_id: Some(freeze_id),
+                applied: true,
             })
         }
 
@@ -1416,6 +1614,9 @@ pub fn apply(
                     applied |= assign(&mut clip.name, first_line(&style.content));
                 }
                 applied |= assign(&mut clip.text, text);
+            }
+            if let Some(stream) = patch.audio_stream {
+                applied |= assign(&mut clip.audio_stream, stream);
             }
             Ok(Outcome {
                 created_id: None,
@@ -1632,6 +1833,71 @@ pub fn apply(
             })
         }
 
+        Command::SetEffectKey {
+            clip_id,
+            entry,
+            key,
+            at,
+            value,
+            ease,
+        } => {
+            let timeline = project.active_mut();
+            let Some(link) = timeline
+                .clip_mut(&clip_id)
+                .and_then(|clip| clip.video_effects.get_mut(entry))
+            else {
+                return Ok(Outcome::default());
+            };
+            if !at.is_finite() || !value.is_finite() {
+                return Ok(Outcome::default());
+            }
+            let before = link.keys.clone();
+            link.set_key(&key, at, value, ease);
+            Ok(Outcome {
+                created_id: None,
+                applied: link.keys != before,
+            })
+        }
+
+        Command::ClearEffectKey {
+            clip_id,
+            entry,
+            key,
+            at,
+        } => {
+            let timeline = project.active_mut();
+            let Some(link) = timeline
+                .clip_mut(&clip_id)
+                .and_then(|clip| clip.video_effects.get_mut(entry))
+            else {
+                return Ok(Outcome::default());
+            };
+            let applied = link.clear_key(&key, at);
+            Ok(Outcome {
+                created_id: None,
+                applied,
+            })
+        }
+
+        Command::ClearEffectKeys {
+            clip_id,
+            entry,
+            key,
+        } => {
+            let timeline = project.active_mut();
+            let Some(link) = timeline
+                .clip_mut(&clip_id)
+                .and_then(|clip| clip.video_effects.get_mut(entry))
+            else {
+                return Ok(Outcome::default());
+            };
+            let applied = link.clear_keys(&key);
+            Ok(Outcome {
+                created_id: None,
+                applied,
+            })
+        }
+
         Command::SetClipSpeedCurve { clip_id, curve } => {
             let timeline = project.active_mut();
             let Some(clip) = timeline.clip_mut(&clip_id) else {
@@ -1698,72 +1964,97 @@ pub fn apply(
         }
 
         Command::DetachAudio { clip_id } => {
-            let has_audio = {
+            // What comes off, as `(stream, name)`: one sound clip per audio
+            // track when the file lists several - a recording that kept the
+            // desktop and the microphone apart stays apart, each on a lane
+            // of its own - else the one stream the video clip was playing.
+            let sounds: Vec<(Option<u32>, String)> = {
                 let timeline = project.active();
                 let Some(clip) = timeline.clip(&clip_id) else {
                     return Ok(Outcome::default());
                 };
-                clip.kind == ClipKind::Video
+                let media = project.media_by_id(&clip.media_id);
+                let has_audio = clip.kind == ClipKind::Video
                     && clip.muted != Some(true)
-                    && project
-                        .media_by_id(&clip.media_id)
-                        .is_some_and(|media| media.has_audio)
+                    && media.is_some_and(|media| media.has_audio)
                     && !timeline
                         .clips
                         .iter()
-                        .any(|other| other.detached_from.as_deref() == Some(clip_id.as_str()))
-            };
-            if !has_audio {
-                return Ok(Outcome::default());
-            }
-
-            let timeline = project.active_mut();
-            let clip = timeline.clip(&clip_id).expect("checked above").clone();
-            // A lane free for the whole span, or a fresh one.
-            let track_id = {
-                let end = clip.start + clip.duration;
-                let free = timeline.tracks.iter().find(|track| {
-                    !timeline.clips.iter().any(|other| {
-                        other.track_id == track.id
-                            && other.start < end
-                            && clip.start < other.start + other.duration
-                    })
-                });
-                match free {
-                    Some(track) => track.id.clone(),
-                    None => {
-                        let id = mint.next("t");
-                        let name = next_numbered(
-                            "Track",
-                            timeline.tracks.iter().map(|track| track.name.clone()),
-                        );
-                        timeline.tracks.push(Track {
-                            id: id.clone(),
-                            name,
-                            visible: true,
-                            muted: false,
-                        });
-                        id
-                    }
+                        .any(|other| other.detached_from.as_deref() == Some(clip_id.as_str()));
+                if !has_audio {
+                    return Ok(Outcome::default());
+                }
+                match media {
+                    Some(media) if media.audio_tracks.len() > 1 => media
+                        .audio_tracks
+                        .iter()
+                        .enumerate()
+                        .map(|(position, track)| {
+                            let label = if track.title.is_empty() {
+                                format!("Track {}", position + 1)
+                            } else {
+                                track.title.clone()
+                            };
+                            (Some(track.index), format!("{} · {label}", clip.name))
+                        })
+                        .collect(),
+                    _ => vec![(clip.audio_stream, clip.name.clone())],
                 }
             };
 
-            let mut sound = clip.clone();
-            sound.id = mint.next("c");
-            sound.track_id = track_id;
-            sound.kind = ClipKind::Audio;
-            sound.video_effects = Vec::new();
-            sound.transition_in = None;
-            sound.detached_from = Some(clip_id.clone());
-            sound.muted = None;
-            let sound_id = sound.id.clone();
-            timeline.clips.push(sound);
+            let timeline = project.active_mut();
+            let clip = timeline.clip(&clip_id).expect("checked above").clone();
+            let mut first_sound = None;
+            for (stream, name) in sounds {
+                // A lane free for the whole span, or a fresh one. Each sound
+                // placed takes its lane, so the next looks past it.
+                let track_id = {
+                    let end = clip.start + clip.duration;
+                    let free = timeline.tracks.iter().find(|track| {
+                        !timeline.clips.iter().any(|other| {
+                            other.track_id == track.id
+                                && other.start < end
+                                && clip.start < other.start + other.duration
+                        })
+                    });
+                    match free {
+                        Some(track) => track.id.clone(),
+                        None => {
+                            let id = mint.next("t");
+                            let name = next_numbered(
+                                "Track",
+                                timeline.tracks.iter().map(|track| track.name.clone()),
+                            );
+                            timeline.tracks.push(Track {
+                                id: id.clone(),
+                                name,
+                                visible: true,
+                                muted: false,
+                            });
+                            id
+                        }
+                    }
+                };
+
+                let mut sound = clip.clone();
+                sound.id = mint.next("c");
+                sound.track_id = track_id;
+                sound.name = name;
+                sound.kind = ClipKind::Audio;
+                sound.video_effects = Vec::new();
+                sound.transition_in = None;
+                sound.detached_from = Some(clip_id.clone());
+                sound.muted = None;
+                sound.audio_stream = stream;
+                first_sound.get_or_insert_with(|| sound.id.clone());
+                timeline.clips.push(sound);
+            }
 
             let video = timeline.clip_mut(&clip_id).expect("still present");
             video.muted = Some(true);
             video.filters = Vec::new();
             Ok(Outcome {
-                created_id: Some(sound_id),
+                created_id: first_sound,
                 applied: true,
             })
         }

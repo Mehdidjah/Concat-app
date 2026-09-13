@@ -60,6 +60,12 @@ pub fn run() -> Result<(), slint::PlatformError> {
         }
     };
 
+    // The user's own packages - imported looks - sit beside the built-ins
+    // from the first frame. One that will not load is reported and skipped.
+    for error in concat_effects::Catalogue::install(&Studio::looks_dir(&host.dirs)) {
+        eprintln!("concat: look: {error}");
+    }
+
     let app = App::new()?;
     app.set_macos(platform::MACOS);
 
@@ -101,6 +107,10 @@ pub fn run() -> Result<(), slint::PlatformError> {
         editor.set_visual_params(ModelRc::from(models.visual_params.clone()));
         editor.set_audio_params(ModelRc::from(models.audio_params.clone()));
         editor.set_adjust_params(ModelRc::from(models.adjust_params.clone()));
+        app.global::<Keyframes>()
+            .set_rows(ModelRc::from(models.key_rows.clone()));
+        app.global::<Library>()
+            .set_views(ModelRc::from(models.library_views.clone()));
         editor.set_menu_items(ModelRc::from(models.menu.clone()));
         app.set_caption_models(ModelRc::from(models.caption_models.clone()));
         app.set_speech_models(ModelRc::from(models.speech_models.clone()));
@@ -402,6 +412,11 @@ pub fn run() -> Result<(), slint::PlatformError> {
     editor.on_media_filter_changed(on_window!(|state, filter: MediaFilter| {
         state.set_media_filter(filter);
     }));
+    editor.on_media_sort_changed(on_window!(|state, index: i32| {
+        // Slint hands indices over as i32; the sort is an index into a
+        // three-entry table, so clamp negatives to the default order.
+        state.set_media_sort(index.max(0) as usize);
+    }));
     editor.on_media_select(on_window!(|state, id: i32, additive: bool| {
         state.media_select(id, additive);
     }));
@@ -446,12 +461,16 @@ pub fn run() -> Result<(), slint::PlatformError> {
     editor.on_library_add_text(on_window!(|state, preset: SharedString| {
         state.place_at_playhead(&format!("text:{preset}:Title"));
     }));
-    // A filter is a colour look on the picture; audio is the sound's chain.
+    // A filter is a layer over a span of the timeline; an effect goes on
+    // the selected clip's chain, and audio on the sound's.
     editor.on_library_apply_filter(on_window!(
-        |state, id: SharedString, _label: SharedString| {
-            state.apply_catalogue(id.as_str(), true);
+        |state, id: SharedString, label: SharedString| {
+            state.place_filter_layer(id.as_str(), label.as_str());
         }
     ));
+    editor.on_library_audition_filter(on_window!(|state, id: SharedString| {
+        state.audition_catalogue(id.as_str());
+    }));
     editor.on_library_apply_effect(on_window!(|state, id: SharedString| {
         state.apply_catalogue(id.as_str(), true);
     }));
@@ -463,6 +482,9 @@ pub fn run() -> Result<(), slint::PlatformError> {
     }));
     editor.on_library_save_template(on_window!(|state| {
         state.save_template();
+    }));
+    editor.on_library_import_lut(on_window!(|state| {
+        state.import_lut();
     }));
 
     // ── the inspector's effect stacks ──
@@ -682,6 +704,17 @@ pub fn run() -> Result<(), slint::PlatformError> {
         keys.on_clear(on_lanes!(|state, field: ClipField| {
             state.clear_keys_on(field);
         }));
+        // The same three verbs for the Adjust panel's knobs, which are
+        // named rather than enumerated.
+        keys.on_toggle_param(on_lanes!(|state, key: SharedString| {
+            state.toggle_adjust_key(key.as_str());
+        }));
+        keys.on_step_param(on_lanes!(|state, key: SharedString, delta: i32| {
+            state.step_adjust_key(key.as_str(), delta);
+        }));
+        keys.on_clear_param(on_lanes!(|state, key: SharedString| {
+            state.clear_adjust_keys(key.as_str());
+        }));
     }
 
     // The effect libraries' search, shelves and stars. Rust does the
@@ -718,7 +751,9 @@ pub fn run() -> Result<(), slint::PlatformError> {
             state.clip_set_colour(field, value);
         }
     ));
-    editor.on_clip_commit(on_window!(|state| {
+    // Lanes only: the commit is held and lands with a full publish of its
+    // own once the control's moves pause; see `Studio::clip_commit`.
+    editor.on_clip_commit(on_lanes!(|state| {
         state.clip_commit();
     }));
 
@@ -800,6 +835,9 @@ pub fn run() -> Result<(), slint::PlatformError> {
     }));
     editor.on_cutout_painting(on_window!(|state, on: bool| {
         state.cutout_painting(on);
+    }));
+    editor.on_cutout_subject(on_window!(|state, index: i32| {
+        state.cutout_subject(index);
     }));
     editor.on_cutout_clear(on_window!(|state| {
         state.cutout_clear();
@@ -923,6 +961,11 @@ pub fn run() -> Result<(), slint::PlatformError> {
     // it; see Editor.blur. The chords that are also menu rows go through the
     // menu's handler, so the key and the row cannot come apart.
     editor.on_blur(|| Shell::with(|_, app| app.invoke_blur()));
+    // A field that is done being typed into - Enter, Escape - releases the
+    // focus the same way, rather than clearing it: a cleared focus is a
+    // window where no key reaches anything. See Focus in util.slint.
+    app.global::<Focus>()
+        .on_release(|| Shell::with(|_, app| app.invoke_blur()));
     editor.on_shortcut(move |action: SharedString| match action.as_str() {
         "import" | "export" | "settings" | "zoom-in" | "zoom-out" | "start" | "end" | "snap" => {
             Shell::with(|_, app| app.invoke_app_menu_selected(action.clone()));
@@ -1032,12 +1075,20 @@ pub fn run() -> Result<(), slint::PlatformError> {
         }
         state.prefs.save(&state.host.dirs);
     }));
-    app.on_settings_transcribe_language_changed(on_window!(|state, index: i32| {
-        state.settings.transcribe_language = index
-            .max(0)
-            .min(studio::TRANSCRIBE_LANGUAGES.len() as i32 - 1);
-        state.prefs.transcribe_language = Some(state.settings.transcribe_language);
+    app.on_settings_audio_tracks_changed(on_window!(|state, index: i32| {
+        let choice = prefs::AudioTracks::from_row(index);
+        state.settings.audio_tracks = choice.row();
+        state.prefs.audio_tracks = choice;
         state.prefs.save(&state.host.dirs);
+    }));
+    app.on_settings_playhead_stops_changed(on_window!(|state, on: bool| {
+        state.settings.playhead_stops = on;
+        state.prefs.playhead_stops_at_end = on;
+        state.prefs.save(&state.host.dirs);
+        // A playhead already out past the end comes back in when the
+        // switch goes on; seek does the clamp.
+        let at = state.playhead;
+        state.seek(at);
     }));
     app.on_model_activated(on_window!(|state, id: SharedString| {
         state.model_activate(id.as_str());
@@ -1073,8 +1124,8 @@ pub fn run() -> Result<(), slint::PlatformError> {
     app.on_captions_closed(on_window!(|state| {
         state.captions.open = false;
     }));
-    app.on_captions_language_changed(on_window!(|state, index: i32| {
-        state.captions.language = index.clamp(0, studio::TRANSCRIBE_LANGUAGES.len() as i32 - 1);
+    app.on_captions_text_edited(on_window!(|state, text: SharedString| {
+        state.captions.text = text.to_string();
     }));
     app.on_captions_model_changed(on_window!(|state, index: i32| {
         state.captions.model = index.max(0) as usize;
@@ -1127,6 +1178,17 @@ pub fn run() -> Result<(), slint::PlatformError> {
                     state.open_menu = -1;
                     match action.as_str() {
                         "add-selected" => state.add_selected_media(),
+                        "open" => {
+                            if let Some(path) = platform::pick_folder(&i18n::t("Open project"), "")
+                            {
+                                let concat_json = path.join("concat.json");
+                                if concat_json.exists() {
+                                    state.open_recent(&path.to_string_lossy());
+                                } else {
+                                    state.notify("Not a valid project folder", true);
+                                }
+                            }
+                        }
                         "import" => {
                             if let Some(paths) =
                                 platform::pick_files(&i18n::t("Import media"), None)
@@ -1149,6 +1211,9 @@ pub fn run() -> Result<(), slint::PlatformError> {
                         "undo" => state.undo(),
                         "redo" => state.redo(),
                         "snap" => state.snap = !state.snap,
+                        "sort-added" => state.set_media_sort(0),
+                        "sort-name" => state.set_media_sort(1),
+                        "sort-kind" => state.set_media_sort(2),
                         "zoom-in" => {
                             state.seconds_per_pixel = (state.seconds_per_pixel / 1.4).max(0.000_5)
                         }

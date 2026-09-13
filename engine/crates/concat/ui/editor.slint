@@ -76,6 +76,7 @@ export global Editor {
 
     callback import-media();
     callback media-filter-changed(filter: MediaFilter);
+    callback media-sort-changed(index: int);
     callback media-select(id: int, additive: bool);
     /// A marquee closed over the bin's grid, as the block of cells it caught.
     /// See MediaGrid.band-selected: the grid is placed by arithmetic, so the
@@ -94,12 +95,28 @@ export global Editor {
     callback library-add-text(preset: string);
     callback library-apply-effect(effect-id: string);
     callback library-apply-transition(transition-id: string);
+    /// Filters page: lay the look down as a layer at the playhead.
     callback library-apply-filter(filter-id: string, label: string);
+    /// Filters page: show the look over the whole picture without laying
+    /// it down, which is what a single click on a card does. The same id
+    /// again takes it off.
+    callback library-audition-filter(filter-id: string);
+    /// The look being shown that way, by id, or empty: its card draws
+    /// itself picked while it is.
+    in-out property <string> library-audition;
     callback library-apply-audio(effect-id: string);
     callback library-save-template();
+    /// Filters page: import `.cube` tables as looks of the user's own.
+    callback library-import-lut();
 
     // ── the inspector ──
     in-out property <SelectedClipData> selected-clip;
+    /// The selected clip's media's audio tracks, one label each, in file
+    /// order - "Track 1 · stereo", "Mic/Aux · mono". Empty unless the file
+    /// has more than one, which is when the Audio panel offers the choice.
+    /// Beside `selected-clip` rather than inside it: a list in a struct is a
+    /// fresh model on every publish, and every panel would re-seed for it.
+    in-out property <[string]> audio-tracks;
     callback clip-set(field: ClipField, value: float);
     callback clip-keyframe-toggle(field: ClipField, on: bool);
     callback clip-set-text(field: ClipTextField, value: string);
@@ -155,6 +172,8 @@ export global Editor {
     in-out property <bool> has-picture;
     in-out property <string> preview-clip-name;
     in-out property <float> preview-duration;
+    /// The playhead may sit past the end of the content; see Settings.
+    in-out property <bool> playhead-free;
     /// The engine's composited frame at the playhead, or an empty image
     /// while one is on its way. Set from Rust; see `Studio::request_preview`.
     in-out property <image> preview-frame;
@@ -204,6 +223,7 @@ export global Editor {
     callback cutout-tool(index: int);
     callback cutout-size(size: float);
     callback cutout-painting(on: bool);
+    callback cutout-subject(index: int);
     callback cutout-clear();
 
     // Source-space masks. The shape and property ordinals are documented in
@@ -239,11 +259,13 @@ export global Editor {
     in-out property <bool> snap;
     in-out property <int> selected-count;
     in-out property <string> merge-blocked-because;
-    /// What the tray's sound and word tools may do to the selection: one
-    /// clip with sound to caption, one title to speak, one video clip whose
-    /// sound is on it to detach, or whose sound is off it to put back.
-    in-out property <bool> can-caption;
-    in-out property <bool> can-speak;
+    /// What the selection offers the tray's sound and word tools: one clip
+    /// with sound for Captions to start on, one title for Speak to read,
+    /// one video clip whose sound is on it to detach, or whose sound is off
+    /// it to put back. The first two are hints - both sheets open without
+    /// them - and the last two are gates.
+    in-out property <bool> sound-selected;
+    in-out property <bool> title-selected;
     in-out property <bool> can-detach;
     in-out property <bool> can-reattach;
     in-out property <float> playhead;

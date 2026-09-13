@@ -89,6 +89,7 @@ export enum Glyph {
     trash,
     magnet,
     waveform,
+    filter,
     eye-off,
     volume,
     volume-off,
@@ -114,7 +115,10 @@ export enum Glyph {
     unlink,
     // the start screen
     info,
+    help,
     folder,
+    // the cutout's brushes
+    eraser,
 }
 
 component Stroked inherits Path {
@@ -181,6 +185,12 @@ export component Icon inherits Rectangle {
     if root.glyph == Glyph.info: Stroked {
         size: root.size; tint: root.tint; weight: root.weight;
         commands: "M2 12a10 10 0 1 0 20 0a10 10 0 1 0 -20 0 M12 16v-4 M12 8h.01";
+    }
+
+    // lucide/circle-help
+    if root.glyph == Glyph.help: Stroked {
+        size: root.size; tint: root.tint; weight: root.weight;
+        commands: "M2 12a10 10 0 1 0 20 0a10 10 0 1 0 -20 0 M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3 M12 17h.01";
     }
 
     // lucide/folder
@@ -478,6 +488,12 @@ export component Icon inherits Rectangle {
             + " 1.704 0l6.365-6.367A1 1 0 0 0 8.716 4.282z M5 8l4 4";
     }
 
+    // lucide/blend: two circles overlapping, for a filter - a look laid
+    // over whatever plays under it.
+    if root.glyph == Glyph.filter: Stroked {
+        size: root.size; tint: root.tint; weight: root.weight;
+        commands: "M16 9a7 7 0 1 1-14 0a7 7 0 1 1 14 0 M22 15a7 7 0 1 1-14 0a7 7 0 1 1 14 0";
+    }
     // lucide/audio-lines
     if root.glyph == Glyph.waveform: Stroked {
         size: root.size; tint: root.tint; weight: root.weight;
@@ -559,6 +575,22 @@ export component Icon inherits Rectangle {
         size: root.size; tint: root.tint; weight: root.weight;
         commands: "M13.971 4.285A2 2 0 0 1 17 6v12a2 2 0 0 1-3.029"
             + " 1.715l-9.997-5.998a2 2 0 0 1-.003-3.432z M21 20V4";
+    }
+
+    // lucide/brush
+    if root.glyph == Glyph.brush: Stroked {
+        size: root.size; tint: root.tint; weight: root.weight;
+        commands: "m11 10 3 3 M6.5 21A3.5 3.5 0 1 0 3 17.5a2.62 2.62 0 0 1-.708"
+            + " 1.792A1 1 0 0 0 3 21z M9.969 17.031 21.378 5.624a1 1 0 0"
+            + " 0-3.002-3.002L6.967 14.031";
+    }
+
+    // lucide/eraser
+    if root.glyph == Glyph.eraser: Stroked {
+        size: root.size; tint: root.tint; weight: root.weight;
+        commands: "M21 21H8a2 2 0 0 1-1.42-.587l-3.994-3.999a2 2 0 0 1 0-2.828l10-10a2"
+            + " 2 0 0 1 2.829 0l5.999 6a2 2 0 0 1 0 2.828L12.834 21"
+            + " M5.082 11.09l8.828 8.828";
     }
 
     // lucide/step-forward

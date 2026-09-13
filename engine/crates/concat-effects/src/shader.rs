@@ -21,7 +21,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use concat_core::ShaderPass;
+use concat_core::{Lut, ShaderPass};
 
 use crate::manifest::{Manifest, Param, ParamType};
 
@@ -41,6 +41,8 @@ struct Frame {
 @group(0) @binding(1) var source_sampler: sampler;
 @group(1) @binding(0) var<uniform> frame: Frame;
 @group(1) @binding(1) var<uniform> params: Params;
+@group(2) @binding(0) var lut_texture: texture_3d<f32>;
+@group(2) @binding(1) var lut_sampler: sampler;
 
 /// The layer's colour at `uv`, straight alpha.
 fn sample(uv: vec2<f32>) -> vec4<f32> {
@@ -57,10 +59,284 @@ fn luma(rgb: vec3<f32>) -> f32 {
     return dot(rgb, vec3<f32>(0.2126, 0.7152, 0.0722));
 }
 
+/// The package's look-up table applied to a colour - the identity when
+/// the package ships none, so the call is always safe. Sampled at the
+/// texel centres, so the table's ends land on black and white exactly.
+fn lut(rgb: vec3<f32>) -> vec3<f32> {
+    let n = f32(textureDimensions(lut_texture).x);
+    let uvw = clamp(rgb, vec3<f32>(0.0), vec3<f32>(1.0)) * (n - 1.0) / n + vec3<f32>(0.5 / n);
+    return textureSampleLevel(lut_texture, lut_sampler, uvw, 0.0).rgb;
+}
+
 /// A hash in 0..1 from a point and a seed, for grain and dither.
 fn hash(p: vec2<f32>, seed: f32) -> f32 {
     let q = vec3<f32>(p, seed);
     return fract(sin(dot(q, vec3<f32>(12.9898, 78.233, 37.719))) * 43758.5453);
+}
+
+// ── the grading library ──
+//
+// Every look is a few of these in different amounts, so they live here,
+// once, rather than in each package. Each has an FFmpeg twin a manifest's
+// chain can reach for: `saturation` is eq=saturation, `contrast` is
+// eq=contrast, `fade`, `matte`, `s_curve` and `film_curve` are curves,
+// `split_tone` and `tint_midtones` are colorbalance, `white_balance` is
+// colortemperature, `vignette`
+// is vignette, `mono` is colorchannelmixer, `hsl_band` is selectivecolor,
+// `halation` is a split, gblur and screen blend.
+
+/// Everything held to the displayable range.
+fn clamp01(rgb: vec3<f32>) -> vec3<f32> {
+    return clamp(rgb, vec3<f32>(0.0), vec3<f32>(1.0));
+}
+
+/// Saturation about luminance: 1 as shot, 0 grey, above 1 richer.
+fn saturation(rgb: vec3<f32>, amount: f32) -> vec3<f32> {
+    return mix(vec3<f32>(luma(rgb)), rgb, amount);
+}
+
+/// Vibrance: the muted colours saturated more than the vivid ones, so a
+/// face does not go orange before a sky goes blue. 0 as shot.
+fn vibrance(rgb: vec3<f32>, amount: f32) -> vec3<f32> {
+    let mx = max(max(rgb.r, rgb.g), rgb.b);
+    let mn = min(min(rgb.r, rgb.g), rgb.b);
+    return saturation(rgb, 1.0 + amount * (1.0 - (mx - mn)));
+}
+
+/// Contrast about middle grey: 1 as shot.
+fn contrast(rgb: vec3<f32>, amount: f32) -> vec3<f32> {
+    return (rgb - vec3<f32>(0.5)) * amount + vec3<f32>(0.5);
+}
+
+/// An S-curve: shadows down, highlights up, the midtones held. 0 as shot,
+/// 1 the whole curve.
+fn s_curve(rgb: vec3<f32>, amount: f32) -> vec3<f32> {
+    let c = clamp01(rgb);
+    return mix(c, c * c * (vec3<f32>(3.0) - 2.0 * c), amount);
+}
+
+/// A fade: the blacks lifted to `lift` and the rest compressed to fit,
+/// which is what an old print and every faded look does.
+fn fade(rgb: vec3<f32>, lift: f32) -> vec3<f32> {
+    return rgb * (1.0 - lift) + vec3<f32>(lift);
+}
+
+/// Lift, gamma, gain: the three-way grade. Lift moves the shadows, gain
+/// scales the highlights, gamma bends the midtones; (0, 1, 1) in every
+/// channel is as shot.
+fn lift_gamma_gain(rgb: vec3<f32>, lift: vec3<f32>, gamma: vec3<f32>, gain: vec3<f32>) -> vec3<f32> {
+    let lifted = rgb * (vec3<f32>(1.0) - lift) + lift;
+    let gained = clamp01(lifted * gain);
+    return pow(gained, vec3<f32>(1.0) / max(gamma, vec3<f32>(0.01)));
+}
+
+/// How much of a pixel is shadow, highlight or midtone, by luminance:
+/// the weights a tint on one end of the picture and not the other needs.
+fn shadows(rgb: vec3<f32>) -> f32 {
+    return 1.0 - smoothstep(0.0, 0.6, luma(rgb));
+}
+fn highlights(rgb: vec3<f32>) -> f32 {
+    return smoothstep(0.4, 1.0, luma(rgb));
+}
+fn midtones(rgb: vec3<f32>) -> f32 {
+    return 1.0 - min(abs(luma(rgb) - 0.5) * 2.0, 1.0);
+}
+
+/// A split tone: one tint into the shadows and another into the
+/// highlights, each a signed offset per channel, so zero is as shot.
+fn split_tone(rgb: vec3<f32>, shadow: vec3<f32>, highlight: vec3<f32>, amount: f32) -> vec3<f32> {
+    return rgb + (shadow * shadows(rgb) + highlight * highlights(rgb)) * amount;
+}
+
+/// A tint over the midtones alone, the same signed offset.
+fn tint_midtones(rgb: vec3<f32>, tint: vec3<f32>, amount: f32) -> vec3<f32> {
+    return rgb + tint * midtones(rgb) * amount;
+}
+
+/// The colour of black-body light at `k` kelvin.
+fn kelvin(k: f32) -> vec3<f32> {
+    let t = clamp(k, 1000.0, 40000.0) / 100.0;
+    var r: f32;
+    var g: f32;
+    var b: f32;
+    if (t <= 66.0) {
+        r = 1.0;
+        g = clamp((99.4708 * log(t) - 161.1196) / 255.0, 0.0, 1.0);
+        if (t <= 19.0) {
+            b = 0.0;
+        } else {
+            b = clamp((138.5177 * log(t - 10.0) - 305.0448) / 255.0, 0.0, 1.0);
+        }
+    } else {
+        r = clamp(329.6987 * pow(t - 60.0, -0.1332) / 255.0, 0.0, 1.0);
+        g = clamp(288.1222 * pow(t - 60.0, -0.0755) / 255.0, 0.0, 1.0);
+        b = 1.0;
+    }
+    return vec3<f32>(r, g, b);
+}
+
+/// White balance: the picture as if lit at `k` kelvin while the camera
+/// was set for daylight. 6500 is as shot.
+fn white_balance(rgb: vec3<f32>, k: f32) -> vec3<f32> {
+    let tint = kelvin(k) / kelvin(6500.0);
+    return rgb * (tint / max(luma(tint), 0.001));
+}
+
+/// A vignette: the corners darkened by `amount` from a clear middle.
+fn vignette(rgb: vec3<f32>, uv: vec2<f32>, amount: f32) -> vec3<f32> {
+    let d = distance(uv, vec2<f32>(0.5)) * 1.4142;
+    return rgb * (1.0 - smoothstep(0.35, 1.1, d) * amount);
+}
+
+/// Black and white through a coloured filter: the channel weights, made
+/// to sum to one. A red filter darkens skies and lightens skin.
+fn mono(rgb: vec3<f32>, weights: vec3<f32>) -> vec3<f32> {
+    let w = weights / max(weights.r + weights.g + weights.b, 0.001);
+    return vec3<f32>(dot(rgb, w));
+}
+
+/// A matte: the blacks lifted to `black` and the whites pulled down to
+/// `white`, the range between them kept in proportion. The print look
+/// every faded, milky and instant-camera grade is built on; (0, 1) is as
+/// shot. FFmpeg: curves with those two end points.
+fn matte(rgb: vec3<f32>, black: f32, white: f32) -> vec3<f32> {
+    return rgb * (white - black) + vec3<f32>(black);
+}
+
+/// A film curve: a toe that rolls the shadows into black by `toe` and a
+/// shoulder that rolls the highlights into white by `shoulder`, both
+/// `0..1`, the midtones left on the line. Unlike a contrast, it never
+/// clips: it compresses the ends the way a negative does.
+fn film_curve(rgb: vec3<f32>, toe: f32, shoulder: f32) -> vec3<f32> {
+    let c = clamp01(rgb);
+    let t = mix(c, c * c, vec3<f32>(toe) * (vec3<f32>(1.0) - c));
+    return mix(t, vec3<f32>(1.0) - (vec3<f32>(1.0) - t) * (vec3<f32>(1.0) - t), vec3<f32>(shoulder) * t);
+}
+
+/// Every hue turned by `degrees`, brightness held: a rotation in the
+/// YIQ plane, the same for every pixel.
+fn hue_rotate(rgb: vec3<f32>, degrees: f32) -> vec3<f32> {
+    let a = radians(degrees);
+    let y = luma(rgb);
+    let i = dot(rgb, vec3<f32>(0.596, -0.274, -0.322));
+    let q = dot(rgb, vec3<f32>(0.211, -0.523, 0.312));
+    let i2 = i * cos(a) - q * sin(a);
+    let q2 = i * sin(a) + q * cos(a);
+    return vec3<f32>(
+        y + 0.956 * i2 + 0.621 * q2,
+        y - 0.272 * i2 - 0.647 * q2,
+        y - 1.106 * i2 + 1.703 * q2,
+    );
+}
+
+/// One band of hues adjusted and the rest untouched: the band `width`
+/// degrees around `centre` has its hue turned by `turn` degrees, its
+/// saturation scaled by `sat` and its brightness by `lum`, weighted by
+/// `hue_mask` so the edges of the band blend. What a grading panel's HSL
+/// sliders do, and what keeps a sky change off a face. FFmpeg:
+/// selectivecolor on the nearest of its six ranges.
+fn hsl_band(rgb: vec3<f32>, centre: f32, width: f32, turn: f32, sat: f32, lum: f32) -> vec3<f32> {
+    let w = hue_mask(rgb, centre, width);
+    var out = hue_rotate(rgb, turn);
+    out = saturation(out, sat);
+    out = out * lum;
+    return mix(rgb, out, w);
+}
+
+/// Halation: the brights above `threshold` gathered from `radius` pixels
+/// around, tinted, and screened back over the picture by `amount`. The
+/// glow around a lamp on film, and the bloom every soft look leans on.
+/// FFmpeg: a split, a gblur and a screen blend.
+fn halation(uv: vec2<f32>, rgb: vec3<f32>, threshold: f32, radius: f32, tint: vec3<f32>, amount: f32) -> vec3<f32> {
+    let t = texel() * radius * 0.5;
+    var sum = vec3<f32>(0.0);
+    for (var y: i32 = -2; y <= 2; y++) {
+        for (var x: i32 = -2; x <= 2; x++) {
+            let s = sample(uv + vec2<f32>(f32(x), f32(y)) * t).rgb;
+            let bright = smoothstep(threshold, 1.0, luma(s));
+            sum += s * bright;
+        }
+    }
+    let glow = clamp01(sum / 25.0 * tint * amount);
+    return vec3<f32>(1.0) - (vec3<f32>(1.0) - rgb) * (vec3<f32>(1.0) - glow);
+}
+
+// ── targeting and texture: the taps a look takes around a pixel, and the
+// bands of colour it singles out. FFmpeg twins: `hue_mask` is
+// selectivecolor, `soften` is gblur, `grain_at` is noise, `edge_at` is
+// edgedetect.
+
+/// Hue in degrees, 0..360; 0 for a grey.
+fn hue_of(rgb: vec3<f32>) -> f32 {
+    let mx = max(max(rgb.r, rgb.g), rgb.b);
+    let mn = min(min(rgb.r, rgb.g), rgb.b);
+    let d = mx - mn;
+    if (d < 0.0001) {
+        return 0.0;
+    }
+    var h: f32;
+    if (mx == rgb.r) {
+        h = (rgb.g - rgb.b) / d;
+    } else if (mx == rgb.g) {
+        h = 2.0 + (rgb.b - rgb.r) / d;
+    } else {
+        h = 4.0 + (rgb.r - rgb.g) / d;
+    }
+    return fract(h / 6.0) * 360.0;
+}
+
+/// Chroma, 0..1: how far from grey.
+fn chroma_of(rgb: vec3<f32>) -> f32 {
+    return max(max(rgb.r, rgb.g), rgb.b) - min(min(rgb.r, rgb.g), rgb.b);
+}
+
+/// How much a pixel belongs to the hues within `width` degrees of
+/// `centre`, weighted by chroma so a grey belongs to no band.
+fn hue_mask(rgb: vec3<f32>, centre: f32, width: f32) -> f32 {
+    let d = abs(fract((hue_of(rgb) - centre) / 360.0 + 0.5) * 360.0 - 180.0);
+    return (1.0 - smoothstep(width * 0.5, width, d)) * smoothstep(0.0, 0.25, chroma_of(rgb));
+}
+
+/// The weight of skin: the orange band, a warm tan to a pale cheek.
+fn skin_mask(rgb: vec3<f32>) -> f32 {
+    return hue_mask(rgb, 25.0, 40.0);
+}
+
+/// The layer averaged over a square of taps `radius` pixels across: a
+/// bloom, a soft denoise, the blur an unsharp mask subtracts.
+fn soften(uv: vec2<f32>, radius: f32) -> vec3<f32> {
+    let t = texel() * radius * 0.5;
+    var sum = vec3<f32>(0.0);
+    for (var y: i32 = -2; y <= 2; y++) {
+        for (var x: i32 = -2; x <= 2; x++) {
+            sum += sample(uv + vec2<f32>(f32(x), f32(y)) * t).rgb;
+        }
+    }
+    return sum / 25.0;
+}
+
+/// Grain: noise that changes every frame, centred on zero, `amount` as a
+/// fraction of the range. Seeded by the frame's time so the monitor and
+/// the export show the same grain on the same frame.
+fn grain_at(uv: vec2<f32>, amount: f32) -> vec3<f32> {
+    let n = hash(uv * frame.size, fract(frame.time * 7.31)) - 0.5;
+    return vec3<f32>(n * amount);
+}
+
+/// The strength of an edge at `uv`: Sobel on luminance, 0..1.
+fn edge_at(uv: vec2<f32>) -> f32 {
+    let t = texel();
+    let tl = luma(sample(uv + vec2<f32>(-t.x, -t.y)).rgb);
+    let tc = luma(sample(uv + vec2<f32>(0.0, -t.y)).rgb);
+    let tr = luma(sample(uv + vec2<f32>(t.x, -t.y)).rgb);
+    let ml = luma(sample(uv + vec2<f32>(-t.x, 0.0)).rgb);
+    let mr = luma(sample(uv + vec2<f32>(t.x, 0.0)).rgb);
+    let bl = luma(sample(uv + vec2<f32>(-t.x, t.y)).rgb);
+    let bc = luma(sample(uv + vec2<f32>(0.0, t.y)).rgb);
+    let br = luma(sample(uv + vec2<f32>(t.x, t.y)).rgb);
+    let gx = (tr + 2.0 * mr + br) - (tl + 2.0 * ml + bl);
+    let gy = (bl + 2.0 * bc + br) - (tl + 2.0 * tc + tr);
+    return clamp(sqrt(gx * gx + gy * gy), 0.0, 1.0);
 }
 "#;
 
@@ -272,12 +548,14 @@ impl Shader {
         values: &BTreeMap<String, f64>,
         params: &[Param],
         intensity: f32,
+        lut: Option<Arc<Lut>>,
     ) -> ShaderPass {
         ShaderPass {
             key: self.key.clone(),
             source: Arc::clone(&self.source),
             params: self.params_bytes(values, params),
             intensity,
+            lut,
         }
     }
 }

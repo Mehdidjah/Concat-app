@@ -159,12 +159,14 @@ pub struct Segment {
 pub struct TranscribeRequest {
     /// The media file to transcribe.
     pub path: String,
+    /// Which of the file's audio streams, by index; `None` is the first -
+    /// the same choice the clip's playback makes, so the words come from
+    /// the track that is heard.
+    pub audio_stream: Option<u32>,
     /// Seconds into the file where the clip's source window begins.
     pub source_start: f64,
     /// How much source the clip covers, in seconds (`duration * speed`).
     pub window: f64,
-    /// Whisper language code, or "auto".
-    pub language: String,
     /// Which model to use, e.g. "base.en".
     pub model_id: String,
 }
@@ -314,6 +316,7 @@ impl Transcriber {
                 rate: 16_000,
                 channels: 1,
                 format: SampleFormat::F32,
+                stream: request.audio_stream.map(|index| index as usize),
             },
         )
         .map_err(|error| error.to_string())?;
@@ -349,11 +352,9 @@ impl Transcriber {
             .unwrap_or(4);
         let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
         params.set_n_threads(threads as i32);
-        params.set_language(Some(if request.language.is_empty() {
-            "auto"
-        } else {
-            &request.language
-        }));
+        // The language is whisper's to hear: it detects it from the first
+        // window, and an English-only model ignores the setting anyway.
+        params.set_language(Some("auto"));
         params.set_print_special(false);
         params.set_print_progress(false);
         params.set_print_realtime(false);

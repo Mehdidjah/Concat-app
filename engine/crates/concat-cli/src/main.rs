@@ -5,15 +5,22 @@
 //!
 //! This exists so the engine can be exercised end to end without a UI. The
 //! `render` command is the vertical slice: probe, build a timeline, plan every
-//! frame, decode, composite, encode.
+//! frame, decode, composite, encode. The `api` command is the Concat API's
+//! first transport: JSON requests in, JSON responses and events out, one per
+//! line, so a script in any language edits and exports a project. `preview`
+//! is how the window's effect cards get their pictures: one still through one
+//! package at its defaults.
 
 use std::error::Error;
+use std::io::{BufRead, Write};
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 use concat_core::time::{FrameRate, Rational};
 use concat_core::timeline::{Clip, MediaRef, Timeline, Track, TrackKind};
-use concat_media::{EncodeOptions, Encoder, FrameSink, ReaderPool};
+use concat_media::{
+    DecodeOptions, Decoder, EncodeOptions, Encoder, FrameSink, FrameSource, ReaderPool,
+};
 use concat_render::{Compositor, CpuCompositor, Layer, plan_frame};
 
 #[derive(Parser)]
@@ -44,6 +51,33 @@ enum Command {
         #[arg(long, default_value_t = 15)]
         fade: u64,
     },
+
+    /// Speak the Concat API: a JSON request per line on stdin, a response per
+    /// line on stdout, with events in between as they happen.
+    Api {
+        /// One request to run instead of reading stdin.
+        request: Option<String>,
+    },
+
+    /// Run one picture through an effect at its defaults and write the
+    /// result as a JPEG - how the effect cards' previews are made:
+    /// `concat-cli preview assets/effect-preview-source.jpg out.jpg --effect concat.emboss`.
+    Preview {
+        /// A still, or the first frame of a video.
+        input: PathBuf,
+        /// Where to write the JPEG.
+        output: PathBuf,
+        /// The package's catalogue id or alias, e.g. `concat.emboss`.
+        #[arg(long)]
+        effect: String,
+        /// Output width in pixels; the picture is scaled before the effect
+        /// runs, so pixel-sized effects look as they will on the card.
+        #[arg(long, default_value_t = 320)]
+        width: u32,
+        /// Output height in pixels.
+        #[arg(long, default_value_t = 180)]
+        height: u32,
+    },
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -55,7 +89,86 @@ fn main() -> Result<(), Box<dyn Error>> {
             frames,
             fade,
         } => render(&input, &output, frames, fade),
+        Command::Api { request } => api(request),
+        Command::Preview {
+            input,
+            output,
+            effect,
+            width,
+            height,
+        } => preview(&input, &output, &effect, width, height),
     }
+}
+
+/// The stdin transport. Every line in is one request; every line out is
+/// one JSON object, either an event or the response, flushed as written so
+/// a caller reading a pipe sees progress as it happens. A line that is not
+/// a request gets an error response and the loop goes on.
+fn api(single: Option<String>) -> Result<(), Box<dyn Error>> {
+    let mut api = concat_api::Api::new()?;
+    let stdout = std::io::stdout();
+
+    let mut serve = |line: &str| -> Result<(), Box<dyn Error>> {
+        let mut out = stdout.lock();
+        let response = match serde_json::from_str::<concat_api::Request>(line) {
+            Ok(request) => api.dispatch(request, &mut |event| {
+                // An event that cannot be written is a caller that went
+                // away; the response's write will say so.
+                let _ = serde_json::to_writer(&mut out, &event)
+                    .and_then(|()| writeln!(out).map_err(serde_json::Error::io));
+                let _ = out.flush();
+            }),
+            Err(error) => concat_api::Response::Error(format!("not a request: {error}")),
+        };
+        serde_json::to_writer(&mut out, &response)?;
+        writeln!(out)?;
+        out.flush()?;
+        Ok(())
+    };
+
+    match single {
+        Some(line) => serve(&line),
+        None => {
+            for line in std::io::stdin().lock().lines() {
+                let line = line?;
+                if line.trim().is_empty() {
+                    continue;
+                }
+                serve(&line)?;
+            }
+            Ok(())
+        }
+    }
+}
+
+/// One frame of `input`, scaled to the card's size, through `effect` at its
+/// defaults, as a JPEG at `output`.
+fn preview(
+    input: &PathBuf,
+    output: &PathBuf,
+    effect: &str,
+    width: u32,
+    height: u32,
+) -> Result<(), Box<dyn Error>> {
+    let catalogue = concat_effects::Catalogue::builtin();
+    let package = catalogue
+        .get(effect)
+        .ok_or_else(|| format!("no package answers to {effect}"))?;
+    let applied = concat_project::model::AppliedFilter::new(package.manifest.effect.id.clone());
+    // The CPU chain: what a machine without a GPU renders, and what every
+    // package has whether or not it also carries a shader.
+    let chain = catalogue.video_chain(&[applied]);
+    if chain.is_empty() {
+        return Err(format!("{effect} has no FFmpeg chain to preview").into());
+    }
+    let mut decoder = Decoder::open(input, &DecodeOptions::default().scaled_to(width, height))?;
+    let frame = decoder
+        .next_frame()?
+        .ok_or_else(|| format!("{} holds no picture", input.display()))?;
+    let treated = concat_media::treat(&frame, &chain)?;
+    std::fs::write(output, concat_media::jpeg(&treated, 3)?)?;
+    println!("{effect}: {chain}\n  -> {}", output.display());
+    Ok(())
 }
 
 fn probe(path: &PathBuf) -> Result<(), Box<dyn Error>> {
@@ -80,12 +193,22 @@ fn probe(path: &PathBuf) -> Result<(), Box<dyn Error>> {
         None => println!("  video     none"),
     }
 
-    match &info.audio {
-        Some(audio) => println!(
-            "  audio     #{} {} {} Hz, {} channels",
+    // Every audio stream, the default first: a recording with its tracks
+    // apart lists them all, and a clip may play any one.
+    if info.audio_streams.is_empty() {
+        println!("  audio     none");
+    }
+    for audio in &info.audio_streams {
+        let name = match (audio.title.is_empty(), audio.language.is_empty()) {
+            (true, true) => String::new(),
+            (false, true) => format!(" \"{}\"", audio.title),
+            (true, false) => format!(" [{}]", audio.language),
+            (false, false) => format!(" \"{}\" [{}]", audio.title, audio.language),
+        };
+        println!(
+            "  audio     #{} {} {} Hz, {} channels{name}",
             audio.index, audio.codec, audio.sample_rate, audio.channels
-        ),
-        None => println!("  audio     none"),
+        );
     }
 
     Ok(())

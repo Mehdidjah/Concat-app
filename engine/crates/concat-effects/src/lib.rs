@@ -19,6 +19,7 @@
 //! skipped at render time.
 
 pub mod catalogue;
+pub mod cube;
 pub mod expr;
 pub mod manifest;
 pub mod shader;
@@ -70,6 +71,7 @@ mod tests {
                 .map(|(key, value)| ((*key).to_owned(), *value))
                 .collect(),
             enabled: true,
+            keys: Default::default(),
         }
     }
 
@@ -80,7 +82,7 @@ mod tests {
     fn a_filter_mixes_by_its_intensity_and_an_effect_does_not() {
         let catalogue = Catalogue::builtin();
         let full = catalogue.video_chain(&[applied("concat.warm", &[])]);
-        assert_eq!(full, "colortemperature=temperature=4600");
+        assert_eq!(full, "colortemperature=temperature=4600:pl=1");
         let half = catalogue.video_chain(&[
             applied("concat.sepia", &[]),
             applied("concat.warm", &[("intensity", 50.0)]),
@@ -88,13 +90,61 @@ mod tests {
         assert!(half.starts_with("colorchannelmixer"), "{half}");
         assert!(
             half.ends_with(
-                "split[m1a][m1b];[m1b]colortemperature=temperature=4600[m1c];\
+                "split[m1a][m1b];[m1b]colortemperature=temperature=4600:pl=1[m1c];\
                  [m1a][m1c]blend=all_mode=normal:all_opacity=0.500"
             ),
             "{half}"
         );
         let effect = catalogue.video_chain(&[applied("concat.sepia", &[("intensity", 50.0)])]);
         assert!(!effect.contains("blend"), "{effect}");
+    }
+
+    #[test]
+    fn a_folder_package_with_a_table_loads_and_names_its_file() {
+        let dir = std::env::temp_dir().join(format!("concat-lut-{}", std::process::id()));
+        let folder = dir.join("test.table");
+        std::fs::create_dir_all(&folder).expect("temp dir");
+        std::fs::write(
+            folder.join("effect.toml"),
+            "[effect]\nid = \"test.table\"\nname = \"Table\"\nkind = \"filter\"\n\n[lut]\nfile = \"look.cube\"\n\n[ffmpeg]\nchain = \"lut3d=file={lut}\"\n\n[wgsl]\nentry = \"effect.wgsl\"\n",
+        )
+        .expect("manifest");
+        std::fs::write(
+            folder.join("effect.wgsl"),
+            "fn effect(uv: vec2<f32>) -> vec4<f32> { let c = sample(uv); return vec4<f32>(lut(c.rgb), c.a); }",
+        )
+        .expect("shader");
+        let mut cube = String::from("LUT_3D_SIZE 2\n");
+        for b in 0..2 {
+            for g in 0..2 {
+                for r in 0..2 {
+                    cube.push_str(&format!("{r} {g} {b}\n"));
+                }
+            }
+        }
+        std::fs::write(folder.join("look.cube"), cube).expect("cube");
+
+        let mut catalogue = Catalogue::new();
+        let errors = catalogue.load_dir(&dir);
+        assert!(errors.is_empty(), "{errors:?}");
+        let package = catalogue.get("test.table").expect("loaded");
+        assert_eq!(package.lut().map(|lut| lut.size), Some(2));
+        let chain = package
+            .ffmpeg_fragment(&BTreeMap::new(), 0)
+            .expect("renders")
+            .expect("has a chain");
+        assert!(
+            chain.starts_with("lut3d=file='") && chain.ends_with("look.cube'"),
+            "{chain}"
+        );
+        assert_eq!(
+            catalogue.shader_passes(&[AppliedFilter::new("test.table")])[0]
+                .lut
+                .as_ref()
+                .map(|l| l.size),
+            Some(2)
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
