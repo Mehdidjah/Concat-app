@@ -302,17 +302,23 @@ export global Editor {
     callback clip-context(id: string);
     callback menu-selected(id: string);
     callback keyframe-graph-property-changed(index: int);
-    callback keyframe-graph-point-pressed(index: int);
+    callback keyframe-graph-mode-changed(index: int);
+    callback keyframe-graph-point-pressed(index: int, additive: bool);
     callback keyframe-graph-point-dragged(index: int, at: float, value: float);
     callback keyframe-graph-point-released();
     callback keyframe-graph-point-added(at: float, value: float);
-    callback keyframe-graph-point-removed(index: int);
+    callback keyframe-graph-selection-changed(from-at: float, to-at: float,
+        from-value: float, to-value: float, additive: bool);
+    callback keyframe-graph-delete-selected();
+    callback keyframe-graph-copy-selected();
+    callback keyframe-graph-paste();
+    callback keyframe-graph-select-all();
     callback keyframe-graph-ease-changed(index: int);
     callback keyframe-graph-curve-pressed();
     callback keyframe-graph-curve-changed(x1: float, y1: float, x2: float, y2: float);
     callback keyframe-graph-curve-released();
     callback keyframe-graph-post-changed(index: int);
-    callback keyframe-marker-selected(clip-id: string, seconds: float);
+    callback keyframe-marker-selected(clip-id: string, seconds: float, additive: bool);
     callback keyframe-graph-closed();
 
     callback band-selected(from-seconds: float, to-seconds: float,

@@ -139,13 +139,17 @@ export struct KeyframeGraphData {
     duration: float,
     /// Scale, X, Y, Rotation, Opacity, Speed.
     property: int,
+    /// Raw value, derivative speed, or rounded step visualisation.
+    mode: int,
     group-label: string,
     label: string,
     min: float,
     max: float,
     /// Polyline in a 1000 x 1000 viewbox.
     path: string,
+    /// Primary key, whose incoming segment owns the temporal handles.
     selected: int,
+    selected-count: int,
     /// Linear, Ease In, Ease Out, Ease In & Out.
     ease: int,
     /// Temporal cubic handles for the segment ending at `selected`.

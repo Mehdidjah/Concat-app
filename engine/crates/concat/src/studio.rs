@@ -7553,12 +7553,15 @@ impl Studio {
     pub fn publish_keyframe_graph(&self, app: &App, models: &Models) {
         let editor = app.global::<Editor>();
         let timeline = self.timeline();
-        let selected_marker = self.keyframe_graph.as_ref().and_then(|graph| {
+        let selected_markers = self.keyframe_graph.as_ref().and_then(|graph| {
             let clip = timeline.clip(&graph.clip)?;
-            let at = graph_points(clip, graph.property)
-                .get(graph.selected?)
-                .map(|point| point.0)?;
-            Some((graph.clip.as_str(), at))
+            let points = graph_points(clip, graph.property);
+            let times = graph
+                .selected
+                .iter()
+                .filter_map(|&index| points.get(index).map(|point| point.0))
+                .collect::<Vec<_>>();
+            Some((graph.clip.as_str(), times))
         });
         sync(
             &models.keyframes,
@@ -7581,8 +7584,11 @@ impl Studio {
                         clip_id: clip.id.as_str().into(),
                         time: (clip.start + at * clip.duration) as f32,
                         row: self.row_of(&clip.track_id),
-                        selected: selected_marker.is_some_and(|(id, selected_at)| {
-                            id == clip.id && (selected_at - at).abs() <= 1e-9
+                        selected: selected_markers.as_ref().is_some_and(|(id, selected)| {
+                            *id == clip.id
+                                && selected
+                                    .iter()
+                                    .any(|selected_at| (selected_at - at).abs() <= 1e-9)
                         }),
                     })
                 })
@@ -7596,10 +7602,15 @@ impl Studio {
         {
             let points = graph_points(clip, graph.property);
             let display_points = graph_display_points(clip, graph.property, &points);
-            let (min, max) = graph_range(graph.property, &display_points);
+            let GraphPlot {
+                path,
+                min,
+                max,
+                point_values,
+            } = graph_plot(graph.property, graph.mode, &display_points);
             let (group, label) = graph_labels(graph.property);
             let ease = graph
-                .selected
+                .primary
                 .and_then(|index| points.get(index))
                 .map_or(0, |point| match point.2 {
                     KeyframeEase::Linear => 0,
@@ -7607,7 +7618,7 @@ impl Studio {
                     KeyframeEase::Out => 2,
                     KeyframeEase::InOut => 3,
                 });
-            let selected = graph.selected.and_then(|index| points.get(index).copied());
+            let selected = graph.primary.and_then(|index| points.get(index).copied());
             let curve = selected.and_then(|point| point.3).unwrap_or_else(|| {
                 match selected.map_or(KeyframeEase::Linear, |point| point.2) {
                     KeyframeEase::Linear => TemporalCurve {
@@ -7636,7 +7647,7 @@ impl Studio {
                     },
                 }
             });
-            let segment = graph.selected.and_then(|right| {
+            let segment = graph.primary.and_then(|right| {
                 right
                     .checked_sub(1)
                     .and_then(|left| Some((*points.get(left)?, *points.get(right)?)))
@@ -7656,12 +7667,14 @@ impl Studio {
                 start: clip.start as f32,
                 duration: clip.duration as f32,
                 property: graph.property.index(),
+                mode: graph.mode.index(),
                 group_label: t(group).into(),
                 label: t(label).into(),
                 min: min as f32,
                 max: max as f32,
-                path: graph_path(&display_points, min, max).into(),
-                selected: graph.selected.map_or(-1, |index| index as i32),
+                path: path.into(),
+                selected: graph.primary.map_or(-1, |index| index as i32),
+                selected_count: graph.selected.len() as i32,
                 ease,
                 custom_curve: selected.is_some_and(|point| point.3.is_some()),
                 curve_x1: curve.x1 as f32,
@@ -7681,8 +7694,8 @@ impl Studio {
                     .enumerate()
                     .map(|(index, (at, value, _, _))| KeyframeGraphPointData {
                         at: at as f32,
-                        value: value as f32,
-                        selected: graph.selected == Some(index),
+                        value: point_values.get(index).copied().unwrap_or(value) as f32,
+                        selected: graph.selected.contains(&index),
                     })
                     .collect(),
             );
@@ -7797,12 +7810,15 @@ impl Studio {
                 })
                 .collect(),
         );
-        let selected_marker = self.keyframe_graph.as_ref().and_then(|graph| {
+        let selected_markers = self.keyframe_graph.as_ref().and_then(|graph| {
             let clip = timeline.clip(&graph.clip)?;
-            let at = graph_points(clip, graph.property)
-                .get(graph.selected?)
-                .map(|point| point.0)?;
-            Some((graph.clip.as_str(), at))
+            let points = graph_points(clip, graph.property);
+            let times = graph
+                .selected
+                .iter()
+                .filter_map(|&index| points.get(index).map(|point| point.0))
+                .collect::<Vec<_>>();
+            Some((graph.clip.as_str(), times))
         });
         sync(
             &models.keyframes,
@@ -7825,8 +7841,11 @@ impl Studio {
                         clip_id: clip.id.as_str().into(),
                         time: (clip.start + at * clip.duration) as f32,
                         row: self.row_of(&clip.track_id),
-                        selected: selected_marker.is_some_and(|(id, selected_at)| {
-                            id == clip.id && (selected_at - at).abs() <= 1e-9
+                        selected: selected_markers.as_ref().is_some_and(|(id, selected)| {
+                            *id == clip.id
+                                && selected
+                                    .iter()
+                                    .any(|selected_at| (selected_at - at).abs() <= 1e-9)
                         }),
                     })
                 })
@@ -7840,10 +7859,15 @@ impl Studio {
         {
             let points = graph_points(clip, graph.property);
             let display_points = graph_display_points(clip, graph.property, &points);
-            let (min, max) = graph_range(graph.property, &display_points);
+            let GraphPlot {
+                path,
+                min,
+                max,
+                point_values,
+            } = graph_plot(graph.property, graph.mode, &display_points);
             let (group, label) = graph_labels(graph.property);
             let ease = graph
-                .selected
+                .primary
                 .and_then(|index| points.get(index))
                 .map_or(0, |point| match point.2 {
                     KeyframeEase::Linear => 0,
@@ -7851,7 +7875,7 @@ impl Studio {
                     KeyframeEase::Out => 2,
                     KeyframeEase::InOut => 3,
                 });
-            let selected = graph.selected.and_then(|index| points.get(index).copied());
+            let selected = graph.primary.and_then(|index| points.get(index).copied());
             let curve = selected.and_then(|point| point.3).unwrap_or_else(|| {
                 match selected.map_or(KeyframeEase::Linear, |point| point.2) {
                     KeyframeEase::Linear => TemporalCurve {
@@ -7880,7 +7904,7 @@ impl Studio {
                     },
                 }
             });
-            let segment = graph.selected.and_then(|right| {
+            let segment = graph.primary.and_then(|right| {
                 right
                     .checked_sub(1)
                     .and_then(|left| Some((*points.get(left)?, *points.get(right)?)))
@@ -7900,12 +7924,14 @@ impl Studio {
                 start: clip.start as f32,
                 duration: clip.duration as f32,
                 property: graph.property.index(),
+                mode: graph.mode.index(),
                 group_label: t(group).into(),
                 label: t(label).into(),
                 min: min as f32,
                 max: max as f32,
-                path: graph_path(&display_points, min, max).into(),
-                selected: graph.selected.map_or(-1, |index| index as i32),
+                path: path.into(),
+                selected: graph.primary.map_or(-1, |index| index as i32),
+                selected_count: graph.selected.len() as i32,
                 ease,
                 custom_curve: selected.is_some_and(|point| point.3.is_some()),
                 curve_x1: curve.x1 as f32,
@@ -7925,8 +7951,8 @@ impl Studio {
                     .enumerate()
                     .map(|(index, (at, value, _, _))| KeyframeGraphPointData {
                         at: at as f32,
-                        value: value as f32,
-                        selected: graph.selected == Some(index),
+                        value: point_values.get(index).copied().unwrap_or(value) as f32,
+                        selected: graph.selected.contains(&index),
                     })
                     .collect(),
             );
@@ -8162,20 +8188,6 @@ impl Studio {
 
     // ── keyframes ──
 
-    /// The keyable property a field names, or None for a field that is a
-    /// constant and stays one.
-    pub fn key_property_of(field: ClipField) -> Option<model::KeyProperty> {
-        Some(match field {
-            ClipField::Scale => model::KeyProperty::Scale,
-            ClipField::OffsetX => model::KeyProperty::OffsetX,
-            ClipField::OffsetY => model::KeyProperty::OffsetY,
-            ClipField::Rotation => model::KeyProperty::Rotation,
-            ClipField::Opacity => model::KeyProperty::Opacity,
-            ClipField::Volume => model::KeyProperty::Volume,
-            _ => return None,
-        })
-    }
-
     /// The selected clip and where the playhead is inside it, `0..=1`, or
     /// None when there is no sole selection or the playhead is outside it.
     ///
@@ -8197,19 +8209,21 @@ impl Studio {
     /// indexes them. Empty when nothing can be keyed, which is what greys
     /// every cluster in the inspector at once.
     pub fn key_rows(&self) -> Vec<ClipKeyData> {
-        let Some((clip, at)) = self.key_point() else {
+        let Some((clip, _)) = self.key_point() else {
             return Vec::new();
         };
+        let (at, tolerance) = keyframe_time(clip, self.playhead, self.frame_rate());
         model::KeyProperty::ALL
             .iter()
             .map(|&property| {
-                let (prev, next) = clip.keys_around(property, at);
+                let property_id = KeyframeProperty::from(property);
+                let keys = clip.keyframes.track(property_id);
                 ClipKeyData {
                     field: key_field_of(property),
-                    keyed: clip.is_keyed(property),
-                    here: clip.key_at(property, at).is_some(),
-                    prev: prev.is_some(),
-                    next: next.is_some(),
+                    keyed: !keys.is_empty(),
+                    here: clip.keyframes.has_at(property_id, at, tolerance),
+                    prev: keys.iter().any(|key| key.at < at - tolerance),
+                    next: keys.iter().any(|key| key.at > at + tolerance),
                 }
             })
             .collect()
@@ -8222,62 +8236,56 @@ impl Studio {
     /// value on one that has them. That is what makes the diamond safe to
     /// press: it never moves the picture, it only says "hold this here".
     pub fn toggle_key(&mut self, field: ClipField) {
-        let Some(property) = Self::key_property_of(field) else {
+        let Some(property) = keyframe_property(field) else {
             return;
         };
-        let Some((clip, at)) = self.key_point() else {
+        let Some((clip, _)) = self.key_point() else {
             return;
         };
-        let clip_id = clip.id.clone();
-        let command = if clip.key_at(property, at).is_some() {
-            Command::ClearClipKey {
-                clip_id,
-                property,
-                at,
-            }
-        } else {
-            let value = clip.value_at(property, at);
-            // The ease of whichever key this one is joining behind, so
-            // laying a run of keys down does not alternate between shapes.
-            // The first key on a property has nothing to inherit and gets
-            // the straight line.
-            let ease = clip
-                .keys_on(property)
-                .rfind(|key| key.at < at)
-                .map_or(model::KeyEase::LINEAR, |key| key.ease);
-            Command::SetClipKey {
-                clip_id,
-                property,
-                at,
-                value,
-                ease,
-            }
-        };
-        self.apply(command);
+        let (at, tolerance) = keyframe_time(clip, self.playhead, self.frame_rate());
+        let on = !clip.keyframes.has_at(property, at, tolerance);
+        self.clip_keyframe_toggle(field, on);
     }
 
     /// Takes every key off a field, leaving it its constant.
     pub fn clear_keys_on(&mut self, field: ClipField) {
-        let Some(property) = Self::key_property_of(field) else {
+        let Some(property) = keyframe_property(field) else {
             return;
         };
         let Some(clip_id) = self.sole_selection() else {
             return;
         };
-        self.apply(Command::ClearClipKeys { clip_id, property });
+        self.begin_echo();
+        let Some(clip) = self.echo_clip_mut(&clip_id) else {
+            return;
+        };
+        if clip.keyframes.tracks.remove(property.id()).is_some() {
+            self.clip_commit();
+        }
     }
 
     /// Moves the playhead to this field's previous (-1) or next (+1) key.
     pub fn step_key(&mut self, field: ClipField, delta: i32) {
-        let Some(property) = Self::key_property_of(field) else {
+        let Some(property) = keyframe_property(field) else {
             return;
         };
-        let Some((clip, at)) = self.key_point() else {
+        let Some((clip, _)) = self.key_point() else {
             return;
         };
         let (start, duration) = (clip.start, clip.duration);
-        let (prev, next) = clip.keys_around(property, at);
-        let Some(target) = (if delta < 0 { prev } else { next }) else {
+        let (at, tolerance) = keyframe_time(clip, self.playhead, self.frame_rate());
+        let keys = clip.keyframes.track(property);
+        let target = if delta < 0 {
+            keys.iter()
+                .rev()
+                .find(|key| key.at < at - tolerance)
+                .map(|key| key.at)
+        } else {
+            keys.iter()
+                .find(|key| key.at > at + tolerance)
+                .map(|key| key.at)
+        };
+        let Some(target) = target else {
             return;
         };
         self.seek((start + target * duration) as f32);
@@ -8558,7 +8566,8 @@ impl Studio {
     /// The source instant of `clip` under the playhead, held to the clip.
     fn source_at_playhead(&self, clip: &Clip) -> f64 {
         let along = (f64::from(self.playhead) - clip.start).clamp(0.0, clip.duration);
-        clip.source_start + along * clip.speed
+        let curve = clip_retime_curve(clip);
+        clip_source_time(clip, along / clip.duration.max(1e-6), curve.as_ref())
     }
 
     /// Whether the cutout model found nothing at the playhead's frame of
@@ -9523,6 +9532,19 @@ impl Studio {
     /// menu's own handler in lib.rs, so a key and the row that advertises
     /// it are one thing.
     pub fn shortcut(&mut self, action: &str) {
+        if self.keyframe_graph.is_some() {
+            let graph_action = match action {
+                "select-all" => Some(GraphAction::SelectAll),
+                "copy" => Some(GraphAction::CopySelected),
+                "paste" => Some(GraphAction::PasteAtPlayhead),
+                "delete" => Some(GraphAction::DeleteSelected),
+                _ => None,
+            };
+            if let Some(graph_action) = graph_action {
+                self.graph_action(graph_action);
+                return;
+            }
+        }
         match action {
             "split" => {
                 let at = self.playhead;
@@ -9555,6 +9577,7 @@ impl Studio {
                     }
                 }
             }
+            "delete" => self.delete_selected(),
             "tool-select" => self.tool = TimelineTool::Select,
             // B toggles: pressing it with the razor up puts the pointer back.
             "tool-razor" => {
@@ -9601,14 +9624,18 @@ impl Studio {
                     self.keyframe_graph = None;
                 } else {
                     self.selection = vec![id.to_owned()];
+                    let property = if clip.kind == model::ClipKind::Audio {
+                        GraphProperty::Speed
+                    } else {
+                        GraphProperty::Scale
+                    };
                     self.keyframe_graph = Some(KeyframeGraphState {
                         clip: id.to_owned(),
-                        property: if clip.kind == model::ClipKind::Audio {
-                            GraphProperty::Speed
-                        } else {
-                            GraphProperty::Scale
-                        },
-                        selected: None,
+                        property,
+                        mode: property.default_mode(),
+                        selected: Vec::new(),
+                        primary: None,
+                        drag: None,
                     });
                 }
             }
@@ -9647,37 +9674,117 @@ impl Studio {
         }
     }
 
-    pub fn graph_property_changed(&mut self, index: i32) {
+    pub(crate) fn graph_action(&mut self, action: GraphAction) {
+        match action {
+            GraphAction::PropertyChanged(index) => self.graph_property_changed(index),
+            GraphAction::ModeChanged(index) => self.graph_mode_changed(index),
+            GraphAction::PointPressed { index, additive } => {
+                self.graph_point_pressed(index, additive)
+            }
+            GraphAction::PointDragged { index, at, value } => {
+                self.graph_point_dragged(index, at, value)
+            }
+            GraphAction::EditFinished => self.graph_point_released(),
+            GraphAction::PointAdded { at, value } => self.graph_point_added(at, value),
+            GraphAction::SelectionChanged {
+                from_at,
+                to_at,
+                from_value,
+                to_value,
+                additive,
+            } => self.graph_selection_changed(from_at, to_at, from_value, to_value, additive),
+            GraphAction::DeleteSelected => self.graph_points_removed(),
+            GraphAction::CopySelected => self.graph_copy_selected(),
+            GraphAction::PasteAtPlayhead => self.graph_paste_at_playhead(),
+            GraphAction::SelectAll => self.graph_select_all(),
+            GraphAction::EaseChanged(index) => self.graph_ease_changed(index),
+            GraphAction::CurvePressed => self.graph_curve_pressed(),
+            GraphAction::CurveChanged { x1, y1, x2, y2 } => {
+                self.graph_curve_changed(x1, y1, x2, y2)
+            }
+            GraphAction::CurveReleased => self.graph_curve_released(),
+            GraphAction::PostChanged(index) => self.graph_post_changed(index),
+            GraphAction::Close => self.graph_closed(),
+        }
+    }
+
+    fn graph_property_changed(&mut self, index: i32) {
         if self.echo.is_some() {
             self.finish_graph_preview();
         }
         if let Some(graph) = self.keyframe_graph.as_mut() {
             graph.property = GraphProperty::from_index(index);
-            graph.selected = None;
+            graph.mode = graph.property.default_mode();
+            graph.selected.clear();
+            graph.primary = None;
+            graph.drag = None;
         }
     }
 
-    pub fn graph_point_pressed(&mut self, index: i32) {
+    fn graph_mode_changed(&mut self, index: i32) {
+        if let Some(graph) = self.keyframe_graph.as_mut() {
+            graph.mode = GraphMode::from_index(index, graph.property);
+        }
+    }
+
+    fn graph_point_pressed(&mut self, index: i32, additive: bool) {
         let Some(graph) = self.keyframe_graph.clone() else {
             return;
         };
         let Ok(index) = usize::try_from(index) else {
             return;
         };
+        let Some(clip) = self.timeline().clip(&graph.clip) else {
+            return;
+        };
+        let points = graph_points(clip, graph.property);
+        if index >= points.len() {
+            return;
+        }
+        let mut selected = graph.selected;
+        if additive {
+            if let Some(position) = selected.iter().position(|held| *held == index) {
+                selected.remove(position);
+            } else {
+                selected.push(index);
+            }
+        } else if !selected.contains(&index) {
+            selected = vec![index];
+        }
+        selected.sort_unstable();
+        let primary = selected.contains(&index).then_some(index);
+        let drag = primary.map(|anchor| GraphDragState {
+            anchor,
+            anchor_at: points[anchor].0,
+            anchor_value: points[anchor].1,
+            duration: clip.duration,
+            points: selected
+                .iter()
+                .filter_map(|&index| {
+                    points.get(index).map(|point| GraphDragPoint {
+                        index,
+                        at: point.0,
+                        value: point.1,
+                    })
+                })
+                .collect(),
+        });
         self.selection = vec![graph.clip.clone()];
-        self.begin_graph_preview();
-        self.begin_echo();
         if let Some(state) = self.keyframe_graph.as_mut() {
-            state.selected = Some(index);
+            state.selected = selected;
+            state.primary = primary.or_else(|| state.selected.last().copied());
+            state.drag = drag;
         }
-        self.schedule_preview_frame();
     }
 
-    pub fn graph_point_dragged(&mut self, index: i32, at: f32, value: f32) {
+    fn graph_point_dragged(&mut self, index: i32, at: f32, value: f32) {
         let Some(graph) = self.keyframe_graph.clone() else {
             return;
         };
         let Ok(index) = usize::try_from(index) else {
+            return;
+        };
+        let Some(drag) = graph.drag.as_ref().filter(|drag| drag.anchor == index) else {
             return;
         };
         let frame_rate = self.frame_rate();
@@ -9685,26 +9792,29 @@ impl Studio {
         self.begin_graph_preview();
         self.begin_echo();
         if let Some(clip) = self.echo_clip_mut(&graph.clip) {
-            update_graph_point(
+            update_graph_points(
                 clip,
                 graph.property,
-                index,
+                graph.mode,
+                drag,
                 f64::from(at),
                 f64::from(value),
                 frame_rate,
             );
         }
-        if let Some(state) = self.keyframe_graph.as_mut() {
-            state.selected = Some(index);
-        }
         self.schedule_preview_frame();
     }
 
-    pub fn graph_point_released(&mut self) {
-        self.finish_graph_preview();
+    fn graph_point_released(&mut self) {
+        if self.echo.is_some() {
+            self.finish_graph_preview();
+        }
+        if let Some(graph) = self.keyframe_graph.as_mut() {
+            graph.drag = None;
+        }
     }
 
-    pub fn graph_point_added(&mut self, at: f32, value: f32) {
+    fn graph_point_added(&mut self, at: f32, value: f32) {
         let Some(graph) = self.keyframe_graph.clone() else {
             return;
         };
@@ -9717,7 +9827,17 @@ impl Studio {
         let at = snap_graph_at(clip.duration, frame_rate, f64::from(at));
         let tolerance =
             (0.5 / (clip.duration.max(1e-6) * f64::from(frame_rate.max(1.0)))).max(1e-9);
-        let value = f64::from(value);
+        let mut value = if graph.mode == GraphMode::Speed {
+            graph.property.keyframe().map_or(clip.speed, |property| {
+                clip.keyframes
+                    .value_at(property, at, clip_property(clip, property))
+            })
+        } else {
+            f64::from(value)
+        };
+        if graph.mode == GraphMode::Step {
+            value = value.round();
+        }
         let selected = if let Some(property) = graph.property.keyframe() {
             let covered = clip.duration * clip.speed;
             let rest = clip.speed;
@@ -9766,18 +9886,182 @@ impl Studio {
             selected
         };
         if let Some(state) = self.keyframe_graph.as_mut() {
-            state.selected = Some(selected);
+            state.selected = vec![selected];
+            state.primary = Some(selected);
+            state.drag = None;
         }
         self.clip_commit();
     }
 
-    pub fn graph_point_removed(&mut self, index: i32) {
+    fn graph_selection_changed(
+        &mut self,
+        from_at: f32,
+        to_at: f32,
+        from_value: f32,
+        to_value: f32,
+        additive: bool,
+    ) {
         let Some(graph) = self.keyframe_graph.clone() else {
             return;
         };
-        let Ok(index) = usize::try_from(index) else {
+        let Some(clip) = self.timeline().clip(&graph.clip) else {
             return;
         };
+        let points = graph_points(clip, graph.property);
+        let plot = graph_plot(graph.property, graph.mode, &points);
+        let at_min = f64::from(from_at.min(to_at));
+        let at_max = f64::from(from_at.max(to_at));
+        let value_min = f64::from(from_value.min(to_value));
+        let value_max = f64::from(from_value.max(to_value));
+        let mut selected = if additive { graph.selected } else { Vec::new() };
+        for (index, point) in points.iter().enumerate() {
+            let display_value = plot.point_values.get(index).copied().unwrap_or(point.1);
+            if at_min <= point.0
+                && point.0 <= at_max
+                && value_min <= display_value
+                && display_value <= value_max
+                && !selected.contains(&index)
+            {
+                selected.push(index);
+            }
+        }
+        selected.sort_unstable();
+        if let Some(state) = self.keyframe_graph.as_mut() {
+            state.selected = selected;
+            state.primary = state.selected.last().copied();
+            state.drag = None;
+        }
+    }
+
+    fn graph_select_all(&mut self) {
+        let Some(graph) = self.keyframe_graph.clone() else {
+            return;
+        };
+        let count = self
+            .timeline()
+            .clip(&graph.clip)
+            .map_or(0, |clip| graph_points(clip, graph.property).len());
+        if let Some(state) = self.keyframe_graph.as_mut() {
+            state.selected = (0..count).collect();
+            state.primary = count.checked_sub(1);
+            state.drag = None;
+        }
+    }
+
+    fn graph_copy_selected(&mut self) {
+        let Some(graph) = self.keyframe_graph.clone() else {
+            return;
+        };
+        let Some(clip) = self.timeline().clip(&graph.clip) else {
+            return;
+        };
+        let points = graph_points(clip, graph.property);
+        let mut selected = graph.selected;
+        selected.sort_unstable();
+        let Some(origin) = selected
+            .iter()
+            .filter_map(|&index| points.get(index).map(|point| point.0))
+            .next()
+        else {
+            return;
+        };
+        let copied = selected
+            .into_iter()
+            .filter_map(|index| points.get(index).copied())
+            .map(|point| GraphClipboardPoint {
+                offset: point.0 - origin,
+                value: point.1,
+                ease: point.2,
+                temporal_curve: point.3,
+            })
+            .collect::<Vec<_>>();
+        if !copied.is_empty() {
+            self.graph_clipboard = Some(GraphClipboard { points: copied });
+        }
+    }
+
+    fn graph_paste_at_playhead(&mut self) {
+        let (Some(graph), Some(copied)) =
+            (self.keyframe_graph.clone(), self.graph_clipboard.clone())
+        else {
+            return;
+        };
+        let Some(property) = graph.property.keyframe() else {
+            return;
+        };
+        let frame_rate = self.frame_rate();
+        let playhead = self.playhead;
+        self.selection = vec![graph.clip.clone()];
+        self.begin_echo();
+        let Some(clip) = self.echo_clip_mut(&graph.clip) else {
+            return;
+        };
+        let duration = clip.duration.max(1e-6);
+        let covered = clip.duration * clip.speed;
+        let rest = clip.speed;
+        if property == KeyframeProperty::TimeRemap {
+            migrate_time_remap(clip);
+        }
+        let origin = ((f64::from(playhead) - clip.start) / duration).clamp(0.0, 1.0);
+        let tolerance = (0.5 / (duration * f64::from(frame_rate.max(1.0)))).max(1e-9);
+        let mut pasted_times = Vec::new();
+        for copied in copied.points {
+            let at = snap_graph_at(duration, frame_rate, origin + copied.offset);
+            let value = if graph.mode == GraphMode::Step {
+                copied.value.round()
+            } else {
+                copied.value
+            };
+            clip.keyframes.set_at(
+                property,
+                at,
+                clamp_keyframe_value(property, value),
+                tolerance,
+            );
+            if let Some(key) = clip
+                .keyframes
+                .track_mut(property)
+                .iter_mut()
+                .find(|key| (key.at - at).abs() <= tolerance)
+            {
+                key.ease = copied.ease;
+                key.temporal_curve = copied.temporal_curve;
+            }
+            pasted_times.push(at);
+        }
+        if property == KeyframeProperty::TimeRemap {
+            sync_time_remap(clip, covered, rest);
+        }
+        let selected = clip
+            .keyframes
+            .track(property)
+            .iter()
+            .enumerate()
+            .filter(|(_, key)| {
+                pasted_times
+                    .iter()
+                    .any(|at| (key.at - at).abs() <= tolerance)
+            })
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
+        if let Some(state) = self.keyframe_graph.as_mut() {
+            state.selected = selected;
+            state.primary = state.selected.last().copied();
+            state.drag = None;
+        }
+        self.clip_commit();
+    }
+
+    fn graph_points_removed(&mut self) {
+        let Some(graph) = self.keyframe_graph.clone() else {
+            return;
+        };
+        let mut selected = graph.selected;
+        selected.sort_unstable();
+        selected.dedup();
+        if selected.is_empty() {
+            return;
+        }
         self.selection = vec![graph.clip.clone()];
         self.begin_echo();
         let Some(clip) = self.echo_clip_mut(&graph.clip) else {
@@ -9790,10 +10074,18 @@ impl Studio {
                 migrate_time_remap(clip);
             }
             let keys = clip.keyframes.track_mut(property);
-            let removed = (index < keys.len()).then(|| keys.remove(index));
+            let fallback = selected
+                .iter()
+                .filter_map(|&index| keys.get(index).map(|key| key.value))
+                .next_back();
+            for &index in selected.iter().rev() {
+                if index < keys.len() {
+                    keys.remove(index);
+                }
+            }
             let empty = keys.is_empty();
-            if empty && let Some(removed) = removed {
-                set_clip_property(clip, property, removed.value);
+            if empty && let Some(value) = fallback {
+                set_clip_property(clip, property, value);
                 if property == KeyframeProperty::TimeRemap {
                     clip.duration = (covered / clip.speed.max(0.0625)).max(f64::from(MIN_DURATION));
                 }
@@ -9804,8 +10096,10 @@ impl Studio {
         } else {
             let covered = clip.duration * clip.speed;
             if let Some(points) = clip.speed_curve.as_mut() {
-                if index < points.len() {
-                    points.remove(index);
+                for &index in selected.iter().rev() {
+                    if index < points.len() {
+                        points.remove(index);
+                    }
                 }
                 if points.is_empty() {
                     clip.speed_curve = None;
@@ -9817,17 +10111,28 @@ impl Studio {
             }
         }
         if let Some(state) = self.keyframe_graph.as_mut() {
-            state.selected = None;
+            state.selected.clear();
+            state.primary = None;
+            state.drag = None;
         }
         self.clip_commit();
     }
 
-    pub fn graph_ease_changed(&mut self, index: i32) {
+    fn graph_ease_changed(&mut self, index: i32) {
         let Some(graph) = self.keyframe_graph.clone() else {
             return;
         };
-        let (Some(property), Some(selected)) = (graph.property.keyframe(), graph.selected) else {
+        let Some(property) = graph.property.keyframe() else {
             return;
+        };
+        if graph.selected.is_empty() {
+            return;
+        }
+        let ease = match index {
+            1 => KeyframeEase::In,
+            2 => KeyframeEase::Out,
+            3 => KeyframeEase::InOut,
+            _ => KeyframeEase::Linear,
         };
         self.selection = vec![graph.clip.clone()];
         self.begin_echo();
@@ -9837,27 +10142,25 @@ impl Studio {
             if property == KeyframeProperty::TimeRemap {
                 migrate_time_remap(clip);
             }
-            if let Some(key) = clip.keyframes.track_mut(property).get_mut(selected) {
-                key.ease = match index {
-                    1 => KeyframeEase::In,
-                    2 => KeyframeEase::Out,
-                    3 => KeyframeEase::InOut,
-                    _ => KeyframeEase::Linear,
-                };
-                key.temporal_curve = None;
-                if property == KeyframeProperty::TimeRemap {
-                    sync_time_remap(clip, covered, rest);
+            let keys = clip.keyframes.track_mut(property);
+            for selected in graph.selected {
+                if let Some(key) = keys.get_mut(selected) {
+                    key.ease = ease;
+                    key.temporal_curve = None;
                 }
+            }
+            if property == KeyframeProperty::TimeRemap {
+                sync_time_remap(clip, covered, rest);
             }
         }
         self.clip_commit();
     }
 
-    pub fn graph_curve_pressed(&mut self) {
+    fn graph_curve_pressed(&mut self) {
         let Some(graph) = self.keyframe_graph.clone() else {
             return;
         };
-        if graph.property.keyframe().is_none() || graph.selected.unwrap_or(0) == 0 {
+        if graph.property.keyframe().is_none() || graph.primary.unwrap_or(0) == 0 {
             return;
         }
         self.selection = vec![graph.clip];
@@ -9865,11 +10168,11 @@ impl Studio {
         self.begin_echo();
     }
 
-    pub fn graph_curve_changed(&mut self, x1: f32, y1: f32, x2: f32, y2: f32) {
+    fn graph_curve_changed(&mut self, x1: f32, y1: f32, x2: f32, y2: f32) {
         let Some(graph) = self.keyframe_graph.clone() else {
             return;
         };
-        let (Some(property), Some(selected)) = (graph.property.keyframe(), graph.selected) else {
+        let (Some(property), Some(selected)) = (graph.property.keyframe(), graph.primary) else {
             return;
         };
         if selected == 0 {
@@ -9902,11 +10205,11 @@ impl Studio {
         self.schedule_preview_frame();
     }
 
-    pub fn graph_curve_released(&mut self) {
+    fn graph_curve_released(&mut self) {
         self.finish_graph_preview();
     }
 
-    pub fn graph_post_changed(&mut self, index: i32) {
+    fn graph_post_changed(&mut self, index: i32) {
         let Some(graph) = self.keyframe_graph.clone() else {
             return;
         };
@@ -9937,7 +10240,7 @@ impl Studio {
         self.clip_commit();
     }
 
-    pub fn keyframe_marker_selected(&mut self, clip_id: &str, seconds: f32) {
+    pub fn keyframe_marker_selected(&mut self, clip_id: &str, seconds: f32, additive: bool) {
         let Some(clip) = self.timeline().clip(clip_id).cloned() else {
             return;
         };
@@ -9980,15 +10283,38 @@ impl Studio {
         };
         self.selection = vec![clip_id.to_owned()];
         self.playhead = seconds.max(0.0);
+        if additive
+            && let Some(graph) = self
+                .keyframe_graph
+                .as_mut()
+                .filter(|graph| graph.clip == clip_id && graph.property == property)
+        {
+            if let Some(position) = graph.selected.iter().position(|index| *index == selected) {
+                graph.selected.remove(position);
+            } else {
+                graph.selected.push(selected);
+                graph.selected.sort_unstable();
+            }
+            graph.primary = graph
+                .selected
+                .contains(&selected)
+                .then_some(selected)
+                .or_else(|| graph.selected.last().copied());
+            graph.drag = None;
+            return;
+        }
         self.keyframe_graph = Some(KeyframeGraphState {
             clip: clip_id.to_owned(),
             property,
-            selected: Some(selected),
+            mode: property.default_mode(),
+            selected: vec![selected],
+            primary: Some(selected),
+            drag: None,
         });
         self.schedule_preview_frame();
     }
 
-    pub fn graph_closed(&mut self) {
+    fn graph_closed(&mut self) {
         if self.echo.is_some() {
             self.finish_graph_preview();
         }
@@ -10007,6 +10333,9 @@ impl Studio {
     fn finish_graph_preview(&mut self) {
         self.preview_interactive = false;
         self.preview_flattened = None;
+        if let Some(graph) = self.keyframe_graph.as_mut() {
+            graph.drag = None;
+        }
         let generation = self.preview_generation;
         self.clip_commit();
         // A real commit calls after_change, which already requests the final
@@ -10141,7 +10470,60 @@ fn wrap_caption(sentence: &str) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Footprint, Studio, moved_graph_at, script_captions, snap_graph_at};
+    use super::{
+        Footprint, GraphMode, GraphPoint, GraphProperty, Studio, apply_mask_shape_preset,
+        graph_plot, moved_graph_at, reset_mask_properties, script_captions, snap_graph_at,
+        source_time_at,
+    };
+    use concat_project::model::{ClipKeyframes, ClipMask, KeyframeEase, MaskProperty, MaskShape};
+
+    #[test]
+    fn resetting_a_mask_forgets_only_its_own_motion() {
+        let mut mask = ClipMask::new("mask1".to_owned(), MaskShape::Heart);
+        mask.position_x = 0.5;
+        mask.inverted = true;
+        let mut keys = ClipKeyframes::default();
+        let mask_track = MaskProperty::PositionX.id(&mask.id);
+        keys.set_named_at(&mask_track, 0.5, 0.75, 1e-9);
+        keys.set_named_at("scale", 0.5, 2.0, 1e-9);
+
+        reset_mask_properties(&mut mask, &mut keys);
+
+        assert_eq!(mask, ClipMask::new("mask1".to_owned(), MaskShape::Heart));
+        assert!(keys.named_track(&mask_track).is_empty());
+        assert_eq!(keys.named_track("scale").len(), 1);
+    }
+
+    #[test]
+    fn choosing_a_new_mask_shape_replaces_old_size_keys_only() {
+        let mut mask = ClipMask::new("mask1".to_owned(), MaskShape::Circle);
+        let mut keys = ClipKeyframes::default();
+        let width = MaskProperty::Width.id(&mask.id);
+        let height = MaskProperty::Height.id(&mask.id);
+        let position = MaskProperty::PositionX.id(&mask.id);
+        keys.set_named_at(&width, 0.5, 0.2, 1e-9);
+        keys.set_named_at(&height, 0.5, 0.2, 1e-9);
+        keys.set_named_at(&position, 0.5, 0.75, 1e-9);
+
+        apply_mask_shape_preset(&mut mask, &mut keys, MaskShape::Filmstrip);
+
+        assert_eq!(mask.shape, MaskShape::Filmstrip);
+        assert_eq!(mask.width, 1.2);
+        assert_eq!(mask.height, 0.35);
+        assert!(keys.named_track(&width).is_empty());
+        assert!(keys.named_track(&height).is_empty());
+        assert_eq!(keys.named_track(&position).len(), 1);
+    }
+
+    #[test]
+    fn mask_tracking_source_time_follows_the_retime_curve_and_reverse() {
+        let curve = concat_core::SpeedCurve::new(&[(0.0, 0.5), (1.0, 2.0)]).unwrap();
+        let halfway = source_time_at(10.0, 4.0, 1.25, false, 0.5, Some(&curve));
+        assert!((halfway - 11.75).abs() < 1e-9);
+        let reverse = source_time_at(10.0, 4.0, 1.25, true, 0.5, Some(&curve));
+        assert!((reverse - 13.25).abs() < 1e-9);
+        assert_eq!(source_time_at(10.0, 4.0, 1.25, false, 0.5, None), 12.5);
+    }
 
     /// A script becomes one caption per sentence, a hand line break is
     /// kept, a long sentence wraps at its words, and each line is held for
@@ -10192,6 +10574,23 @@ mod tests {
     fn graph_points_cannot_cross_a_neighbour() {
         let moved = moved_graph_at(0.25, None, Some(0.5), 0.9, 4.0, 30.0);
         assert!((moved - 59.0 / 120.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn graph_modes_draw_value_speed_and_step_from_the_same_keys() {
+        let points: Vec<GraphPoint> = vec![
+            (0.0, 0.0, KeyframeEase::Linear, None),
+            (0.5, 2.0, KeyframeEase::Linear, None),
+            (1.0, 0.0, KeyframeEase::Linear, None),
+        ];
+        let value = graph_plot(GraphProperty::Rotation, GraphMode::Value, &points);
+        let speed = graph_plot(GraphProperty::Rotation, GraphMode::Speed, &points);
+        let step = graph_plot(GraphProperty::LayerOrder, GraphMode::Step, &points);
+        assert!(value.path.starts_with('M'));
+        assert!(speed.min < 0.0 && speed.max > 0.0);
+        assert_eq!(speed.point_values.len(), points.len());
+        assert!(step.path.contains(" L "));
+        assert_eq!(step.point_values, vec![0.0, 2.0, 0.0]);
     }
 
     /// A quarter turn swaps the bounds' pixel extents, which in fractions

@@ -207,18 +207,21 @@ export component NumberField inherits Rectangle {
         }
     }
 
-    // Covers the text but stops short of the keyframe diamond, and steps aside
-    // once the field is being typed into so the caret and selection work.
-    // Focus is withheld until the gesture resolves as a click.
+    // Covers the text but stops short of the keyframe diamond. It deliberately
+    // stays enabled while the text input has focus: a value that was clicked
+    // once must still scrub on the next drag. A click focuses/selects the text;
+    // a horizontal move owns the same gesture and edits the number instead.
     scrub := TouchArea {
         x: 0;
         y: 0;
         width: root.width - root.keyframe-slot;
         height: root.height;
-        enabled: root.enabled && !ti.has-focus;
-        mouse-cursor: ew-resize;
+        enabled: root.enabled;
+        mouse-cursor: MouseCursor.ew-resize;
 
         property <float> origin;
+        property <length> start-x;
+        property <bool> dragging;
         property <bool> travelled;
         property <bool> shift;
         property <bool> alt;
@@ -226,21 +229,39 @@ export component NumberField inherits Rectangle {
         pointer-event(event) => {
             self.shift = event.modifiers.shift;
             self.alt = event.modifiers.alt;
-            if (event.kind == PointerEventKind.down) {
+            if (event.kind == PointerEventKind.down
+                && event.button == PointerEventButton.left) {
+                // Blurring first commits any number being typed. The drag then
+                // starts from that committed value and display updates are no
+                // longer withheld by TextInput's focused editing buffer.
+                if (ti.has-focus) {
+                    Focus.release();
+                }
                 self.origin = root.value;
+                self.start-x = self.mouse-x;
+                self.dragging = true;
                 self.travelled = false;
-            } else if (event.kind == PointerEventKind.up && !self.travelled) {
-                ti.focus();
+            } else if (event.kind == PointerEventKind.up
+                || event.kind == PointerEventKind.cancel) {
+                if (self.dragging
+                    && event.kind == PointerEventKind.up
+                    && !self.travelled) {
+                    ti.focus();
+                }
+                self.dragging = false;
             }
         }
 
         moved => {
-            if (Math.abs((self.mouse-x - self.pressed-x) / 1px) > 3) {
+            if (!self.dragging) {
+                return;
+            }
+            if (Math.abs((self.mouse-x - self.start-x) / 1px) > 3) {
                 self.travelled = true;
             }
             if (self.travelled) {
                 root.apply(self.origin
-                    + ((self.mouse-x - self.pressed-x) / root.px-per-step)
+                    + ((self.mouse-x - self.start-x) / root.px-per-step)
                         * root.step * (self.shift ? 10 : self.alt ? 0.1 : 1),
                     self.alt);
             }

@@ -340,7 +340,7 @@ export component App inherits Window {
             }
             if (event.text == Key.Space) { Editor.play-toggled(); return accept; }
             if (event.text == Key.Delete || event.text == Key.Backspace) {
-                Editor.delete-selected();
+                Editor.shortcut("delete");
                 return accept;
             }
             if (event.text == Key.Home) { Editor.shortcut("start"); return accept; }

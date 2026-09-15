@@ -45,7 +45,7 @@ mod sysinfo;
 
 use dock::{Dock, SEAT_MIN_GRAB, SEAT_MIN_H, SEAT_MIN_W};
 use host::{Host, Shell};
-use studio::{Models, OUTPUTS, RESOLUTIONS, START_RATES, Studio};
+use studio::{GraphAction, Models, OUTPUTS, RESOLUTIONS, START_RATES, Studio};
 use ui::*;
 
 /// Builds the window, binds it to the engine, and runs it until it closes.
@@ -914,45 +914,70 @@ pub fn run() -> Result<(), slint::PlatformError> {
         }
     }));
     editor.on_keyframe_graph_property_changed(on_graph!(|state, index: i32| {
-        state.graph_property_changed(index);
+        state.graph_action(GraphAction::PropertyChanged(index));
     }));
-    editor.on_keyframe_graph_point_pressed(on_graph!(|state, index: i32| {
-        state.graph_point_pressed(index);
+    editor.on_keyframe_graph_mode_changed(on_graph!(|state, index: i32| {
+        state.graph_action(GraphAction::ModeChanged(index));
+    }));
+    editor.on_keyframe_graph_point_pressed(on_graph!(|state, index: i32, additive: bool| {
+        state.graph_action(GraphAction::PointPressed { index, additive });
     }));
     editor.on_keyframe_graph_point_dragged(on_graph!(|state, index: i32, at: f32, value: f32| {
-        state.graph_point_dragged(index, at, value);
+        state.graph_action(GraphAction::PointDragged { index, at, value });
     }));
     editor.on_keyframe_graph_point_released(on_window!(|state| {
-        state.graph_point_released();
+        state.graph_action(GraphAction::EditFinished);
     }));
     editor.on_keyframe_graph_point_added(on_window!(|state, at: f32, value: f32| {
-        state.graph_point_added(at, value);
+        state.graph_action(GraphAction::PointAdded { at, value });
     }));
-    editor.on_keyframe_graph_point_removed(on_window!(|state, index: i32| {
-        state.graph_point_removed(index);
+    editor.on_keyframe_graph_selection_changed(on_graph!(
+        |state, from_at: f32, to_at: f32, from_value: f32, to_value: f32, additive: bool| {
+            state.graph_action(GraphAction::SelectionChanged {
+                from_at,
+                to_at,
+                from_value,
+                to_value,
+                additive,
+            });
+        }
+    ));
+    editor.on_keyframe_graph_delete_selected(on_window!(|state| {
+        state.graph_action(GraphAction::DeleteSelected);
+    }));
+    editor.on_keyframe_graph_copy_selected(on_graph!(|state| {
+        state.graph_action(GraphAction::CopySelected);
+    }));
+    editor.on_keyframe_graph_paste(on_window!(|state| {
+        state.graph_action(GraphAction::PasteAtPlayhead);
+    }));
+    editor.on_keyframe_graph_select_all(on_graph!(|state| {
+        state.graph_action(GraphAction::SelectAll);
     }));
     editor.on_keyframe_graph_ease_changed(on_window!(|state, index: i32| {
-        state.graph_ease_changed(index);
+        state.graph_action(GraphAction::EaseChanged(index));
     }));
     editor.on_keyframe_graph_curve_pressed(on_graph!(|state| {
-        state.graph_curve_pressed();
+        state.graph_action(GraphAction::CurvePressed);
     }));
     editor.on_keyframe_graph_curve_changed(on_graph!(
         |state, x1: f32, y1: f32, x2: f32, y2: f32| {
-            state.graph_curve_changed(x1, y1, x2, y2);
+            state.graph_action(GraphAction::CurveChanged { x1, y1, x2, y2 });
         }
     ));
     editor.on_keyframe_graph_curve_released(on_window!(|state| {
-        state.graph_curve_released();
+        state.graph_action(GraphAction::CurveReleased);
     }));
     editor.on_keyframe_graph_post_changed(on_window!(|state, index: i32| {
-        state.graph_post_changed(index);
+        state.graph_action(GraphAction::PostChanged(index));
     }));
-    editor.on_keyframe_marker_selected(on_window!(|state, clip_id: SharedString, seconds: f32| {
-        state.keyframe_marker_selected(clip_id.as_str(), seconds);
-    }));
+    editor.on_keyframe_marker_selected(on_window!(
+        |state, clip_id: SharedString, seconds: f32, additive: bool| {
+            state.keyframe_marker_selected(clip_id.as_str(), seconds, additive);
+        }
+    ));
     editor.on_keyframe_graph_closed(on_window!(|state| {
-        state.graph_closed();
+        state.graph_action(GraphAction::Close);
     }));
 
     // ── the keyboard ──
@@ -1229,7 +1254,7 @@ pub fn run() -> Result<(), slint::PlatformError> {
                             let end = state.duration();
                             state.seek(end);
                         }
-                        "delete" => state.delete_selected(),
+                        "delete" => state.shortcut("delete"),
                         "split" => {
                             let at = state.playhead;
                             state.split_at(at, false);
