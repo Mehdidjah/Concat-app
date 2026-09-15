@@ -14,41 +14,125 @@ use std::sync::OnceLock;
 use concat_core::frame::Frame;
 use concat_project::model::{ClipMask, MaskProperty, MaskShape};
 
-use crate::Mask;
+use crate::{Mapping, Mask};
 
 /// Applies all enabled masks as one additive alpha matte. An empty Brush or
 /// Pen is ignored until the user puts a path in it, so choosing a drawing
 /// tool never makes the picture disappear before the first stroke.
 pub fn cut(frame: &mut Frame, masks: &[ClipMask], at: f64, text_masks: &BTreeMap<String, Mask>) {
+    cut_mapped(frame, masks, &Mapping::IDENTITY, at, text_masks);
+}
+
+/// Evaluates authored source-space coordinates through the decoder's crop
+/// and flips. The decoded picture's bounds are not the original source's.
+pub fn cut_mapped(
+    frame: &mut Frame,
+    masks: &[ClipMask],
+    mapping: &Mapping,
+    at: f64,
+    text_masks: &BTreeMap<String, Mask>,
+) {
     let width = frame.width();
     let height = frame.height();
     if width == 0 || height == 0 {
         return;
     }
+    let [left, top, right, bottom] = mapping.crop.map(f64::from);
+    let crop_width = (1.0 - left - right).max(0.0);
+    let crop_height = (1.0 - top - bottom).max(0.0);
+    let source_width = f64::from(width) / crop_width.max(0.1);
+    let source_height = f64::from(height) / crop_height.max(0.1);
     let evaluated: Vec<_> = masks
         .iter()
         .filter(|mask| {
             mask.enabled
-                && (!matches!(mask.shape, MaskShape::Brush | MaskShape::Pen)
-                    || !mask.points.is_empty())
+                && match mask.shape {
+                    MaskShape::Brush => !mask.points.is_empty(),
+                    MaskShape::Pen => mask.points.len() >= 3,
+                    _ => true,
+                }
         })
-        .map(|mask| Evaluated::new(mask, at, width, height, text_masks.get(&mask.id)))
+        .map(|mask| {
+            Evaluated::new(
+                mask,
+                at,
+                source_width,
+                source_height,
+                text_masks.get(&mask.id),
+            )
+        })
         .collect();
     if evaluated.is_empty() {
         return;
     }
 
+    let xs: Vec<f64> = (0..width)
+        .map(|x| {
+            let fraction = (f64::from(x) + 0.5) / f64::from(width);
+            let fraction = if mapping.flip_h {
+                1.0 - fraction
+            } else {
+                fraction
+            };
+            (left + fraction * crop_width) * source_width
+        })
+        .collect();
+    let ys: Vec<f64> = (0..height)
+        .map(|y| {
+            let fraction = (f64::from(y) + 0.5) / f64::from(height);
+            let fraction = if mapping.flip_v {
+                1.0 - fraction
+            } else {
+                fraction
+            };
+            (top + fraction * crop_height) * source_height
+        })
+        .collect();
+
     let row = width as usize * 4;
-    for y in 0..height {
-        for x in 0..width {
+    // Borrow once: each `pixels_mut` call updates the frame's upload
+    // identity. The old inner-loop call did that once for every pixel.
+    let pixels = frame.pixels_mut();
+    let workers = if width as usize * height as usize >= 400_000 {
+        std::thread::available_parallelism()
+            .map(|count| count.get())
+            .unwrap_or(1)
+            .clamp(1, 8)
+    } else {
+        1
+    };
+    if workers == 1 {
+        cut_band(pixels, row, 0, &xs, &ys, &evaluated);
+        return;
+    }
+    let rows_per = (height as usize).div_ceil(workers);
+    std::thread::scope(|scope| {
+        for (chunk, band) in pixels.chunks_mut(rows_per * row).enumerate() {
+            let first_row = chunk * rows_per;
+            let evaluated = &evaluated;
+            let xs = &xs;
+            let ys = &ys;
+            scope.spawn(move || cut_band(band, row, first_row, xs, ys, evaluated));
+        }
+    });
+}
+
+fn cut_band(
+    band: &mut [u8],
+    row: usize,
+    first_row: usize,
+    xs: &[f64],
+    ys: &[f64],
+    evaluated: &[Evaluated<'_>],
+) {
+    for (row_index, line) in band.chunks_exact_mut(row).enumerate() {
+        let y = ys[first_row + row_index];
+        for (x, pixel) in line.chunks_exact_mut(4).enumerate() {
             let mut matte = 0.0_f32;
-            for mask in &evaluated {
-                matte = matte.max(mask.coverage(x as f64 + 0.5, y as f64 + 0.5));
+            for mask in evaluated {
+                matte = matte.max(mask.coverage(xs[x], y));
             }
-            let alpha = y as usize * row + x as usize * 4 + 3;
-            let source_alpha = frame.pixels()[alpha];
-            frame.pixels_mut()[alpha] =
-                (f32::from(source_alpha) * matte.clamp(0.0, 1.0)).round() as u8;
+            pixel[3] = (f32::from(pixel[3]) * matte.clamp(0.0, 1.0)).round() as u8;
         }
     }
 }
@@ -72,13 +156,11 @@ impl<'a> Evaluated<'a> {
     fn new(
         mask: &'a ClipMask,
         at: f64,
-        frame_width: u32,
-        frame_height: u32,
+        frame_width: f64,
+        frame_height: f64,
         text: Option<&'a Mask>,
     ) -> Self {
         let value = |property: MaskProperty| mask.value_at(property, at);
-        let frame_width = f64::from(frame_width);
-        let frame_height = f64::from(frame_height);
         let width = value(MaskProperty::Width).clamp(0.01, 4.0) * frame_width;
         let height = value(MaskProperty::Height).clamp(0.01, 4.0) * frame_height;
         let angle = value(MaskProperty::Rotation).to_radians();
@@ -138,12 +220,8 @@ impl<'a> Evaluated<'a> {
             MaskShape::Circle => {
                 self.from_distance(((x * 2.0).hypot(y * 2.0) - 1.0) * self.min_dimension * 0.5)
             }
-            MaskShape::Star => {
-                self.from_distance(polygon_distance(x, y, star_points()) * self.min_dimension)
-            }
-            MaskShape::Heart => {
-                self.from_distance(polygon_distance(x, y, heart_points()) * self.min_dimension)
-            }
+            MaskShape::Star => self.from_distance(star_field().sample(x, y) * self.min_dimension),
+            MaskShape::Heart => self.from_distance(heart_field().sample(x, y) * self.min_dimension),
             MaskShape::Text => self.text_coverage(x, y, self.text),
             MaskShape::Brush => self.brush_coverage(x, y),
             MaskShape::Pen => {
@@ -231,6 +309,64 @@ fn polygon_distance(x: f64, y: f64, points: &[(f64, f64)]) -> f64 {
     if inside { -distance } else { distance }
 }
 
+/// A canonical signed-distance map for complex built-in outlines. Computing
+/// 64 segment distances for every pixel of every animated frame made a
+/// 960×540 Heart mask take hundreds of milliseconds; moving/rotating the
+/// mask should only resample its unchanged local shape.
+const FIELD_SIDE: usize = 512;
+
+struct DistanceField {
+    signed: Box<[f32]>,
+}
+
+impl DistanceField {
+    fn new(points: &[(f64, f64)]) -> Self {
+        let signed = (0..FIELD_SIDE)
+            .flat_map(|y| {
+                (0..FIELD_SIDE).map(move |x| {
+                    let x = x as f64 * 2.0 / (FIELD_SIDE - 1) as f64 - 1.0;
+                    let y = y as f64 * 2.0 / (FIELD_SIDE - 1) as f64 - 1.0;
+                    polygon_distance(x, y, points) as f32
+                })
+            })
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
+        Self { signed }
+    }
+
+    fn sample(&self, x: f64, y: f64) -> f64 {
+        // The outlines live within ±0.5. Outside this wider domain even
+        // heavy feathering is background; avoid a clamped edge sample.
+        let outside = (x.abs() - 1.0).max(y.abs() - 1.0).max(0.0);
+        if outside > 0.0 {
+            return 0.5 + outside;
+        }
+        let scale = (FIELD_SIDE - 1) as f64 / 2.0;
+        let px = (x + 1.0) * scale;
+        let py = (y + 1.0) * scale;
+        let x0 = px.floor() as usize;
+        let y0 = py.floor() as usize;
+        let x1 = (x0 + 1).min(FIELD_SIDE - 1);
+        let y1 = (y0 + 1).min(FIELD_SIDE - 1);
+        let fx = (px - x0 as f64) as f32;
+        let fy = (py - y0 as f64) as f32;
+        let at = |x: usize, y: usize| self.signed[y * FIELD_SIDE + x];
+        let top = at(x0, y0) * (1.0 - fx) + at(x1, y0) * fx;
+        let bottom = at(x0, y1) * (1.0 - fx) + at(x1, y1) * fx;
+        f64::from(top * (1.0 - fy) + bottom * fy)
+    }
+}
+
+fn star_field() -> &'static DistanceField {
+    static FIELD: OnceLock<DistanceField> = OnceLock::new();
+    FIELD.get_or_init(|| DistanceField::new(star_points()))
+}
+
+fn heart_field() -> &'static DistanceField {
+    static FIELD: OnceLock<DistanceField> = OnceLock::new();
+    FIELD.get_or_init(|| DistanceField::new(heart_points()))
+}
+
 fn star_points() -> &'static [(f64, f64)] {
     static POINTS: OnceLock<Vec<(f64, f64)>> = OnceLock::new();
     POINTS
@@ -270,6 +406,46 @@ fn heart_points() -> &'static [(f64, f64)] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cached_outline_distances_track_the_analytic_shapes() {
+        for (field, outline) in [
+            (heart_field(), heart_points()),
+            (star_field(), star_points()),
+        ] {
+            for (x, y) in [
+                (0.0, 0.0),
+                (0.4, 0.2),
+                (-0.3, 0.1),
+                (0.15, -0.45),
+                (0.6, 0.5),
+            ] {
+                let analytic = polygon_distance(x, y, outline);
+                assert!(
+                    (field.sample(x, y) - analytic).abs() < 0.01,
+                    "{x} {y}: cached {} vs analytic {analytic}",
+                    field.sample(x, y)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn geometric_mask_follows_source_crop_and_flip() {
+        let mut mask = ClipMask::new("shape".to_owned(), MaskShape::Circle);
+        mask.position_x = 0.8;
+        mask.width = 0.15;
+        mask.height = 0.3;
+        let mapping = Mapping {
+            crop: [0.5, 0.0, 0.0, 0.0],
+            flip_h: true,
+            flip_v: false,
+        };
+        let mut frame = Frame::black(64, 64);
+        cut_mapped(&mut frame, &[mask], &mapping, 0.0, &BTreeMap::new());
+        assert!(frame.pixel(13, 32).unwrap()[3] > 200);
+        assert_eq!(frame.pixel(51, 32).unwrap()[3], 0);
+    }
 
     fn masked(shape: MaskShape, inverted: bool) -> Frame {
         let mut frame = Frame::from_rgba(32, 32, vec![255; 32 * 32 * 4]).unwrap();

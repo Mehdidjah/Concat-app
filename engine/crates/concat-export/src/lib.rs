@@ -900,6 +900,7 @@ impl CutoutJob {
 struct GeometricMaskJob {
     masks: Vec<ClipMask>,
     text_masks: BTreeMap<String, Mask>,
+    mapping: Mapping,
     /// Ordinary shapes do not change between frames. Cache their alpha
     /// coverage by decoded size rather than evaluating every playback frame.
     static_mattes: std::sync::Mutex<HashMap<(u32, u32), std::sync::Arc<[u8]>>>,
@@ -947,6 +948,14 @@ impl GeometricMaskJob {
         Some(Self {
             masks: clip.masks.clone(),
             text_masks,
+            mapping: Mapping {
+                crop: clip
+                    .crop
+                    .map(|edges| edges.map(|edge| edge as f32))
+                    .unwrap_or([0.0; 4]),
+                flip_h: clip.flip_h,
+                flip_v: clip.flip_v,
+            },
             static_mattes: std::sync::Mutex::new(HashMap::new()),
         })
     }
@@ -960,7 +969,13 @@ impl GeometricMaskJob {
             return std::sync::Arc::clone(matte);
         }
         let mut opaque = Frame::black(width, height);
-        concat_vision::cut_geometric(&mut opaque, &self.masks, 0.0, &self.text_masks);
+        concat_vision::cut_geometric_mapped(
+            &mut opaque,
+            &self.masks,
+            &self.mapping,
+            0.0,
+            &self.text_masks,
+        );
         let matte: std::sync::Arc<[u8]> = opaque
             .pixels()
             .chunks_exact(4)
@@ -985,7 +1000,13 @@ impl GeometricMaskJob {
             }
             return out;
         }
-        concat_vision::cut_geometric(&mut out, &self.masks, at, &self.text_masks);
+        concat_vision::cut_geometric_mapped(
+            &mut out,
+            &self.masks,
+            &self.mapping,
+            at,
+            &self.text_masks,
+        );
         out
     }
 }

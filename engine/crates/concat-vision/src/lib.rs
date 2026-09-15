@@ -57,6 +57,7 @@ pub use apply::{Mapping, cut, highlight};
 #[cfg(feature = "infer")]
 pub use brush::{Brush, Embedding};
 pub use geometric::cut as cut_geometric;
+pub use geometric::cut_mapped as cut_geometric_mapped;
 pub use mask::Mask;
 pub use models::ModelId;
 #[cfg(feature = "infer")]
