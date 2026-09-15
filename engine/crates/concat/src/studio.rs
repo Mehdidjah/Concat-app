@@ -2418,6 +2418,7 @@ impl Studio {
             transport: slint::Timer::default(),
             preview_frame: slint::Timer::default(),
             clipboard: None,
+            graph_clipboard: None,
             preview: slint::Image::default(),
             preview_busy: false,
             preview_wanted: false,
@@ -2846,41 +2847,8 @@ impl Studio {
         }) else {
             return;
         };
-        // The echo when there is one: a picture being dragged on the stage
-        // is drawn where the pointer has it, not where the document last
-        // had it. Same flattening the session does for itself, project
-        // folder included: that is what names a cutout's masks, and
-        // without it the monitor would show every cutout as shot.
         let (width, height) = self.output_size();
-        // The flattening is the document's, not the frame's: kept between
-        // frames of an unchanged document and handed over by pointer, so
-        // playback and scrubbing neither flatten nor plan again. A gesture
-        // in flight - the echo - is not the document, and flattens fresh.
-        let cached = self.echo.is_none()
-            && self
-                .flat
-                .as_ref()
-                .is_some_and(|(at, w, h, _)| *at == self.revision && *w == width && *h == height);
-        let clips = if cached {
-            std::sync::Arc::clone(&self.flat.as_ref().expect("checked").3)
-        } else {
-            let mut clips = concat_export::flatten::flatten_timeline_in(
-                self.project(),
-                None,
-                Some(&project_dir),
-            );
-            // Titles, painted to pictures and rejoined; see concat-host's titles.
-            for title in self.host.titles.clips(self.project(), width, height) {
-                self.title_blocks
-                    .insert(title.clip_id, (title.block, title.offset));
-                clips.push(title.clip);
-            }
-            let clips = std::sync::Arc::new(clips);
-            if self.echo.is_none() {
-                self.flat = Some((self.revision, width, height, std::sync::Arc::clone(&clips)));
-            }
-            clips
-        };
+        let clips = self.preview_clips(width, height, &project_dir);
         // The frame's own additions - a look being shown, a cutout being
         // painted - go on a copy, so the kept list stays the document's.
         let mut own: Option<Vec<concat_export::ExportClip>> = None;
@@ -2889,15 +2857,17 @@ impl Studio {
             1 => 0.5,
             _ => 0.25,
         };
-        // Keep live feedback cheap even for 4K/8K projects. A graph drag gets
-        // a 960 px long edge and playback a 1280 px one; pausing or releasing
-        // immediately requests the configured quality again.
-        let scale = if self.preview_interactive {
+        // Keep live feedback cheap even for 4K/8K projects. An inspector,
+        // stage or graph gesture gets a 720 px long edge and playback a 960
+        // px one; pausing or releasing requests configured quality again.
+        // `echo` covers pointer gestures which predate `preview_interactive`.
+        let live_edit = self.preview_interactive || self.commit_pending || self.echo.is_some();
+        let scale = if live_edit {
             let long_edge = f64::from(width.max(height)).max(1.0);
-            configured_scale.min(0.5).min(960.0 / long_edge)
+            configured_scale.min(0.5).min(720.0 / long_edge)
         } else if self.playing {
             let long_edge = f64::from(width.max(height)).max(1.0);
-            configured_scale.min(1280.0 / long_edge)
+            configured_scale.min(960.0 / long_edge)
         } else {
             configured_scale
         };
@@ -2988,13 +2958,15 @@ impl Studio {
             time: f64::from(self.playhead),
             width,
             height,
+            live: self.playing || live_edit,
+            prewarm: true,
         };
         let monitor = self.host.monitor.clone();
         let prefetch_monitor = monitor.clone();
         let prefetch_clips = clips.clone();
         let prefetch_settings = settings.clone();
         let generation = self.preview_generation;
-        let interactive = self.preview_interactive;
+        let interactive = live_edit;
         let playing = self.playing;
         self.preview_busy = true;
         self.preview_wanted = false;
@@ -3021,8 +2993,10 @@ impl Studio {
                 // one. Otherwise any renderer taking just over one tick has
                 // every result discarded and the monitor appears frozen.
                 // Results from a mode that has since ended remain obsolete.
+                let studio_interactive =
+                    studio.preview_interactive || studio.commit_pending || studio.echo.is_some();
                 let active_stream =
-                    (playing && studio.playing) || (interactive && studio.preview_interactive);
+                    (playing && studio.playing) || (interactive && studio_interactive);
                 if fresh || active_stream {
                     let mut failed = false;
                     let mut rendered = false;
@@ -3062,12 +3036,13 @@ impl Studio {
                     // waiting to render. During playback one frame is enough;
                     // the reader itself remains warm for following pulls.
                     if rendered && !interactive && !studio.preview_wanted {
-                        std::thread::spawn(move || {
+                        let frames = if playing && studio.playing { 3 } else { 2 };
+                        spawn_detached(move || {
                             prefetch_monitor.prefetch(
                                 prefetch_clips,
                                 &prefetch_settings,
                                 spec,
-                                if playing { 1 } else { 2 },
+                                frames,
                             );
                         });
                     }
@@ -3079,42 +3054,74 @@ impl Studio {
         );
     }
 
-    /// Builds the export-shaped clip list once per stable document or graph
-    /// gesture. Playback changes only time, so it reuses the list. Position,
-    /// scale, rotation, opacity and effect-key edits replace only the selected
-    /// clip's animation array; an echo outside that case (including time
-    /// remapping) changes structure and deliberately takes the full path.
-    fn preview_clips(&mut self, width: u32, height: u32) -> Vec<ExportClip> {
-        let animation_only = self.preview_interactive
-            && self
-                .keyframe_graph
-                .as_ref()
-                .is_some_and(|graph| graph.property != GraphProperty::Speed);
+    /// Builds the export-shaped clip list once per stable document or pointer
+    /// gesture. Playback changes only time, so it reuses the list. During an
+    /// inspector, stage or graph gesture the one changed clip is refreshed in
+    /// the cached list; timeline-structural changes deliberately take the full
+    /// path.
+    fn preview_clips(
+        &mut self,
+        width: u32,
+        height: u32,
+        project_dir: &std::path::Path,
+    ) -> Arc<Vec<ExportClip>> {
         let stable_document = self.echo.is_none();
-        if !animation_only && !stable_document {
-            self.preview_flattened = None;
-            return self.flatten_preview_clips(width, height);
+
+        if stable_document {
+            let cached = self
+                .flat
+                .as_ref()
+                .is_some_and(|(at, w, h, _)| *at == self.revision && *w == width && *h == height);
+            if cached {
+                return Arc::clone(&self.flat.as_ref().expect("checked").3);
+            }
+            let clips = Arc::new(self.flatten_preview_clips(width, height, project_dir));
+            self.flat = Some((self.revision, width, height, Arc::clone(&clips)));
+            return clips;
         }
+
+        let patchable = self.echo.as_ref().and_then(|echo| {
+            let id = self.sole_selection()?;
+            let changed = echo.active().clip(&id)?;
+            let committed = self.session.as_ref()?.project().active().clip(&id)?;
+            (changed.kind != model::ClipKind::Text
+                && changed.kind != model::ClipKind::Layer
+                && changed.track_id == committed.track_id
+                && changed.media_id == committed.media_id
+                && changed.start == committed.start
+                && changed.duration == committed.duration
+                && changed.source_start == committed.source_start)
+                .then(|| changed.clone())
+        });
+        let Some(source) = patchable else {
+            self.preview_flattened = None;
+            return Arc::new(self.flatten_preview_clips(width, height, project_dir));
+        };
         if self.preview_flattened.is_none() {
-            self.preview_flattened = Some(self.flatten_preview_clips(width, height));
+            self.preview_flattened = Some(self.flatten_preview_clips(width, height, project_dir));
         }
         let mut clips = self.preview_flattened.clone().unwrap_or_default();
-        if animation_only
-            && let Some(graph) = self.keyframe_graph.as_ref()
-            && let Some(source) = self.timeline().clip(&graph.clip)
-            && let Some(flattened) = clips
-                .iter_mut()
-                .find(|flattened| flattened.source_id == graph.clip)
+        if let Some(flattened) = clips
+            .iter_mut()
+            .find(|flattened| flattened.source_id == source.id)
         {
-            flattened.animation = concat_export::flatten::export_keys(source);
+            refresh_preview_clip(flattened, &source, project_dir);
+            return Arc::new(clips);
         }
-        clips
+        self.preview_flattened = None;
+        Arc::new(self.flatten_preview_clips(width, height, project_dir))
     }
 
-    fn flatten_preview_clips(&mut self, width: u32, height: u32) -> Vec<ExportClip> {
+    fn flatten_preview_clips(
+        &mut self,
+        width: u32,
+        height: u32,
+        project_dir: &std::path::Path,
+    ) -> Vec<ExportClip> {
         // The echo when there is one: a picture being dragged is rendered
         // where the gesture has it, not where the committed document last did.
-        let mut clips = concat_export::flatten::flatten_timeline(self.project(), None);
+        let mut clips =
+            concat_export::flatten::flatten_timeline_in(self.project(), None, Some(project_dir));
         for title in self.host.titles.clips(self.project(), width, height) {
             self.title_blocks
                 .insert(title.clip_id, (title.block, title.offset));
