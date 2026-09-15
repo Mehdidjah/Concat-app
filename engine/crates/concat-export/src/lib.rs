@@ -900,6 +900,9 @@ impl CutoutJob {
 struct GeometricMaskJob {
     masks: Vec<ClipMask>,
     text_masks: BTreeMap<String, Mask>,
+    /// Ordinary shapes do not change between frames. Cache their alpha
+    /// coverage by decoded size rather than evaluating every playback frame.
+    static_mattes: std::sync::Mutex<HashMap<(u32, u32), std::sync::Arc<[u8]>>>,
 }
 
 impl GeometricMaskJob {
@@ -944,11 +947,44 @@ impl GeometricMaskJob {
         Some(Self {
             masks: clip.masks.clone(),
             text_masks,
+            static_mattes: std::sync::Mutex::new(HashMap::new()),
         })
+    }
+
+    fn static_matte(&self, width: u32, height: u32) -> std::sync::Arc<[u8]> {
+        let mut cache = self
+            .static_mattes
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(matte) = cache.get(&(width, height)) {
+            return std::sync::Arc::clone(matte);
+        }
+        let mut opaque = Frame::black(width, height);
+        concat_vision::cut_geometric(&mut opaque, &self.masks, 0.0, &self.text_masks);
+        let matte: std::sync::Arc<[u8]> = opaque
+            .pixels()
+            .chunks_exact(4)
+            .map(|pixel| pixel[3])
+            .collect::<Vec<_>>()
+            .into();
+        // Playback and gesture previews can request different dimensions.
+        // Do not retain an unbounded number of full-size mattes.
+        if cache.len() >= 4 {
+            cache.clear();
+        }
+        cache.insert((width, height), std::sync::Arc::clone(&matte));
+        matte
     }
 
     fn cut(&self, frame: &Frame, at: f64) -> Frame {
         let mut out = frame.clone();
+        if self.masks.iter().all(|mask| mask.keys.is_empty()) {
+            let matte = self.static_matte(frame.width(), frame.height());
+            for (pixel, &coverage) in out.pixels_mut().chunks_exact_mut(4).zip(matte.iter()) {
+                pixel[3] = ((u16::from(pixel[3]) * u16::from(coverage) + 127) / 255) as u8;
+            }
+            return out;
+        }
         concat_vision::cut_geometric(&mut out, &self.masks, at, &self.text_masks);
         out
     }
@@ -1009,7 +1045,6 @@ fn render_picture(
     let (mut compositor, gpu) = best_compositor();
     let BuiltTimeline {
         timeline,
-        preview_clips: _,
         stills,
         decode_sizes,
         filter_chains,
@@ -1225,9 +1260,6 @@ fn render_picture(
 /// engine's model has no field for.
 struct BuiltTimeline {
     timeline: Timeline,
-    /// Engine clip handles in flattened visual-clip order. Preview cache hits
-    /// update only their animation tracks and mask-key data.
-    preview_clips: Vec<ClipId>,
     /// Clips that are stills: one-frame streams, decoded looping.
     stills: std::collections::HashSet<ClipId>,
     /// Contain-fitted decode size per clip, where the source's size is known.
@@ -1436,7 +1468,6 @@ fn build_timeline(
     let mut cutouts: HashMap<ClipId, CutoutJob> = HashMap::new();
     let mut highlight: Option<ClipId> = None;
     let mut geometric_masks: HashMap<ClipId, GeometricMaskJob> = HashMap::new();
-    let mut preview_clips = Vec::new();
 
     let lanes = visible.iter().map(|clip| clip.track).max().unwrap_or(0) + 1;
     let tracks: Vec<_> = (0..lanes)
@@ -1499,7 +1530,6 @@ fn build_timeline(
         engine_clip.video_fade_in = quantise(clip.video_fade_in, rate);
 
         if let Some(id) = timeline.add_clip(tracks[clip.track], engine_clip) {
-            preview_clips.push(id);
             tracks_of.insert(id, clip.track);
             if clip.kind == ClipKind::Image {
                 stills.insert(id);
@@ -1549,7 +1579,6 @@ fn build_timeline(
 
     BuiltTimeline {
         timeline,
-        preview_clips,
         stills,
         decode_sizes,
         filter_chains,
@@ -2202,6 +2231,54 @@ mod tests {
             masks: Vec::new(),
             masks_enabled: false,
         }
+    }
+
+    #[test]
+    fn static_mask_matte_is_reused_and_animated_masks_bypass_it() {
+        use concat_project::model::{KeyEase, MaskKey, MaskProperty};
+
+        let mut masked = clip("video", 0, 0.0, 1.0, 0.0);
+        masked.masks_enabled = true;
+        let mut mask = ClipMask::new("one".to_owned(), MaskShape::Rectangle);
+        mask.width = 0.3;
+        mask.height = 0.3;
+        masked.masks.push(mask.clone());
+        let job = GeometricMaskJob::of(&masked).unwrap();
+        let mut frame = Frame::black(128, 72);
+        for pixel in frame.pixels_mut().chunks_exact_mut(4) {
+            pixel[3] = 128;
+        }
+        let first = job.cut(&frame, 0.0);
+        let second = job.cut(&frame, 0.7);
+        assert_eq!(first.pixels(), second.pixels());
+        assert_eq!(job.static_mattes.lock().unwrap().len(), 1);
+
+        let mut direct = frame.clone();
+        concat_vision::cut_geometric(&mut direct, &masked.masks, 0.0, &BTreeMap::new());
+        for (cached, uncached) in first.pixels().iter().zip(direct.pixels()) {
+            assert!(cached.abs_diff(*uncached) <= 1);
+        }
+
+        mask.keys = vec![
+            MaskKey {
+                property: MaskProperty::PositionX,
+                at: 0.0,
+                value: -0.6,
+                ease: KeyEase::LINEAR,
+            },
+            MaskKey {
+                property: MaskProperty::PositionX,
+                at: 1.0,
+                value: 0.6,
+                ease: KeyEase::LINEAR,
+            },
+        ];
+        masked.masks = vec![mask];
+        let animated = GeometricMaskJob::of(&masked).unwrap();
+        let left = animated.cut(&frame, 0.0);
+        let right = animated.cut(&frame, 1.0);
+        assert_ne!(left.pixels(), right.pixels());
+        assert!(animated.static_mattes.lock().unwrap().is_empty());
     }
 
     fn spec(kind: &str, duration: f64) -> Option<TransitionSpec> {

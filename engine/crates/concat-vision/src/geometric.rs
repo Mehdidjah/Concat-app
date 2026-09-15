@@ -32,7 +32,7 @@ pub fn cut(frame: &mut Frame, masks: &[ClipMask], at: f64, text_masks: &BTreeMap
                 && (!matches!(mask.shape, MaskShape::Brush | MaskShape::Pen)
                     || !mask.points.is_empty())
         })
-        .map(|mask| Evaluated::new(mask, at, width, height))
+        .map(|mask| Evaluated::new(mask, at, width, height, text_masks.get(&mask.id)))
         .collect();
     if evaluated.is_empty() {
         return;
@@ -43,8 +43,7 @@ pub fn cut(frame: &mut Frame, masks: &[ClipMask], at: f64, text_masks: &BTreeMap
         for x in 0..width {
             let mut matte = 0.0_f32;
             for mask in &evaluated {
-                let text = text_masks.get(&mask.id);
-                matte = matte.max(mask.coverage(x as f64 + 0.5, y as f64 + 0.5, text));
+                matte = matte.max(mask.coverage(x as f64 + 0.5, y as f64 + 0.5));
             }
             let alpha = y as usize * row + x as usize * 4 + 3;
             let source_alpha = frame.pixels()[alpha];
@@ -55,8 +54,8 @@ pub fn cut(frame: &mut Frame, masks: &[ClipMask], at: f64, text_masks: &BTreeMap
 }
 
 struct Evaluated<'a> {
-    id: String,
     source: &'a ClipMask,
+    text: Option<&'a Mask>,
     cx: f64,
     cy: f64,
     width: f64,
@@ -70,7 +69,13 @@ struct Evaluated<'a> {
 }
 
 impl<'a> Evaluated<'a> {
-    fn new(mask: &'a ClipMask, at: f64, frame_width: u32, frame_height: u32) -> Self {
+    fn new(
+        mask: &'a ClipMask,
+        at: f64,
+        frame_width: u32,
+        frame_height: u32,
+        text: Option<&'a Mask>,
+    ) -> Self {
         let value = |property: MaskProperty| mask.value_at(property, at);
         let frame_width = f64::from(frame_width);
         let frame_height = f64::from(frame_height);
@@ -79,8 +84,8 @@ impl<'a> Evaluated<'a> {
         let angle = value(MaskProperty::Rotation).to_radians();
         let (sin, cos) = angle.sin_cos();
         Self {
-            id: mask.id.clone(),
             source: mask,
+            text,
             cx: frame_width * (0.5 + value(MaskProperty::PositionX) * 0.5),
             cy: frame_height * (0.5 + value(MaskProperty::PositionY) * 0.5),
             width,
@@ -108,7 +113,7 @@ impl<'a> Evaluated<'a> {
         (x / self.width, y / self.height)
     }
 
-    fn coverage(&self, x: f64, y: f64, text: Option<&Mask>) -> f32 {
+    fn coverage(&self, x: f64, y: f64) -> f32 {
         let (x, y) = self.local(x, y);
         let mut coverage = match self.source.shape {
             MaskShape::Split => self.from_distance(y * self.height),
@@ -139,7 +144,7 @@ impl<'a> Evaluated<'a> {
             MaskShape::Heart => {
                 self.from_distance(polygon_distance(x, y, heart_points()) * self.min_dimension)
             }
-            MaskShape::Text => self.text_coverage(x, y, text),
+            MaskShape::Text => self.text_coverage(x, y, self.text),
             MaskShape::Brush => self.brush_coverage(x, y),
             MaskShape::Pen => {
                 self.from_distance(polygon_distance(x, y, &self.points) * self.min_dimension)
