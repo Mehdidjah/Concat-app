@@ -6,6 +6,7 @@ import { Theme } from "../theme/theme.slint";
 import { Glyph, Icon } from "../icons.slint";
 import { Button } from "../primitives/modal.slint";
 import { IconButton, Row, Section, SectionBody, SectionHeader } from "../primitives/panel.slint";
+import { FocusRing } from "../primitives/focus-ring.slint";
 import { Select } from "../primitives/select.slint";
 import { Param, ParamFormat, SwitchRow } from "controls.slint";
 import { MaskChipData, MaskInspectorData } from "../timeline/model.slint";
@@ -41,32 +42,76 @@ component ShapeTile inherits Rectangle {
     in property <Glyph> glyph;
     in property <bool> selected;
     callback picked();
+    property <bool> ring;
 
-    height: 76px;
-    border-radius: Theme.r-lg;
-    border-width: root.selected ? 2px : 1px;
-    border-color: root.selected ? Theme.accent : Theme.line;
-    background: touch.has-hover ? Theme.field-hover : Theme.field;
+    height: 68px;
+    min-width: 0px;
+    horizontal-stretch: 1;
+    border-radius: Theme.r;
+    border-width: 1px;
+    border-color: root.selected ? Theme.accent
+        : touch.has-hover ? Theme.line-strong
+        : Theme.line;
+    background: root.selected ? Theme.accent-soft
+        : touch.pressed ? Theme.field-active
+        : touch.has-hover ? Theme.field-hover
+        : Theme.field;
+
+    animate background, border-color {
+        duration: 100ms;
+        easing: cubic-bezier(0.4, 0, 0.2, 1);
+    }
+
+    fs := FocusScope {
+        focus-gained(reason) => {
+            root.ring = reason == FocusReason.tab-navigation;
+        }
+        focus-lost(reason) => { root.ring = false; }
+        key-pressed(event) => {
+            if (event.text == " " || event.text == "\n") {
+                root.picked();
+                return EventResult.accept;
+            }
+            return EventResult.reject;
+        }
+    }
 
     VerticalLayout {
-        padding-top: 10px;
-        padding-bottom: 8px;
-        spacing: 5px;
+        padding-top: 8px;
+        padding-bottom: 7px;
+        padding-left: 6px;
+        padding-right: 6px;
+        spacing: 3px;
         alignment: center;
         Icon {
             glyph: root.glyph;
-            size: 28px;
+            size: 24px;
             tint: root.selected ? Theme.accent : Theme.fg-muted;
-            weight: 1.7;
+            weight: 1.6;
         }
         Text {
+            min-width: 0px;
+            horizontal-stretch: 1;
             text: root.label;
-            color: root.selected ? Theme.fg : Theme.fg-muted;
+            color: root.selected ? Theme.accent : Theme.fg-muted;
             font-size: Theme.fs-sm;
+            font-weight: root.selected ? Theme.weight-title : Theme.weight-body;
             horizontal-alignment: center;
+            vertical-alignment: center;
+            overflow: elide;
         }
     }
-    touch := TouchArea { mouse-cursor: pointer; clicked => { root.picked(); } }
+    touch := TouchArea {
+        width: parent.width;
+        height: parent.height;
+        mouse-cursor: pointer;
+        clicked => {
+            fs.focus();
+            root.picked();
+        }
+    }
+
+    FocusRing { active: root.ring; radius: Theme.r; }
 }
 
 component MaskTextField inherits Rectangle {
@@ -166,19 +211,36 @@ export component MaskPanel inherits VerticalLayout {
                 }
             }
 
-            GridLayout {
+            VerticalLayout {
+                width: parent.width;
+                horizontal-stretch: 1;
                 padding-left: Theme.pad;
                 padding-right: Theme.pad;
-                spacing: 7px;
-                ShapeTile { row: 0; col: 0; shape: 0; label: I18n.t("Split"); glyph: Glyph.panel-horizontal; selected: root.mask.shape == 0; picked => { root.shape(0); } }
-                ShapeTile { row: 0; col: 1; shape: 1; label: I18n.t("Filmstrip"); glyph: Glyph.filmstrip; selected: root.mask.shape == 1; picked => { root.shape(1); } }
-                ShapeTile { row: 0; col: 2; shape: 2; label: I18n.t("Circle"); glyph: Glyph.circle; selected: root.mask.shape == 2; picked => { root.shape(2); } }
-                ShapeTile { row: 1; col: 0; shape: 3; label: I18n.t("Rectangle"); glyph: Glyph.square; selected: root.mask.shape == 3; picked => { root.shape(3); } }
-                ShapeTile { row: 1; col: 1; shape: 4; label: I18n.t("Star"); glyph: Glyph.star; selected: root.mask.shape == 4; picked => { root.shape(4); } }
-                ShapeTile { row: 1; col: 2; shape: 5; label: I18n.t("Heart"); glyph: Glyph.heart; selected: root.mask.shape == 5; picked => { root.shape(5); } }
-                ShapeTile { row: 2; col: 0; shape: 6; label: I18n.t("Text"); glyph: Glyph.text-mark; selected: root.mask.shape == 6; picked => { root.shape(6); } }
-                ShapeTile { row: 2; col: 1; shape: 7; label: I18n.t("Brush"); glyph: Glyph.mask-brush; selected: root.mask.shape == 7; picked => { root.shape(7); } }
-                ShapeTile { row: 2; col: 2; shape: 8; label: I18n.t("Pen"); glyph: Glyph.pen; selected: root.mask.shape == 8; picked => { root.shape(8); } }
+                spacing: Theme.gap;
+                HorizontalLayout {
+                    width: parent.width - 2 * Theme.pad;
+                    horizontal-stretch: 1;
+                    spacing: Theme.gap;
+                    ShapeTile { min-width: (parent.width - 2 * Theme.gap) / 3; max-width: self.min-width; shape: 0; label: I18n.t("Split"); glyph: Glyph.panel-horizontal; selected: root.mask.shape == 0; picked => { root.shape(0); } }
+                    ShapeTile { min-width: (parent.width - 2 * Theme.gap) / 3; max-width: self.min-width; shape: 1; label: I18n.t("Filmstrip"); glyph: Glyph.filmstrip; selected: root.mask.shape == 1; picked => { root.shape(1); } }
+                    ShapeTile { min-width: (parent.width - 2 * Theme.gap) / 3; max-width: self.min-width; shape: 2; label: I18n.t("Circle"); glyph: Glyph.circle; selected: root.mask.shape == 2; picked => { root.shape(2); } }
+                }
+                HorizontalLayout {
+                    width: parent.width - 2 * Theme.pad;
+                    horizontal-stretch: 1;
+                    spacing: Theme.gap;
+                    ShapeTile { min-width: (parent.width - 2 * Theme.gap) / 3; max-width: self.min-width; shape: 3; label: I18n.t("Rectangle"); glyph: Glyph.square; selected: root.mask.shape == 3; picked => { root.shape(3); } }
+                    ShapeTile { min-width: (parent.width - 2 * Theme.gap) / 3; max-width: self.min-width; shape: 4; label: I18n.t("Star"); glyph: Glyph.star; selected: root.mask.shape == 4; picked => { root.shape(4); } }
+                    ShapeTile { min-width: (parent.width - 2 * Theme.gap) / 3; max-width: self.min-width; shape: 5; label: I18n.t("Heart"); glyph: Glyph.heart; selected: root.mask.shape == 5; picked => { root.shape(5); } }
+                }
+                HorizontalLayout {
+                    width: parent.width - 2 * Theme.pad;
+                    horizontal-stretch: 1;
+                    spacing: Theme.gap;
+                    ShapeTile { min-width: (parent.width - 2 * Theme.gap) / 3; max-width: self.min-width; shape: 6; label: I18n.t("Text"); glyph: Glyph.text-mark; selected: root.mask.shape == 6; picked => { root.shape(6); } }
+                    ShapeTile { min-width: (parent.width - 2 * Theme.gap) / 3; max-width: self.min-width; shape: 7; label: I18n.t("Brush"); glyph: Glyph.mask-brush; selected: root.mask.shape == 7; picked => { root.shape(7); } }
+                    ShapeTile { min-width: (parent.width - 2 * Theme.gap) / 3; max-width: self.min-width; shape: 8; label: I18n.t("Pen"); glyph: Glyph.pen; selected: root.mask.shape == 8; picked => { root.shape(8); } }
+                }
             }
         }
     }
