@@ -910,6 +910,35 @@ fn mask_key_time(clip: &Clip, playhead: f32) -> f64 {
     ((f64::from(playhead) - clip.start) / clip.duration).clamp(0.0, 1.0)
 }
 
+/// Use the same retime integral for masks and cutouts as the timeline uses
+/// for picture playback. Tracking must sample the frame actually displayed.
+fn mask_source_time(clip: &Clip, at: f64, curve: Option<&concat_core::SpeedCurve>) -> f64 {
+    let at = at.clamp(0.0, 1.0);
+    let (consumed, covered) = match curve {
+        Some(curve) => (
+            curve.consumed(at) * clip.duration,
+            curve.mean() * clip.duration,
+        ),
+        None => {
+            let covered = clip.duration * clip.speed.clamp(0.0625, 16.0);
+            (at * covered, covered)
+        }
+    };
+    clip.source_start
+        + if clip.reverse {
+            covered - consumed
+        } else {
+            consumed
+        }
+}
+
+fn mask_retime_curve(clip: &Clip) -> Option<concat_core::SpeedCurve> {
+    clip.speed_curve.as_ref().and_then(|points| {
+        let points: Vec<_> = points.iter().map(|point| (point.at, point.speed)).collect();
+        concat_core::SpeedCurve::new(&points)
+    })
+}
+
 fn media_kind_of(kind: model::MediaKind) -> MediaKind {
     match kind {
         model::MediaKind::Video => MediaKind::Video,
@@ -4430,10 +4459,20 @@ impl Studio {
             return;
         }
         self.edit_active_mask(|mask| {
+            let defaults = model::ClipMask::new(mask.id.clone(), shape);
             mask.shape = shape;
-            if !matches!(shape, model::MaskShape::Brush | model::MaskShape::Pen) {
-                mask.points.clear();
-            }
+            mask.width = defaults.width;
+            mask.height = defaults.height;
+            mask.roundness = defaults.roundness;
+            mask.keys.retain(|key| {
+                !matches!(
+                    key.property,
+                    model::MaskProperty::Width
+                        | model::MaskProperty::Height
+                        | model::MaskProperty::Roundness
+                )
+            });
+            mask.points.clear();
         });
         self.mask_drawing = matches!(shape, model::MaskShape::Brush | model::MaskShape::Pen);
     }
@@ -4642,18 +4681,14 @@ impl Studio {
                     _ => 180,
                 };
                 let pool = concat_media::ReaderPool::with_defaults();
-                let source_at = |at: f64| {
-                    let covered = clip.duration * clip.speed.max(0.0625);
-                    clip.source_start
-                        + if clip.reverse {
-                            (1.0 - at) * covered
-                        } else {
-                            at * covered
-                        }
-                };
+                let curve = mask_retime_curve(&clip);
                 let decode = |at: f64| {
-                    let time = concat_core::Rational::approximate(source_at(at))
-                        .unwrap_or(concat_core::Rational::ZERO);
+                    let time = concat_core::Rational::approximate(mask_source_time(
+                        &clip,
+                        at,
+                        curve.as_ref(),
+                    ))
+                    .unwrap_or(concat_core::Rational::ZERO);
                     pool.frame_at(
                         std::path::Path::new(&media.path),
                         time,
@@ -6936,8 +6971,9 @@ impl Studio {
 
     /// The source instant of `clip` under the playhead, held to the clip.
     fn source_at_playhead(&self, clip: &Clip) -> f64 {
-        let along = (f64::from(self.playhead) - clip.start).clamp(0.0, clip.duration);
-        clip.source_start + along * clip.speed
+        let at = mask_key_time(clip, self.playhead);
+        let curve = mask_retime_curve(clip);
+        mask_source_time(clip, at, curve.as_ref())
     }
 
     /// Whether the cutout model found nothing at the playhead's frame of

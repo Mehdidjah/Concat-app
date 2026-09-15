@@ -935,7 +935,7 @@ impl GeometricMaskJob {
                     tracking: 0.0,
                 };
                 if let Ok(rendered) = concat_text::render(&fonts, &style, 512, 256)
-                    && let Some(raster) = Mask::from_png(&rendered.png)
+                    && let Some(raster) = Mask::from_png_alpha(&rendered.png)
                 {
                     text_masks.insert(mask.id.clone(), raster);
                 }
