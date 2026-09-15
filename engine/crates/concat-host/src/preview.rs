@@ -20,6 +20,8 @@ use std::sync::{Arc, Mutex};
 use concat_export::ExportClip;
 use concat_project::DocumentSettings;
 
+use crate::proxy::ProxyStore;
+
 /// A frame request: the instant and the size, with the clips coming from
 /// the session that owns them.
 #[derive(Clone, Copy, Debug)]
@@ -30,6 +32,12 @@ pub struct FrameSpec {
     pub width: u32,
     /// Preview frame height in pixels.
     pub height: u32,
+    /// Low-latency playback or an active gesture may use a local preview
+    /// proxy; a settled frame and export remain source-exact.
+    pub live: bool,
+    /// The editor can prepare proxies while paused so playback starts warm.
+    /// One-shot API renders leave this false and do no speculative work.
+    pub prewarm: bool,
 }
 
 /// The reader pool behind the monitor, shareable across threads.
@@ -42,6 +50,7 @@ pub struct Monitor {
     /// and scrubbing ask for many instants of one document, and the plan
     /// is the half of a frame that does not depend on the instant.
     plan: Arc<Mutex<Option<PlanEntry>>>,
+    proxies: ProxyStore,
     #[cfg(feature = "gpu")]
     gpu: Option<Arc<Mutex<concat_render::WgpuCompositor>>>,
 }
@@ -73,6 +82,7 @@ impl Monitor {
             pool: Arc::new(concat_media::ReaderPool::with_defaults()),
             prefetching: Arc::new(AtomicBool::new(false)),
             plan: Arc::new(Mutex::new(None)),
+            proxies: ProxyStore::default(),
             #[cfg(feature = "gpu")]
             gpu: None,
         }
@@ -87,6 +97,7 @@ impl Monitor {
             pool: Arc::new(concat_media::ReaderPool::with_defaults()),
             prefetching: Arc::new(AtomicBool::new(false)),
             plan: Arc::new(Mutex::new(None)),
+            proxies: ProxyStore::default(),
             gpu: Some(Arc::new(Mutex::new(
                 concat_render::WgpuCompositor::with_device(device, queue),
             ))),
@@ -161,6 +172,11 @@ impl Monitor {
         gpu: bool,
     ) -> Arc<concat_export::PreviewPlan> {
         let rate = (settings.rate_num, settings.rate_den);
+        let clips = if spec.live || spec.prewarm {
+            self.proxies.clips(clips, spec.live, spec.time)
+        } else {
+            clips
+        };
         let mut slot = self
             .plan
             .lock()
@@ -237,9 +253,134 @@ impl Monitor {
     /// closes.
     pub fn clear(&self) {
         self.pool.clear();
+        self.proxies.clear();
         *self
             .plan
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use concat_project::model::{ClipMask, MaskProperty, MaskShape};
+
+    #[test]
+    #[ignore]
+    fn real_media_live_monitor_uses_proxy_and_settled_monitor_uses_source() {
+        let source = std::path::PathBuf::from(std::env::var_os("CONCAT_DIAG_MEDIA").unwrap());
+        let video = concat_media::probe(&source).unwrap().video.unwrap();
+        let at = std::env::var("CONCAT_DIAG_AT")
+            .ok()
+            .and_then(|value| value.parse::<f64>().ok())
+            .unwrap_or(0.0);
+        let mut clip: ExportClip = serde_json::from_value(serde_json::json!({
+            "path": source.to_string_lossy(),
+            "kind": "video",
+            "start": 0.0,
+            "duration": 1.0,
+            "sourceStart": at,
+            "track": 0,
+            "hidden": false,
+            "muted": true,
+            "mediaWidth": video.width,
+            "mediaHeight": video.height
+        }))
+        .unwrap();
+        let mask = ClipMask::new("mask1".to_owned(), MaskShape::Heart);
+        clip.masks_enabled = true;
+        clip.masks.push(mask.clone());
+        clip.animation = [-0.3, 0.3]
+            .into_iter()
+            .enumerate()
+            .map(|(index, value)| concat_export::ExportKey {
+                property: MaskProperty::PositionX.id(&mask.id),
+                at: index as f64,
+                value,
+                ease: [0.0, 0.0, 1.0, 1.0],
+                curve: None,
+                spatial_in: None,
+                spatial_out: None,
+                post: String::new(),
+            })
+            .collect();
+        clip.animation
+            .extend([1.0, 0.12].into_iter().enumerate().map(|(index, value)| {
+                concat_export::ExportKey {
+                    property: "scale".to_owned(),
+                    at: index as f64,
+                    value,
+                    ease: [0.0, 0.0, 1.0, 1.0],
+                    curve: None,
+                    spatial_in: None,
+                    spatial_out: None,
+                    post: String::new(),
+                }
+            }));
+        let clips = Arc::new(vec![clip]);
+        let settings = DocumentSettings {
+            name: "diagnostic".to_owned(),
+            width: 960,
+            height: 540,
+            rate_num: 30,
+            rate_den: 1,
+        };
+        let monitor = Monitor::new();
+        let start = std::time::Instant::now();
+        loop {
+            let resolved = monitor.proxies.clips(Arc::clone(&clips), true, 0.0);
+            if resolved[0].path != clips[0].path {
+                break;
+            }
+            assert!(start.elapsed().as_secs() < 60, "proxy did not become ready");
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        let mut samples = Vec::new();
+        for index in 0..30 {
+            let start = std::time::Instant::now();
+            let bytes = monitor
+                .frame(
+                    Arc::clone(&clips),
+                    &settings,
+                    FrameSpec {
+                        time: index as f64 / 30.0,
+                        width: 960,
+                        height: 540,
+                        live: true,
+                        prewarm: true,
+                    },
+                )
+                .unwrap();
+            assert_eq!(bytes.len(), 960 * 540 * 4);
+            samples.push(start.elapsed().as_secs_f64() * 1000.0);
+        }
+        samples.sort_by(f64::total_cmp);
+        println!(
+            "live animated scale-and-mask monitor: median {:.2} ms, p90 {:.2} ms",
+            samples[15], samples[27]
+        );
+        assert_ne!(
+            monitor.plan.lock().unwrap().as_ref().unwrap().clips[0].path,
+            clips[0].path
+        );
+
+        monitor
+            .frame(
+                Arc::clone(&clips),
+                &settings,
+                FrameSpec {
+                    time: 0.5,
+                    width: 960,
+                    height: 540,
+                    live: false,
+                    prewarm: false,
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            monitor.plan.lock().unwrap().as_ref().unwrap().clips[0].path,
+            clips[0].path
+        );
     }
 }

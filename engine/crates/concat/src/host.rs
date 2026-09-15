@@ -200,7 +200,7 @@ pub fn spawn_unpublished<T: Send + 'static>(
     work: impl FnOnce() -> T + Send + 'static,
     then: impl FnOnce(&mut Studio, &App, &Models, T) + Send + 'static,
 ) {
-    std::thread::spawn(move || {
+    spawn_detached(move || {
         let result = work();
         let _ = slint::invoke_from_event_loop(move || {
             Shell::with(|shell, app| {
