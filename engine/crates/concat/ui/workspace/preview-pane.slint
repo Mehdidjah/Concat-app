@@ -6,10 +6,8 @@ import { Theme } from "../theme/theme.slint";
 import { Fmt } from "../util.slint";
 import { Glyph, Icon } from "../icons.slint";
 import { IconButton } from "../primitives/panel.slint";
-import { FocusRing } from "../primitives/focus-ring.slint";
 import { NumberField } from "../primitives/number-field.slint";
 import { Select } from "../primitives/select.slint";
-import { Tip } from "../primitives/tooltip.slint";
 import { Pane, PaneHeader } from "pane.slint";
 import { PaneKind, PaneSwitcher } from "pane-switcher.slint";
 import { ClipKind, StageGuideData, StageItemData } from "../timeline/model.slint";
@@ -27,6 +25,15 @@ import { ClipKind, StageGuideData, StageItemData } from "../timeline/model.slint
 // The stage is black. A decoded frame is drawn fitted into it when there is
 // one; otherwise it says that nothing is under the playhead, which is a state
 // a real monitor spends plenty of its time in.
+//
+// The stage sits on a canvas, not in a frame. Fitted by default, and it
+// follows the pane while it is; but a wheel pans it, a ctrl or cmd wheel
+// zooms it about the pointer, a ctrl drag or a middle drag anywhere moves
+// it - as does a plain drag on the well, where there is nothing to select -
+// and from then on it stays where it was put until it is fitted again: the
+// picker in the tray, or a double-click on the well. A pane squeezed into
+// an odd shape by the splitters is then still a pane you can look closely
+// into, rather than one showing a postage stamp of the frame.
 
 /// An outline in the shape of the thing it selects. Beats any label at saying
 /// "tall" or "wide" at a glance, and it is drawn at ratio rather than to a
@@ -61,9 +68,10 @@ component RatioGlyph inherits Rectangle {
 // against the trailing edge rather than joined on with a dash, so the column
 // of ratios stays scannable and the sizes line up as a column of their own.
 //
-// The trigger carries only the ratio and its glyph. The full size is what you
-// open the list to compare; repeating it on a closed control spends the width
-// of the whole tray on something already stated in the panel's header.
+// The trigger carries only the glyph. The ratio's name and its full size are
+// what you open the list to compare; either on a closed control spends the
+// width of the tray on something the shape already says, and the size is
+// stated in the panel's header besides.
 component RatioPicker inherits Rectangle {
     in property <[int]> widths;
     in property <[int]> heights;
@@ -78,7 +86,7 @@ component RatioPicker inherits Rectangle {
     property <int> active;
     property <length> row-h: 26px;
 
-    width: 92px;
+    width: 8px + 14px + 6px + 12px + 6px;
     height: Theme.h;
     border-radius: Theme.r;
     background: (root.open || trigger.has-hover) ? Theme.field-hover : Theme.field;
@@ -103,18 +111,8 @@ component RatioPicker inherits Rectangle {
             RatioGlyph {
                 ratio-w: root.widths[root.current];
                 ratio-h: root.heights[root.current];
-                tint: Theme.fg-muted;
+                tint: Theme.fg;
             }
-        }
-
-        Text {
-            horizontal-stretch: 1;
-            text: root.names[root.current];
-            color: Theme.fg;
-            font-family: Theme.font-technical;
-            font-size: Theme.fs;
-            vertical-alignment: center;
-            overflow: elide;
         }
 
         VerticalLayout {
@@ -187,183 +185,6 @@ component RatioPicker inherits Rectangle {
                             font-size: Theme.fs-sm;
                             vertical-alignment: center;
                         }
-                    }
-
-                    TouchArea {
-                        mouse-cursor: pointer;
-                        changed has-hover => {
-                            if (self.has-hover) {
-                                root.active = index;
-                            }
-                        }
-                        clicked => { root.commit(index); }
-                    }
-                }
-            }
-        }
-    }
-}
-
-// The monitor zoom picker. Its label follows the live zoom rather than only
-// the last preset, because a trackpad gesture moves continuously between the
-// useful stops in the popup.
-component ZoomPicker inherits Rectangle {
-    in-out property <float> zoom: 1.0;
-
-    property <[float]> values: [0.1, 0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 2.0];
-    property <[string]> labels: ["10%", "25%", "50%", "75%", "100%", "125%", "150%", "200%"];
-    property <bool> open: list.is-open;
-    property <bool> ring;
-    property <int> active: 4;
-    property <length> row-h: 26px;
-
-    width: 66px;
-    height: Theme.h;
-    border-radius: Theme.r;
-    background: (root.open || trigger.has-hover) ? Theme.field-hover : Theme.field;
-
-    animate background { duration: 120ms; easing: cubic-bezier(0.4, 0, 0.2, 1); }
-
-    function nearest() {
-        root.active = root.zoom < 0.175 ? 0
-            : root.zoom < 0.375 ? 1
-            : root.zoom < 0.625 ? 2
-            : root.zoom < 0.875 ? 3
-            : root.zoom < 1.125 ? 4
-            : root.zoom < 1.375 ? 5
-            : root.zoom < 1.75 ? 6 : 7;
-    }
-
-    function reveal() {
-        root.nearest();
-        list.show();
-    }
-
-    function commit(index: int) {
-        if (index >= 0 && index < root.values.length) {
-            root.zoom = root.values[index];
-        }
-        list.close();
-        fs.focus();
-    }
-
-    fs := FocusScope {
-        focus-gained(reason) => {
-            root.ring = reason == FocusReason.tab-navigation;
-        }
-        focus-lost(reason) => { root.ring = false; }
-        key-pressed(event) => {
-            if (event.text == Key.DownArrow || event.text == Key.UpArrow
-                || event.text == "\n" || event.text == " ") {
-                root.reveal();
-                return EventResult.accept;
-            }
-            return EventResult.reject;
-        }
-    }
-
-    HorizontalLayout {
-        padding-left: 8px;
-        padding-right: 6px;
-        spacing: 4px;
-
-        Text {
-            horizontal-stretch: 1;
-            text: "\{Math.round(root.zoom * 100)}%";
-            color: Theme.fg;
-            font-family: Theme.font-technical;
-            font-size: Theme.fs;
-            horizontal-alignment: center;
-            vertical-alignment: center;
-        }
-
-        VerticalLayout {
-            alignment: center;
-            Icon { glyph: Glyph.chevron-down; size: 11px; tint: Theme.fg-muted; }
-        }
-    }
-
-    trigger := TouchArea {
-        mouse-cursor: pointer;
-        clicked => {
-            fs.focus();
-            root.reveal();
-        }
-    }
-
-    Tip {
-        text: "Preview zoom";
-        active: trigger.has-hover;
-    }
-
-    FocusRing {
-        active: root.ring || root.open;
-        radius: Theme.r;
-    }
-
-    list := PopupWindow {
-        x: root.width - 96px;
-        y: root.height + 4px;
-        width: 96px;
-        height: root.labels.length * root.row-h + 8px;
-        close-policy: close-on-click-outside;
-
-        init => { keys.focus(); }
-
-        Rectangle {
-            background: Theme.raised;
-            border-width: 1px;
-            border-color: Theme.line-strong;
-            border-radius: Theme.r;
-            clip: true;
-
-            keys := FocusScope {
-                key-pressed(event) => {
-                    if (event.text == Key.DownArrow) {
-                        root.active = Math.min(root.active + 1, root.labels.length - 1);
-                        return EventResult.accept;
-                    }
-                    if (event.text == Key.UpArrow) {
-                        root.active = Math.max(root.active - 1, 0);
-                        return EventResult.accept;
-                    }
-                    if (event.text == Key.Home) {
-                        root.active = 0;
-                        return EventResult.accept;
-                    }
-                    if (event.text == Key.End) {
-                        root.active = root.labels.length - 1;
-                        return EventResult.accept;
-                    }
-                    if (event.text == "\n" || event.text == " ") {
-                        root.commit(root.active);
-                        return EventResult.accept;
-                    }
-                    if (event.text == Key.Escape) {
-                        list.close();
-                        fs.focus();
-                        return EventResult.accept;
-                    }
-                    return EventResult.reject;
-                }
-            }
-
-            VerticalLayout {
-                padding: 4px;
-                alignment: start;
-
-                for label[index] in root.labels: Rectangle {
-                    height: root.row-h;
-                    border-radius: Theme.r-sm;
-                    background: index == root.active ? Theme.accent : Colors.transparent;
-
-                    Text {
-                        text: label;
-                        color: index == root.active ? Theme.on-accent : Theme.fg-muted;
-                        font-family: Theme.font-technical;
-                        font-size: Theme.fs;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
                     }
 
                     TouchArea {
@@ -677,6 +498,14 @@ component StageOverlay inherits Rectangle {
     callback grip-pressed(id: string, grip: int, x: float, y: float);
     callback dragged(x: float, y: float, snap: bool);
     callback released();
+    /// A ctrl drag or a middle drag over the stage moves the view, not a
+    /// picture. The points are in the parent's frame - `x` plus `mouse-x` -
+    /// because this overlay is what the drag moves, and a delta measured
+    /// against a moving origin comes back as zero on every event after the
+    /// first.
+    callback pan-pressed(x: length, y: length);
+    callback pan-dragged(x: length, y: length);
+    callback pan-released();
 
     background: transparent;
 
@@ -684,22 +513,34 @@ component StageOverlay inherits Rectangle {
     // it against the pictures, rotation and stacking included.
     floor := TouchArea {
         property <bool> live;
+        property <bool> panning;
         property <bool> snap;
-        mouse-cursor: root.painting ? MouseCursor.crosshair : MouseCursor.default;
+        mouse-cursor: self.panning ? MouseCursor.grabbing
+            : root.painting ? MouseCursor.crosshair : MouseCursor.default;
 
         pointer-event(event) => {
             self.snap = event.modifiers.shift;
             if (event.kind == PointerEventKind.down
+                && (event.button == PointerEventButton.middle
+                    || (event.button == PointerEventButton.left
+                        && event.modifiers.control))) {
+                self.panning = true;
+                root.pan-pressed(root.x + self.mouse-x, root.y + self.mouse-y);
+            } else if (event.kind == PointerEventKind.down
                 && event.button == PointerEventButton.left) {
                 self.live = true;
+                // Shift or cmd adds to the selection; ctrl is the view's.
                 root.pressed(self.mouse-x / root.width, self.mouse-y / root.height,
-                    event.modifiers.shift || event.modifiers.control
-                        || event.modifiers.meta);
+                    event.modifiers.shift || event.modifiers.meta);
             } else if (event.kind == PointerEventKind.up
                 || event.kind == PointerEventKind.cancel) {
                 if (self.live) {
                     self.live = false;
                     root.released();
+                }
+                if (self.panning) {
+                    self.panning = false;
+                    root.pan-released();
                 }
             }
         }
@@ -707,6 +548,9 @@ component StageOverlay inherits Rectangle {
             if (self.live) {
                 root.dragged(self.mouse-x / root.width, self.mouse-y / root.height,
                     self.snap);
+            }
+            if (self.panning) {
+                root.pan-dragged(root.x + self.mouse-x, root.y + self.mouse-y);
             }
         }
     }
@@ -823,18 +667,6 @@ export component PreviewPane inherits Rectangle {
     property <float> frames: Math.round(root.playhead * root.frame-rate);
     property <bool> at-start: root.frames <= 0;
     property <bool> at-end: !root.playhead-free && root.frames >= root.total-frames;
-    /// A view-only scale relative to the fitted frame. It deliberately stays
-    /// out of Editor: two preview panes may be inspected at different zooms,
-    /// and neither zoom belongs in the project or export settings.
-    in-out property <float> preview-zoom: 1.0;
-
-    function set-preview-zoom(value: float) {
-        root.preview-zoom = Fmt.clamp(value, 0.1, 2.0);
-    }
-
-    function nudge-preview-zoom(delta: float) {
-        root.set-preview-zoom(Fmt.round-to(root.preview-zoom + delta, 2));
-    }
 
     // The NumberField writes to its own `value`, and an assignment in Slint
     // replaces whatever binding the parent declared — so this is seeded, not
@@ -887,121 +719,186 @@ export component PreviewPane inherits Rectangle {
             property <length> pad: 16px;
             property <length> room-w: Math.max(1px, self.width - 2 * self.pad);
             property <length> room-h: Math.max(1px, self.height - 2 * self.pad);
-            /// The fitted size is 100%. Lower percentages pull the frame away
-            /// from the well; higher ones inspect the centre and let the
-            /// viewport clip the rest.
-            property <length> fitted-stage-w: Math.min(self.room-w / root.output-width,
-                self.room-h / root.output-height) * root.output-width;
-            property <length> stage-w: self.fitted-stage-w * root.preview-zoom;
 
-            zoom-wheel := TouchArea {
-                scroll-event(event) => {
-                    if (event.delta-y != 0px) {
-                        // Slint reports a positive delta for a two-finger move
-                        // upwards. Up inspects more closely; down pulls out.
-                        root.set-preview-zoom(root.preview-zoom
-                            * Math.pow(1.0025, event.delta-y / 1px));
-                        return EventResult.accept;
-                    }
-                    return EventResult.reject;
-                }
+            // ── the view ──
+            //
+            // Stage pixels per output pixel. Fitted, it is whatever the pane
+            // allows on the axis that runs out first, and it follows the
+            // pane; once a gesture has taken the view over, it is `zoom`
+            // and the pane's shape no longer touches it. The quality picker
+            // in the tray sets how much of the frame the engine composites,
+            // never how large it is drawn.
+            property <float> fit-scale: Math.min(
+                self.room-w / Math.max(1, root.output-width),
+                self.room-h / Math.max(1, root.output-height)) / 1px;
+            property <bool> fitted: true;
+            property <float> zoom: 1;
+            property <float> scale: self.fitted ? self.fit-scale : self.zoom;
+            /// A 4K frame under an inch, or eight device pixels to one of
+            /// the picture's: past either end there is nothing left to see.
+            property <float> min-zoom: 0.02;
+            property <float> max-zoom: 8;
+            property <length> stage-w: root.output-width * self.scale * 1px;
+            property <length> stage-h: root.output-height * self.scale * 1px;
 
-                stage := Rectangle {
-                    x: (parent.width - self.width) / 2;
-                    y: (parent.height - self.height) / 2;
-                    width: viewport.stage-w;
-                    height: self.width / root.aspect;
-                    background: Theme.stage;
-                    // A 1px ring lifts the stage off the well. Slint has no
-                    // box-shadow, so the ring does the work alone — which is
-                    // why it is `line-strong` and not the hairline every other
-                    // edge uses.
-                    border-width: 1px;
-                    border-color: Theme.line-strong;
-                    clip: true;
+            // Where the stage's centre sits, from the viewport's. Held raw
+            // and clamped on read, so that however the pane is squeezed
+            // after the view was put somewhere, at least a corner's worth
+            // of stage stays in it to grab.
+            property <length> pan-x;
+            property <length> pan-y;
+            property <length> keep: 48px;
+            property <length> reach-x: Math.max(0px, (self.width + self.stage-w) / 2 - self.keep);
+            property <length> reach-y: Math.max(0px, (self.height + self.stage-h) / 2 - self.keep);
+            property <length> shown-x: Math.max(-self.reach-x, Math.min(self.reach-x, self.pan-x));
+            property <length> shown-y: Math.max(-self.reach-y, Math.min(self.reach-y, self.pan-y));
 
-                    // Where a decoded frame will be drawn. Until then the stage
-                    // reports what is actually under the playhead.
-                    if !root.has-picture: VerticalLayout {
-                        alignment: center;
-                        spacing: 10px;
+            /// Scratch for `zoom-about`: Slint functions have no locals.
+            property <float> next;
+            /// The pan when a drag began, and where it began.
+            property <length> grab-x;
+            property <length> grab-y;
+            property <length> from-x;
+            property <length> from-y;
 
-                        HorizontalLayout {
-                            alignment: center;
-                            Icon {
-                                glyph: Glyph.film;
-                                size: 22px;
-                                tint: Theme.fg-dim;
-                            }
-                        }
-
-                        Text {
-                            text: I18n.t("Nothing under the playhead");
-                            color: Theme.fg-dim;
-                            font-size: Theme.fs;
-                            horizontal-alignment: center;
-                        }
-                    }
-
-                    // The engine's frame, when one has arrived. It is already
-                    // the stage's shape, so `contain` only absorbs a rounding
-                    // pixel either way.
-                    if root.has-picture && root.frame.width > 0: Image {
-                        x: 0;
-                        y: 0;
-                        width: parent.width;
-                        height: parent.height;
-                        source: root.frame;
-                        image-fit: contain;
-                    }
-
-                    // The clip under the playhead, named in the corner. Without
-                    // a decoded frame, the name is the only thing that says the
-                    // monitor is live.
-                    if root.has-picture: Text {
-                        x: 8px;
-                        y: parent.height - self.height - 8px;
-                        width: parent.width - 16px;
-                        text: root.clip-name;
-                        color: Theme.on-stage-dim;
-                        font-size: Theme.fs-sm;
-                        overflow: elide;
-                    }
+            /// The view leaves fit mode the moment a gesture takes it, from
+            /// exactly where fit had it - nothing jumps.
+            function unfit() {
+                if (self.fitted) {
+                    self.zoom = self.fit-scale;
+                    self.pan-x = self.shown-x;
+                    self.pan-y = self.shown-y;
+                    self.fitted = false;
                 }
             }
+            public function fit() {
+                self.fitted = true;
+                self.pan-x = 0;
+                self.pan-y = 0;
+            }
+            /// Scales the view by `factor`, keeping the output point under
+            /// the viewport point (`px`, `py`) where it is.
+            public function zoom-about(factor: float, px: length, py: length) {
+                self.unfit();
+                self.next = Math.max(self.min-zoom, Math.min(self.max-zoom, self.zoom * factor));
+                self.pan-x = px - self.width / 2
+                    - (px - self.width / 2 - self.shown-x) * (self.next / self.zoom);
+                self.pan-y = py - self.height / 2
+                    - (py - self.height / 2 - self.shown-y) * (self.next / self.zoom);
+                self.zoom = self.next;
+            }
+            /// To an exact scale, about the viewport's centre.
+            public function zoom-to(scale: float) {
+                self.zoom-about(scale / self.scale, self.width / 2, self.height / 2);
+            }
+            public function pan-by(dx: length, dy: length) {
+                self.unfit();
+                self.pan-x = self.shown-x + dx;
+                self.pan-y = self.shown-y + dy;
+            }
+            public function grab(x: length, y: length) {
+                self.unfit();
+                self.grab-x = self.shown-x;
+                self.grab-y = self.shown-y;
+                self.from-x = x;
+                self.from-y = y;
+            }
+            public function drag-to(x: length, y: length) {
+                self.pan-x = self.grab-x + (x - self.from-x);
+                self.pan-y = self.grab-y + (y - self.from-y);
+            }
 
-            // Kept over the well rather than added to the already dense
-            // transport row. It remains reachable even in a narrow split.
-            Rectangle {
-                x: parent.width - self.width - 12px;
-                y: parent.height - self.height - 12px;
-                width: 130px;
-                height: 36px;
+            // Ancestor of the stage and its overlay, so a wheel they do not
+            // handle reaches it, and a press on the well - the one place
+            // the overlay does not cover - is a drag of the view.
+            view := TouchArea {
+                property <bool> panning;
+                mouse-cursor: self.panning ? MouseCursor.grabbing : MouseCursor.default;
+
+                scroll-event(event) => {
+                    if (event.modifiers.control || event.modifiers.meta) {
+                        // The same gesture the lanes take, at the same
+                        // rate: proportional to the distance, clamped so
+                        // one enormous delta cannot jump octaves. Up is in.
+                        viewport.zoom-about(
+                            Math.max(0.5, Math.min(2.0, Math.pow(1.0025, event.delta-y / 1px))),
+                            self.mouse-x, self.mouse-y);
+                        return EventResult.accept;
+                    }
+                    // Both axes pan. A wheel with no horizontal axis of its
+                    // own pans sideways with shift, as it does everywhere.
+                    if (event.modifiers.shift && event.delta-x == 0px) {
+                        viewport.pan-by(event.delta-y, 0px);
+                    } else {
+                        viewport.pan-by(event.delta-x, event.delta-y);
+                    }
+                    return EventResult.accept;
+                }
+                pointer-event(event) => {
+                    if (event.kind == PointerEventKind.down
+                        && (event.button == PointerEventButton.left
+                            || event.button == PointerEventButton.middle)) {
+                        self.panning = true;
+                        viewport.grab(self.mouse-x, self.mouse-y);
+                    } else if (event.kind == PointerEventKind.up
+                        || event.kind == PointerEventKind.cancel) {
+                        self.panning = false;
+                    }
+                }
+                moved => {
+                    if (self.panning) {
+                        viewport.drag-to(self.mouse-x, self.mouse-y);
+                    }
+                }
+                double-clicked => { viewport.fit(); }
+
+            stage := Rectangle {
+                x: (parent.width - self.width) / 2 + viewport.shown-x;
+                y: (parent.height - self.height) / 2 + viewport.shown-y;
+                width: viewport.stage-w;
+                height: viewport.stage-h;
+                background: Theme.stage;
+                // A 1px ring lifts the stage off the well. Slint has no
+                // box-shadow, so the ring does the work alone — which is why
+                // it is `line-strong` and not the hairline every other edge
+                // uses.
                 border-width: 1px;
                 border-color: Theme.line-strong;
-                border-radius: Theme.r;
-                background: Theme.panel;
+                clip: true;
 
-                HorizontalLayout {
-                    padding: 4px;
-                    spacing: 2px;
+                // Where a decoded frame will be drawn. Until then the stage
+                // reports what is actually under the playhead.
+                if !root.has-picture: VerticalLayout {
+                    alignment: center;
+                    spacing: 10px;
 
-                    IconButton {
-                        glyph: Glyph.minus;
-                        label: "Zoom out";
-                        clicked => { root.nudge-preview-zoom(-0.1); }
+                    HorizontalLayout {
+                        alignment: center;
+                        Icon {
+                            glyph: Glyph.film;
+                            size: 22px;
+                            tint: Theme.fg-dim;
+                        }
                     }
 
-                    ZoomPicker {
-                        horizontal-stretch: 1;
-                        zoom <=> root.preview-zoom;
+                    Text {
+                        text: I18n.t("Nothing under the playhead");
+                        color: Theme.fg-dim;
+                        font-size: Theme.fs;
+                        horizontal-alignment: center;
                     }
+                }
 
-                    IconButton {
-                        glyph: Glyph.plus;
-                        label: I18n.t("Zoom in");
-                        clicked => { root.nudge-preview-zoom(0.1); }
-                    }
+                // The engine's frame, when one has arrived. It is already
+                // the stage's shape, so `contain` only absorbs a rounding
+                // pixel either way.
+                if root.has-picture && root.frame.width > 0: Image {
+                    x: 0;
+                    y: 0;
+                    width: parent.width;
+                    height: parent.height;
+                    source: root.frame;
+                    image-fit: contain;
                 }
             }
 
@@ -1023,6 +920,10 @@ export component PreviewPane inherits Rectangle {
                 grip-pressed(id, grip, x, y) => { root.stage-grip-pressed(id, grip, x, y); }
                 dragged(x, y, snap) => { root.stage-dragged(x, y, snap); }
                 released => { root.stage-released(); }
+                pan-pressed(x, y) => { viewport.grab(x, y); }
+                pan-dragged(x, y) => { viewport.drag-to(x, y); }
+                pan-released => { }
+            }
             }
         }
 
@@ -1147,11 +1048,25 @@ export component PreviewPane inherits Rectangle {
                     VerticalLayout {
                         alignment: center;
                         Select {
-                            width: 104px;
+                            snug: true;
+                            width: self.natural-width;
                             current: root.quality-index;
                             options: [I18n.t("Full"), I18n.t("Half"), I18n.t("Quarter")];
                             details: ["1:1", "1:2", "1:4"];
                             changed(index) => { root.quality-changed(index); }
+                        }
+                    }
+
+                    // The one control the view needs: the way back. The
+                    // zoom itself is the wheel's, and a readout of it was
+                    // width spent on a number nobody steers by.
+                    VerticalLayout {
+                        alignment: center;
+                        IconButton {
+                            glyph: Glyph.fit;
+                            label: I18n.t("Fit the frame to the pane");
+                            enabled: !viewport.fitted;
+                            clicked => { viewport.fit(); }
                         }
                     }
                 }

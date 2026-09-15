@@ -25,6 +25,7 @@ import { ContextMenu, MenuItemData, MenuRow } from "primitives/context-menu.slin
 import { ExportData, ExportDialog, ExportPhase } from "dialogs/export.slint";
 import { ModelData, SettingsData, SettingsDialog, SystemFactData } from "dialogs/settings.slint";
 import { ProjectDialog, ProjectSheetData } from "dialogs/project.slint";
+import { RelinkDialog, RelinkData, MissingMediaItem } from "dialogs/relink.slint";
 import { CaptionsDialog, CaptionsSheetData } from "dialogs/captions.slint";
 import { SpeechDialog, SpeechSheetData } from "dialogs/speech.slint";
 import { DockDivider, DockSide, SeatBox } from "dock.slint";
@@ -177,6 +178,8 @@ export component App inherits Window {
     callback export-resolution-changed(index: int);
     callback export-rate-changed(index: int);
     callback export-quality-changed(index: int);
+    callback export-codec-changed(index: int);
+    callback export-ten-bit-changed(on: bool);
     callback export-start();
     callback export-cancel();
     callback export-reveal();
@@ -184,9 +187,9 @@ export component App inherits Window {
 
     callback settings-closed();
     callback settings-page-changed(index: int);
+    callback settings-show-log();
     callback settings-language-changed(index: int);
     callback settings-theme-changed(dark: bool);
-    callback settings-audio-tracks-changed(index: int);
     callback settings-playhead-stops-changed(on: bool);
     callback model-activated(id: string);
     callback model-download(id: string);
@@ -442,6 +445,8 @@ export component App inherits Window {
         resolution-changed(index) => { root.export-resolution-changed(index); }
         rate-changed(index) => { root.export-rate-changed(index); }
         quality-changed(index) => { root.export-quality-changed(index); }
+        codec-changed(index) => { root.export-codec-changed(index); }
+        ten-bit-changed(on) => { root.export-ten-bit-changed(on); }
         begin => { root.export-start(); }
         cancel => { root.export-cancel(); }
         reveal => { root.export-reveal(); }
@@ -462,15 +467,19 @@ export component App inherits Window {
 
         closed => { root.settings-closed(); }
         page-changed(index) => { root.settings-page-changed(index); }
+        show-log => { root.settings-show-log(); }
         language-changed(index) => { root.settings-language-changed(index); }
         theme-changed(dark) => { root.settings-theme-changed(dark); }
-        audio-tracks-changed(index) => { root.settings-audio-tracks-changed(index); }
         playhead-stops-changed(on) => { root.settings-playhead-stops-changed(on); }
         model-activated(id) => { root.model-activated(id); }
         model-download(id) => { root.model-download(id); }
         model-cancel(id) => { root.model-cancel(id); }
         model-remove(id) => { root.model-remove(id); }
     }
+
+    in property <RelinkData> relink;
+    callback relink-all();
+    callback relink-dismiss();
 
     ProjectDialog {
         x: 0;
@@ -485,6 +494,13 @@ export component App inherits Window {
         rate-changed(index) => { root.project-rate-changed(index); }
         apply => { root.project-apply(); }
     }
+
+    RelinkDialog {
+        data: root.relink;
+        relink-all => { root.relink-all(); }
+        dismiss => { root.relink-dismiss(); }
+    }
+
 
     CaptionsDialog {
         x: 0;

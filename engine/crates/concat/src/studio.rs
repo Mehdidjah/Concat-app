@@ -18,6 +18,12 @@
 //! Everything Slint draws is produced by `publish` and its two halves from
 //! those two, on every event that could have changed either.
 
+#![allow(
+    clippy::type_complexity,
+    clippy::collapsible_if,
+    clippy::manual_unwrap_or_default
+)]
+
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
@@ -48,11 +54,12 @@ use crate::format::{
     bytes, colour_of, eta, frames_timecode, hex_of, hex_with_alpha, wave_path, when_phrase,
 };
 use crate::host::{
-    Host, MediaArt, cached_media_art, image_at, image_of, media_art, on_ui, spawn, spawn_art,
-    spawn_detached, spawn_unpublished,
+    CachedStrip, Host, MediaArt, WindowArt, cached_media_art, cached_window_art, image_at,
+    image_of, media_art, on_ui, spawn, spawn_art, spawn_detached, spawn_unpublished, strip_window,
+    window_art, window_span, window_start,
 };
 use crate::i18n::{self, t, tf};
-use crate::prefs::{AudioTracks, Preferences};
+use crate::prefs::Preferences;
 use crate::presets::{self, TextPreset};
 use crate::ui::*;
 
@@ -96,6 +103,39 @@ pub struct Strip {
     /// The picture's height in its own pixels.
     pub height: i32,
 }
+
+impl From<CachedStrip> for Strip {
+    fn from(strip: CachedStrip) -> Self {
+        Self {
+            image: strip.image,
+            frames: strip.frames as i32,
+            frame_width: strip.frame_width as i32,
+            height: strip.height as i32,
+        }
+    }
+}
+
+impl Strip {
+    /// A decoded strip of `frames` frames.
+    fn of(frame: &concat_core::frame::Frame, frames: u32) -> Self {
+        Self {
+            image: image_of(frame),
+            frames: frames as i32,
+            frame_width: (frame.width() / frames.max(1)) as i32,
+            height: frame.height() as i32,
+        }
+    }
+}
+
+/// The key a cell's strip is held under: the media and the cell.
+fn window_key(media_id: &str, level: u32, cell: u32) -> String {
+    format!("{media_id}|{level}|{cell}")
+}
+
+/// How many cell strips are kept before the ones no clip on the current
+/// timeline shows are let go. Each is a picture the size of the file's own
+/// strip; a trim walks through several levels on its way down.
+const WINDOWS_KEPT: usize = 96;
 
 /// Steps per second the drawn waveform is quantised to. See `Studio::wave`:
 /// it is what keeps a trim from synthesising a new envelope on every pointer
@@ -229,6 +269,9 @@ pub struct ExportState {
     pub resolution: usize,
     pub rate: usize,
     pub quality: usize,
+    /// Index into `VideoCodec::ALL`.
+    pub codec: usize,
+    pub ten_bit: bool,
     pub phase: ExportPhase,
     pub progress: f32,
     pub stage: String,
@@ -248,6 +291,8 @@ impl Default for ExportState {
             resolution: 2,
             rate: 1,
             quality: 1,
+            codec: 0,
+            ten_bit: false,
             phase: ExportPhase::Idle,
             progress: 0.0,
             stage: String::new(),
@@ -272,10 +317,15 @@ pub struct SettingsState {
     pub open: bool,
     pub tab: i32,
     pub language: usize,
-    /// Row of [`AudioTracks`] in the General page.
-    pub audio_tracks: i32,
     /// The switch that keeps the playhead inside the content.
     pub playhead_stops: bool,
+}
+
+/// The missing media relink dialog state.
+#[derive(Default)]
+pub struct RelinkState {
+    pub open: bool,
+    pub items: Vec<concat_project::model::MissingMedia>,
 }
 
 /// The bottom-right notice: one at a time. The token is what the panel
@@ -871,7 +921,12 @@ pub struct Studio {
     /// Filmstrips by media id: the picture, how many frames are in it, one
     /// frame's width and the strip's height, in the picture's own pixels.
     pub strips: HashMap<String, Strip>,
+    /// Filmstrips of one cell of a file each, by `window_key`, for the cuts
+    /// too short a piece of their footage for the file's strip to show as
+    /// more than one frame repeated. See `host::strip_window`.
+    pub windows: HashMap<String, Strip>,
     art_pending: HashSet<String>,
+    window_pending: HashSet<String>,
     /// Envelopes, keyed by the things they are computed from. A move
     /// changes none of them, and a publish happens on every frame of one.
     waves: RefCell<HashMap<String, SharedString>>,
@@ -916,6 +971,7 @@ pub struct Studio {
     // ── the sheets and menus ──
     pub export: ExportState,
     pub settings: SettingsState,
+    pub relink: RelinkState,
     pub transcribers: Vec<ModelState>,
     pub voices: Vec<ModelState>,
     pub open_menu: i32,
@@ -985,6 +1041,7 @@ pub struct Studio {
     /// text clip is drawn from; see `footprint`.
     /// Per text clip: the painted block's size in frame pixels, and its
     /// centre's offset from the clip's centre - see `TitleClip::offset`.
+    #[allow(clippy::type_complexity)]
     pub title_blocks: HashMap<String, ((u32, u32), (i32, i32))>,
     pub drop: Option<DropPlan>,
     pub project_sheet: ProjectSheet,
@@ -2402,7 +2459,9 @@ impl Studio {
             peaks: HashMap::new(),
             thumbs: HashMap::new(),
             strips: HashMap::new(),
+            windows: HashMap::new(),
             art_pending: HashSet::new(),
+            window_pending: HashSet::new(),
             waves: RefCell::new(HashMap::new()),
             lane_view: HashMap::new(),
             keyframe_graph: None,
@@ -2428,6 +2487,7 @@ impl Studio {
             preview_failed: false,
             export: ExportState::default(),
             settings: SettingsState::default(),
+            relink: RelinkState::default(),
             transcribers: Vec::new(),
             voices: Vec::new(),
             open_menu: -1,
@@ -2481,7 +2541,6 @@ impl Studio {
             .iter()
             .position(|language| Some(language.code.as_str()) == studio.prefs.locale.as_deref())
             .unwrap_or(0);
-        studio.settings.audio_tracks = studio.prefs.audio_tracks.row();
         studio.settings.playhead_stops = studio.prefs.playhead_stops_at_end;
         studio.refresh_models();
         studio
@@ -2830,8 +2889,10 @@ impl Studio {
     fn start_preview_request(&mut self) {
         /// A monitor frame on its way to the window.
         enum Picture {
-            /// Already on the GPU, on the window's own device.
-            Texture(concat_host::preview::wgpu::Texture),
+            /// Decoded and placed, waiting to be drawn on the window's own
+            /// device - which happens back on this thread, never on the
+            /// worker that decoded it. See `Monitor::texture_of`.
+            Sources(concat_export::PreviewSources),
             /// Raw RGBA, to be uploaded.
             Pixels(Vec<u8>, u32, u32),
         }
@@ -2976,8 +3037,8 @@ impl Studio {
                 // one it comes back as pixels and is uploaded here.
                 let frame = if monitor.has_gpu() {
                     monitor
-                        .frame_texture(std::sync::Arc::clone(&clips), &settings, spec)
-                        .map(Picture::Texture)
+                        .frame_sources(std::sync::Arc::clone(&clips), &settings, spec)
+                        .map(Picture::Sources)
                 } else {
                     monitor
                         .frame(std::sync::Arc::clone(&clips), &settings, spec)
@@ -3000,24 +3061,33 @@ impl Studio {
                 if fresh || active_stream {
                     let mut failed = false;
                     let mut rendered = false;
-                    match result {
-                        Ok(Picture::Texture(texture)) => match slint::Image::try_from(texture) {
-                            Ok(image) => {
-                                studio.preview = image;
-                                rendered = true;
-                            }
-                            Err(error) => eprintln!("concat: preview texture: {error}"),
-                        },
+                    let picture = match result {
+                        // The window's GPU texture must be submitted from
+                        // the UI thread, never the decoding worker.
+                        Ok(Picture::Sources(sources)) => studio
+                            .host
+                            .monitor
+                            .texture_of(&sources, spec)
+                            .and_then(|texture| {
+                                slint::Image::try_from(texture)
+                                    .map_err(|error| format!("preview texture: {error}"))
+                            }),
                         Ok(Picture::Pixels(bytes, width, height)) => {
                             let buffer =
                                 slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(
                                     &bytes, width, height,
                                 );
-                            studio.preview = slint::Image::from_rgba8(buffer);
+                            Ok(slint::Image::from_rgba8(buffer))
+                        }
+                        Err(error) => Err(error),
+                    };
+                    match picture {
+                        Ok(image) => {
+                            studio.preview = image;
                             rendered = true;
                         }
                         Err(error) => {
-                            eprintln!("concat: preview: {error}");
+                            log::warn!("preview: {error}");
                             if !studio.preview_failed {
                                 studio.preview_failed = true;
                                 studio.notify(&tf("Preview failed: {0}", &[&error]), true);
@@ -3462,15 +3532,7 @@ impl Studio {
                     self.thumbs.insert(id.clone(), image);
                 }
                 if let Some(strip) = cached.strip {
-                    self.strips.insert(
-                        id.clone(),
-                        Strip {
-                            image: strip.image,
-                            frames: strip.frames as i32,
-                            frame_width: strip.frame_width as i32,
-                            height: strip.height as i32,
-                        },
-                    );
+                    self.strips.insert(id.clone(), strip.into());
                 }
                 pictures = !self.thumbs.contains_key(&id) || !self.strips.contains_key(&id);
             }
@@ -3497,13 +3559,9 @@ impl Studio {
                         studio.thumbs.insert(art.id.clone(), image_of(&frame));
                     }
                     if let Some((frame, frames)) = art.strip {
-                        let strip = Strip {
-                            image: image_of(&frame),
-                            frames: frames as i32,
-                            frame_width: (frame.width() / frames.max(1)) as i32,
-                            height: frame.height() as i32,
-                        };
-                        studio.strips.insert(art.id.clone(), strip);
+                        studio
+                            .strips
+                            .insert(art.id.clone(), Strip::of(&frame, frames));
                     }
                     if let Some(peaks) = art.peaks {
                         let prefix = format!("{key}|");
@@ -3516,6 +3574,107 @@ impl Studio {
                 },
             );
         }
+        self.request_window_art();
+    }
+
+    /// Decodes a cell strip for every picture clip on the current timeline
+    /// whose cut is too short a piece of its footage for the file's own
+    /// strip - see `host::strip_window` - and lets go of the cells nothing
+    /// shows once there are more than `WINDOWS_KEPT` of them.
+    fn request_window_art(&mut self) {
+        let Some(session) = self.session.as_ref() else {
+            return;
+        };
+        let project_path = session.path().to_owned();
+        struct Want {
+            key: String,
+            id: String,
+            path: String,
+            level: u32,
+            cell: u32,
+            duration: f64,
+        }
+        let mut shown: HashSet<String> = HashSet::new();
+        let mut wanted: Vec<Want> = Vec::new();
+        for clip in &self.timeline().clips {
+            if clip.kind != model::ClipKind::Video {
+                continue;
+            }
+            let Some(item) = self.project().media_by_id(&clip.media_id) else {
+                continue;
+            };
+            if item.placeholder || item.path.is_empty() {
+                continue;
+            }
+            let Some((start, span, duration)) = self.cut_of(clip) else {
+                continue;
+            };
+            let Some((level, cell)) = strip_window(start, span, duration) else {
+                continue;
+            };
+            let key = window_key(&clip.media_id, level, cell);
+            if !shown.insert(key.clone())
+                || self.windows.contains_key(&key)
+                || self.window_pending.contains(&key)
+            {
+                continue;
+            }
+            wanted.push(Want {
+                key,
+                id: item.id.clone(),
+                path: item.path.clone(),
+                level,
+                cell,
+                duration,
+            });
+        }
+        if self.windows.len() > WINDOWS_KEPT {
+            self.windows.retain(|key, _| shown.contains(key));
+        }
+        for want in wanted {
+            let Want {
+                key,
+                id,
+                path,
+                level,
+                cell,
+                duration,
+            } = want;
+            if let Some(strip) = cached_window_art(&project_path, &id, &path, level, cell) {
+                self.windows.insert(key, strip.into());
+                continue;
+            }
+            self.window_pending.insert(key);
+            let project = project_path.clone();
+            spawn_art(
+                move || window_art(id, path, project, level, cell, duration),
+                |studio, _, _, art: WindowArt| {
+                    let key = window_key(&art.id, art.level, art.cell);
+                    studio.window_pending.remove(&key);
+                    if let Some((frame, frames)) = art.strip {
+                        studio.windows.insert(key, Strip::of(&frame, frames));
+                    }
+                },
+            );
+        }
+    }
+
+    /// A picture clip's cut as fractions of its footage - where it begins
+    /// and how much it covers - with the footage's length in seconds.
+    /// `None` for a still or footage of unknown length: one frame, all of it.
+    fn cut_of(&self, clip: &Clip) -> Option<(f64, f64, f64)> {
+        let seconds = self
+            .project()
+            .media
+            .iter()
+            .find(|item| item.id == clip.media_id)
+            .and_then(|item| item.duration)
+            .filter(|seconds| *seconds > 0.0)?;
+        Some((
+            (clip.source_start / seconds).clamp(0.0, 1.0),
+            (clip.duration * clip.speed / seconds).clamp(0.0, 1.0),
+            seconds,
+        ))
     }
 
     /// The clip's filmstrip, with the window of the strip its cut covers:
@@ -3526,24 +3685,25 @@ impl Studio {
         if !matches!(clip.kind, model::ClipKind::Video | model::ClipKind::Image) {
             return StripData::default();
         }
-        let Some(strip) = self.strips.get(&clip.media_id) else {
+        let Some(mut strip) = self.strips.get(&clip.media_id) else {
             return StripData::default();
         };
-        let footage = self
-            .project()
-            .media
-            .iter()
-            .find(|item| item.id == clip.media_id)
-            .and_then(|item| item.duration)
-            .filter(|seconds| *seconds > 0.0);
-        let (start, span) = match footage {
-            Some(seconds) => (
-                (clip.source_start / seconds).clamp(0.0, 1.0),
-                (clip.duration * clip.speed / seconds).clamp(0.0, 1.0),
-            ),
-            // A still, or footage of unknown length: one frame, all of it.
-            None => (0.0, 1.0),
-        };
+        let (mut start, mut span) = (0.0, 1.0);
+        if let Some((cut_start, cut_span, duration)) = self.cut_of(clip) {
+            start = cut_start;
+            span = cut_span;
+            // The cell strip, once it is here: the cut re-expressed as a
+            // window of that cell rather than of the whole file. Until it
+            // arrives the file's strip stands in, and the tiles repeat.
+            if let Some((level, cell)) = strip_window(start, span, duration)
+                && let Some(window) = self.windows.get(&window_key(&clip.media_id, level, cell))
+            {
+                let (cell_start, cell_span) = (window_start(level, cell), window_span(level));
+                start = ((start - cell_start) / cell_span).clamp(0.0, 1.0);
+                span = (span / cell_span).clamp(0.0, 1.0);
+                strip = window;
+            }
+        }
         StripData {
             image: strip.image.clone(),
             frames: strip.frames,
@@ -3680,8 +3840,7 @@ impl Studio {
             })
         };
         if let Some(id) = created {
-            self.selection = vec![id.clone()];
-            self.settle_audio_tracks(&id);
+            self.selection = vec![id];
         }
     }
 
@@ -3709,51 +3868,7 @@ impl Studio {
             })
         };
         if let Some(id) = created {
-            self.selection = vec![id.clone()];
-            self.settle_audio_tracks(&id);
-        }
-    }
-
-    /// The Settings choice for a file with several audio tracks, applied to
-    /// a clip just placed from the bin. Nothing for the first track: that
-    /// is what a fresh clip plays. The last track is named on the clip; every
-    /// track is the sound pulled out, one clip per track, as Detach audio
-    /// does. A file with one track has nothing to choose, whatever the
-    /// setting says. A second edit after the placement, so an undo takes the
-    /// choice back and leaves the clip, the way a freeze frame's trim does.
-    fn settle_audio_tracks(&mut self, clip_id: &str) {
-        let choice = self.prefs.audio_tracks;
-        if choice == AudioTracks::First {
-            return;
-        }
-        let Some(media_id) = self.clip(clip_id).map(|clip| clip.media_id.clone()) else {
-            return;
-        };
-        let tracks = self
-            .project()
-            .media
-            .iter()
-            .find(|item| item.id == media_id)
-            .map(|item| item.audio_tracks.clone())
-            .unwrap_or_default();
-        if tracks.len() < 2 {
-            return;
-        }
-        let clip_id = clip_id.to_owned();
-        match choice {
-            AudioTracks::First => {}
-            AudioTracks::Last => {
-                self.apply(Command::UpdateClip {
-                    clip_id,
-                    patch: ClipPatch {
-                        audio_stream: Some(tracks.last().map(|track| track.index)),
-                        ..ClipPatch::default()
-                    },
-                });
-            }
-            AudioTracks::Every => {
-                self.apply(Command::DetachAudio { clip_id });
-            }
+            self.selection = vec![id];
         }
     }
 
@@ -6494,6 +6609,7 @@ impl Studio {
             .filter_map(|id| self.clip(id).cloned())
             .filter(|clip| !self.locked(&clip.track_id))
             .collect();
+        #[allow(clippy::collapsible_if)]
         if sources.is_empty() {
             if let Some(id) = self.menu_target.clone() {
                 if let Some(clip) = self.clip(&id).cloned() {
@@ -6579,13 +6695,21 @@ impl Studio {
 
     /// What the tray's sound and word tools may do to the selection: one
     /// clip with sound for Captions to start on, one title for Speak to
-    /// read, one video clip whose sound is on it to detach, or whose sound
-    /// is off it to put back. The first two are hints - both sheets open
-    /// without them - and the last two are gates.
-    fn sound_tools(&self) -> (bool, bool, bool, bool) {
+    /// read. Hints, not gates - both sheets open without them.
+    fn sound_tools(&self) -> (bool, bool) {
         let Some(clip) = self.sole_selection().and_then(|id| self.clip(&id)) else {
-            return (false, false, false, false);
+            return (false, false);
         };
+        (
+            self.clip_has_sound(clip),
+            clip.kind == model::ClipKind::Text,
+        )
+    }
+
+    /// Where a clip's sound is: whether it is a video clip whose sound is
+    /// still on its picture, to take off, and whether it is a picture whose
+    /// sound is off it - or that sound itself - to put back.
+    fn sound_placement(&self, clip: &Clip) -> (bool, bool) {
         let detached = self
             .timeline()
             .clips
@@ -6593,8 +6717,6 @@ impl Studio {
             .any(|other| other.detached_from.as_deref() == Some(clip.id.as_str()));
         let video = clip.kind == model::ClipKind::Video;
         (
-            self.clip_has_sound(clip),
-            clip.kind == model::ClipKind::Text,
             video && !detached,
             (video && detached)
                 || (clip.kind == model::ClipKind::Audio && clip.detached_from.is_some()),
@@ -6622,7 +6744,7 @@ impl Studio {
         match Session::open_info(&info) {
             Ok(session) => {
                 if let Err(error) = projects::remember(&self.host.dirs.config, &info) {
-                    eprintln!("concat: {error}");
+                    log::warn!("{error}");
                 }
                 self.pause();
                 self.mask_track_generation = self.mask_track_generation.wrapping_add(1);
@@ -6652,12 +6774,135 @@ impl Studio {
                 self.request_preview();
                 self.ensure_cutouts();
                 self.ensure_regions();
+
+                // Log missing media to file for debugging
+                if let Some(session) = &self.session {
+                    let missing = session.project().missing_media();
+                    if !missing.is_empty() {
+                        let log_path = std::path::Path::new(&info.path)
+                            .join("cache")
+                            .join("missing_media.log");
+                        if let Ok(mut file) = std::fs::File::create(&log_path) {
+                            use std::io::Write;
+                            let _ = writeln!(file, "{} media files missing:", missing.len());
+                            for m in &missing {
+                                let _ = writeln!(file, "  - {} ({})", m.name, m.path);
+                            }
+                        }
+
+                        // Open relink dialog
+                        self.relink.open = true;
+                        self.relink.items = missing;
+                    }
+                }
             }
             Err(error) => {
                 self.start.busy = false;
                 self.start.error = error;
             }
         }
+    }
+
+    /// Relinks missing media by searching a folder (recursively) for files
+    /// whose basename matches. The user picks one folder; each missing item
+    /// looks for its own filename inside it. Successful relinks go through
+    /// the editor as `UpdateMediaPath`, so undo covers the whole batch.
+    pub fn relink_all(&mut self) {
+        use concat_project::commands::Command;
+
+        let Some(folder) = crate::platform::pick_folder(
+            &crate::i18n::t("Select folder containing media files"),
+            "",
+        ) else {
+            return;
+        };
+
+        // Snapshot the missing list now: as relinks land the list shrinks,
+        // and we want a stable target for the toast count.
+        let items: Vec<(String, String)> = self
+            .relink
+            .items
+            .iter()
+            .map(|m| (m.id.clone(), m.path.clone()))
+            .collect();
+        let total = items.len();
+        if total == 0 {
+            self.relink.open = false;
+            return;
+        }
+
+        // Build a basename -> full path index of every file under the folder
+        // so the per-item lookup is O(1) rather than a walk each time.
+        let mut index: std::collections::HashMap<String, std::path::PathBuf> =
+            std::collections::HashMap::new();
+        let mut stack = vec![folder.clone()];
+        while let Some(dir) = stack.pop() {
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.filter_map(|e| e.ok()) {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                    // First match wins: if the user has duplicates, the one
+                    // closest to the root is the most likely correct copy.
+                    index.entry(name.to_owned()).or_insert(path);
+                }
+            }
+        }
+
+        let Some(session) = self.session.as_mut() else {
+            return;
+        };
+
+        let mut relinked = 0usize;
+        let mut commands: Vec<Command> = Vec::new();
+        for (id, path) in items {
+            let Some(basename) = std::path::Path::new(&path)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(|s| s.to_owned())
+            else {
+                continue;
+            };
+            if let Some(found) = index.get(&basename) {
+                commands.push(Command::UpdateMediaPath {
+                    media_id: id,
+                    new_path: found.to_string_lossy().to_string(),
+                });
+                relinked += 1;
+            }
+        }
+
+        if !commands.is_empty() {
+            if let Err(error) = session.apply(Command::Batch { commands }) {
+                self.notify(&format!("Relink failed: {error}"), true);
+                return;
+            }
+            self.dirty = true;
+            self.revision += 1;
+        }
+
+        // Re-check what is still missing: the dialog updates to the
+        // remainder (often empty, in which case it closes).
+        let remaining = session.project().missing_media();
+        if remaining.is_empty() {
+            self.relink.open = false;
+            self.relink.items.clear();
+        } else {
+            self.relink.items = remaining;
+        }
+
+        self.notify(
+            &format!(
+                "Relinked {relinked} of {total} file{}",
+                if total == 1 { "" } else { "s" }
+            ),
+            false,
+        );
+        self.request_media_art();
+        self.request_preview();
     }
 
     pub fn create_project(&mut self) {
@@ -6684,6 +6929,23 @@ impl Studio {
             Ok(info) => self.open_project(info),
             Err(error) => self.start.error = error,
         }
+    }
+
+    /// Clears all cached artwork and waveforms from the current project.
+    pub fn clear_project_cache(&mut self) {
+        let Some(path) = self
+            .session
+            .as_ref()
+            .map(|session| session.path().to_string())
+        else {
+            return;
+        };
+        match concat_host::projects::clear_cache(&path) {
+            Ok(count) => self.notify(&format!("Cleared {count} cache files"), false),
+            Err(error) => self.notify(&format!("Cache clear failed: {error}"), true),
+        }
+        self.request_media_art();
+        self.request_preview();
     }
 
     pub fn forget_recent(&mut self, path: &str) {
@@ -6779,8 +7041,21 @@ impl Studio {
         let (num, den) = EXPORT_RATES[self.export.rate.min(2)];
         let rate = num as f32 / den as f32;
         let pixels = (width as f32 * height as f32) / (1920.0 * 1080.0);
-        let video = EXPORT_TIERS[tier.min(2)] * 1_000_000.0 * pixels * (rate / 30.0);
+        let video = EXPORT_TIERS[tier.min(2)]
+            * 1_000_000.0
+            * pixels
+            * (rate / 30.0)
+            * self.export_codec().size_factor()
+            * if self.export.ten_bit { 1.05 } else { 1.0 };
         (video + AUDIO_BPS) * self.duration().max(1.0) / 8.0
+    }
+
+    /// The codec the sheet has chosen.
+    pub fn export_codec(&self) -> concat_media::VideoCodec {
+        concat_media::VideoCodec::ALL[self
+            .export
+            .codec
+            .min(concat_media::VideoCodec::ALL.len() - 1)]
     }
 
     /// Starts the render on a worker, reporting into the sheet.
@@ -6810,6 +7085,8 @@ impl Studio {
             output: output.clone(),
             crf: EXPORT_CRF[self.export.quality.min(2)],
             preset: "veryfast".into(),
+            codec: self.export_codec(),
+            ten_bit: self.export.ten_bit,
         };
         let (frame_w, frame_h) = self.output_size();
         let titles = self
@@ -7446,7 +7723,7 @@ impl Studio {
             return;
         }
         for error in Catalogue::install(&dir) {
-            eprintln!("concat: look: {error}");
+            log::warn!("look: {error}");
         }
         self.library[0].query.clear();
         self.notify(
@@ -7763,7 +8040,6 @@ impl Studio {
                     let height = self.lane_height(lane);
                     let row = TrackData {
                         id: lane.id.as_str().into(),
-                        name: lane.name.as_str().into(),
                         visible: lane.visible,
                         muted: lane.muted,
                         locked: self.locked(&lane.id),
@@ -8072,11 +8348,9 @@ impl Studio {
         editor.set_tool(self.tool);
         editor.set_snap(self.snap);
         editor.set_selected_count(self.selection.len() as i32);
-        let (sound_selected, title_selected, can_detach, can_reattach) = self.sound_tools();
+        let (sound_selected, title_selected) = self.sound_tools();
         editor.set_sound_selected(sound_selected);
         editor.set_title_selected(title_selected);
-        editor.set_can_detach(can_detach);
-        editor.set_can_reattach(can_reattach);
         editor.set_merge_blocked_because(match self.merge_blocked() {
             Some(reason) => reason.into(),
             None => SharedString::new(),
@@ -8931,7 +9205,6 @@ impl Studio {
             open: self.settings.open,
             tab: self.settings.tab,
             language: self.settings.language as i32,
-            audio_tracks: self.settings.audio_tracks,
             playhead_stops: self.settings.playhead_stops,
             disk: {
                 let installed: Vec<&ModelState> = self
@@ -8940,6 +9213,22 @@ impl Studio {
                     .chain(self.voices.iter())
                     .filter(|model| model.installed)
                     .collect();
+
+                let relink_data = RelinkData {
+                    open: self.relink.open,
+                    items: slint::ModelRc::new(VecModel::from(
+                        self.relink
+                            .items
+                            .iter()
+                            .map(|item| MissingMediaItem {
+                                id: item.id.clone().into(),
+                                name: item.name.clone().into(),
+                                path: item.path.clone().into(),
+                            })
+                            .collect::<Vec<_>>(),
+                    )),
+                };
+                app.set_relink(relink_data);
                 let on_disk: f32 = installed.iter().map(|model| model.megabytes).sum();
                 tf(
                     "{0} installed · {1} MB on disk",
@@ -9074,6 +9363,27 @@ impl Studio {
             resolution: self.export.resolution as i32,
             rate: self.export.rate as i32,
             quality: self.export.quality as i32,
+            codec: self.export.codec as i32,
+            ten_bit: self.export.ten_bit,
+            encoding: {
+                // "HEVC 10-bit · hardware": the standard, the depth when it
+                // is the deeper one, and whether the platform's own encoder
+                // will be doing it.
+                let codec = self.export_codec();
+                let mut words = vec![codec.label().to_owned()];
+                if self.export.ten_bit {
+                    words.push("10-bit".to_owned());
+                }
+                if codec
+                    .encoders(true)
+                    .first()
+                    .is_some_and(|name| name.ends_with("_videotoolbox"))
+                {
+                    words.push(format!("· {}", t("hardware")));
+                }
+                words.join(" ")
+            }
+            .into(),
             size_high: bytes(self.export_size_bytes(0)).into(),
             size_balanced: bytes(self.export_size_bytes(1)).into(),
             size_small: bytes(self.export_size_bytes(2)).into(),
@@ -9208,6 +9518,29 @@ impl Studio {
             ),
             rule(),
         ];
+        // One slot, two verbs: the sound is either on its picture or off it.
+        // Shown on every video clip, so the verb is where a person looks for
+        // it, and greyed rather than gone when the file has no sound.
+        let (can_detach, can_reattach) = self.sound_placement(clip);
+        if can_reattach {
+            rows.push(action(
+                "reattach",
+                t("Reattach audio"),
+                Glyph::Merge,
+                "",
+                !locked,
+            ));
+            rows.push(rule());
+        } else if clip.kind == model::ClipKind::Video {
+            rows.push(action(
+                "detach",
+                t("Detach audio"),
+                Glyph::Waveform,
+                "",
+                !locked && can_detach && self.clip_has_sound(clip),
+            ));
+            rows.push(rule());
+        }
         let audible = clip.kind != model::ClipKind::Image;
         rows.push(check(
             "mute",
@@ -9301,6 +9634,13 @@ impl Studio {
                 ),
                 row("template", t("Save as template…"), Glyph::Slot, "", true),
                 row("speech", t("Text to speech…"), Glyph::Volume, "", true),
+                row(
+                    "clear-cache",
+                    t("Clear project cache"),
+                    Glyph::None,
+                    "",
+                    true,
+                ),
                 rule(),
                 row("settings", t("Settings…"), Glyph::Settings, "⌘,", true),
                 rule(),
@@ -9383,9 +9723,7 @@ impl Studio {
             .collect();
         let start = f64::from(self.playhead.max(0.0));
         for media_id in ids {
-            if let Some(id) = self.apply(Command::AddClipAtFirstFree { media_id, start }) {
-                self.settle_audio_tracks(&id);
-            }
+            self.apply(Command::AddClipAtFirstFree { media_id, start });
         }
     }
 
@@ -9640,6 +9978,16 @@ impl Studio {
                 }
             }
             "freeze" => self.freeze_at_playhead(),
+            "detach" => {
+                self.apply(Command::DetachAudio {
+                    clip_id: id.to_owned(),
+                });
+            }
+            "reattach" => {
+                self.apply(Command::ReattachAudio {
+                    clip_id: id.to_owned(),
+                });
+            }
             "mute" => {
                 let volume = if clip.volume <= 0.0 { 1.0 } else { 0.0 };
                 self.apply(Command::UpdateClip {

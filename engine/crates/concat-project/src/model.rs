@@ -154,9 +154,6 @@ pub struct Track {
     /// Minted per timeline ("t5", or "T1".."T4" for the first timeline's
     /// starter lanes); never shared between timelines.
     pub id: String,
-    /// User-editable label. Renames to whitespace are ignored, so it is
-    /// never blank.
-    pub name: String,
     /// Video clips on this track are left out of the composite when false.
     pub visible: bool,
     /// Audio on this track is silent when true.
@@ -2189,6 +2186,17 @@ pub struct Project {
     pub active_timeline_id: String,
 }
 
+/// A media reference that points to a non-existent file.
+#[derive(Clone, Debug)]
+pub struct MissingMedia {
+    /// The media item's stable id (e.g. "m1", "m2").
+    pub id: String,
+    /// Display name in the bin.
+    pub name: String,
+    /// The absolute path that no longer exists on disk.
+    pub path: String,
+}
+
 impl Project {
     /// A new project: one timeline, four lanes, at the default frame.
     pub fn new() -> Self {
@@ -2208,7 +2216,6 @@ impl Project {
                 tracks: (1..=4)
                     .map(|number| Track {
                         id: format!("T{number}"),
-                        name: format!("Track {number}"),
                         visible: true,
                         muted: false,
                     })
@@ -2243,6 +2250,19 @@ impl Project {
     /// The bin entry with this id, or None if it was removed.
     pub fn media_by_id(&self, media_id: &str) -> Option<&MediaItem> {
         self.media.iter().find(|item| item.id == media_id)
+    }
+
+    /// Returns every media item whose file does not exist on disk.
+    pub fn missing_media(&self) -> Vec<MissingMedia> {
+        self.media
+            .iter()
+            .filter(|item| !std::path::Path::new(&item.path).exists())
+            .map(|item| MissingMedia {
+                id: item.id.clone(),
+                name: item.name.clone(),
+                path: item.path.clone(),
+            })
+            .collect()
     }
 }
 

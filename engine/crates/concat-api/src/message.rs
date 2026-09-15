@@ -251,6 +251,12 @@ pub struct ExportSpec {
     /// Frame rate denominator; the timeline's when absent.
     #[serde(default)]
     pub rate_den: Option<i64>,
+    /// "h264", "hevc" or "av1". H.264 when absent.
+    #[serde(default)]
+    pub codec: Option<String>,
+    /// Ten bits a channel. Eight when absent.
+    #[serde(default)]
+    pub ten_bit: Option<bool>,
 }
 
 /// What a request hands back. Serialised as the payload alone: the variant
@@ -382,6 +388,7 @@ pub struct ParamInfo {
 /// "..."}` with the sentence a person would be shown when it did not.
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+#[allow(clippy::large_enum_variant)]
 pub enum Response {
     /// The reply.
     Result(Reply),

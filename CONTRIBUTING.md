@@ -58,6 +58,19 @@ If you added or changed text the interface shows, also run
 Translations live in one JSON file per language — see
 [`TRANSLATING.md`](TRANSLATING.md).
 
+If you added or changed a downloadable model, put it in
+[`models/manifest.toml`](models/manifest.toml) as well as the engine table it
+belongs to, and run `python3 scripts/models.py --check`; CI checks that too.
+A maintainer then runs the *Mirror models* workflow, which fetches the model,
+records its digest in both places and publishes it to the mirror the app
+downloads from.
+
+Write what happens through the `log` facade — `log::info!`, `log::warn!`,
+`log::error!` — rather than to standard output or standard error. Every run
+writes `<app data>/logs/concat-<when>.log`, and a packaged build has no
+terminal for anything that goes anywhere else; `CONCAT_LOG=debug` turns the
+level up. See `engine/crates/concat-host/src/logs.rs`.
+
 New source files need a licence header — see below. Match the style of the code
 around you; the engine avoids cleverness on purpose.
 

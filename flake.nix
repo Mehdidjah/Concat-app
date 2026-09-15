@@ -102,6 +102,7 @@
           gtk3
           libxkbcommon
           wayland
+          openssl
         ];
     in
     {
@@ -109,7 +110,7 @@
         default = concat;
         concat = pkgs.rustPlatform.buildRustPackage {
           pname = "concat";
-          version = "0.2.1";
+          version = "0.2.2";
           src = self;
 
           cargoRoot = "engine";

@@ -328,8 +328,6 @@ export component Seat inherits Rectangle {
             merge-blocked-because: Editor.merge-blocked-because;
             sound-selected: Editor.sound-selected;
             title-selected: Editor.title-selected;
-            can-detach: Editor.can-detach;
-            can-reattach: Editor.can-reattach;
             playhead: Editor.playhead;
             frame-rate: Editor.frame-rate;
             scroll-left: Editor.scroll-left;
@@ -347,8 +345,6 @@ export component Seat inherits Rectangle {
             delete-selected => { Editor.delete-selected(); }
             captions => { Editor.captions(); }
             speak => { Editor.speak(); }
-            detach => { Editor.detach-audio(); }
-            reattach => { Editor.reattach-audio(); }
             add-track => { Editor.add-track(); }
             zoom-to-fit(width) => { Editor.zoom-to-fit(width); }
             zoom(factor, anchor) => { Editor.zoom(factor, anchor); }
@@ -381,7 +377,6 @@ export component Seat inherits Rectangle {
             }
             track-sized(index, size) => { Editor.track-sized(index, size); }
             track-removed(index) => { Editor.track-removed(index); }
-            track-renamed(index, name) => { Editor.track-renamed(index, name); }
         }
 
     // What says where the drop will land — and, on an edge, how much of the

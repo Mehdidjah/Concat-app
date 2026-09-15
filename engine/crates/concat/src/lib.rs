@@ -48,6 +48,26 @@ use host::{Host, Shell};
 use studio::{GraphAction, Models, OUTPUTS, RESOLUTIONS, START_RATES, Studio};
 use ui::*;
 
+/// Opens this run's log file and makes it where the app writes things down.
+///
+/// Each entry point calls this before [`run`], because each knows where its
+/// console is: a desktop has a standard error, a phone has logcat, and that
+/// is what arrives here as `extra`. Everything after it - the engine's
+/// warnings, a panic, the lines below - is written down in
+/// `<app data>/logs/` as well as said out loud. See `concat_host::logs`.
+pub fn open_logging(extra: Option<Box<dyn log::Log>>) {
+    concat_host::logs::catch_panics();
+    let opened = match concat_host::AppDirs::locate() {
+        Ok(dirs) => concat_host::logs::open(&dirs, extra).map(|_| ()),
+        // No directory at all: the facade still has to lead somewhere, or
+        // every line disappears silently rather than loudly.
+        Err(error) => concat_host::logs::open_console(extra).and(Err(error)),
+    };
+    if let Err(error) = opened {
+        log::warn!("this run is not being written to a file: {error}");
+    }
+}
+
 /// Builds the window, binds it to the engine, and runs it until it closes.
 pub fn run() -> Result<(), slint::PlatformError> {
     let gpu = platform::select_backend()?;
@@ -55,7 +75,7 @@ pub fn run() -> Result<(), slint::PlatformError> {
     let host = match Host::start(gpu) {
         Ok(host) => host,
         Err(error) => {
-            eprintln!("concat: {error}");
+            log::error!("{error}");
             return Err(slint::PlatformError::Other(error));
         }
     };
@@ -63,7 +83,7 @@ pub fn run() -> Result<(), slint::PlatformError> {
     // The user's own packages - imported looks - sit beside the built-ins
     // from the first frame. One that will not load is reported and skipped.
     for error in concat_effects::Catalogue::install(&Studio::looks_dir(&host.dirs)) {
-        eprintln!("concat: look: {error}");
+        log::warn!("look: {error}");
     }
 
     let app = App::new()?;
@@ -597,18 +617,6 @@ pub fn run() -> Result<(), slint::PlatformError> {
             state.track_flags(row, visible, muted, locked);
         }
     ));
-    editor.on_track_renamed(on_window!(|state, row: i32, name: SharedString| {
-        let trimmed = name.trim().to_string();
-        let Some(id) = state.row_track(row).map(|track| track.id.clone()) else {
-            return;
-        };
-        if !trimmed.is_empty() {
-            state.apply(concat_project::Command::RenameTrack {
-                track_id: id,
-                name: trimmed,
-            });
-        }
-    }));
     editor.on_track_sized(on_window!(|state, row: i32, size: TrackSize| {
         state.set_lane_size(row, size);
     }));
@@ -1022,6 +1030,14 @@ pub fn run() -> Result<(), slint::PlatformError> {
         state.project_apply();
     }));
 
+    app.on_relink_all(on_window!(|state| {
+        state.relink_all();
+    }));
+
+    app.on_relink_dismiss(on_window!(|state| {
+        state.relink.open = false;
+    }));
+
     // ── the dialogs ──
     app.on_export_clicked(on_window!(|state| {
         state.export.open = true;
@@ -1062,6 +1078,12 @@ pub fn run() -> Result<(), slint::PlatformError> {
     app.on_export_quality_changed(on_window!(|state, index: i32| {
         state.export.quality = (index.max(0) as usize).min(2);
     }));
+    app.on_export_codec_changed(on_window!(|state, index: i32| {
+        state.export.codec = (index.max(0) as usize).min(2);
+    }));
+    app.on_export_ten_bit_changed(on_window!(|state, on: bool| {
+        state.export.ten_bit = on;
+    }));
     app.on_export_again(on_window!(|state| {
         state.export.phase = ExportPhase::Idle;
         state.export.progress = 0.0;
@@ -1089,6 +1111,17 @@ pub fn run() -> Result<(), slint::PlatformError> {
     app.on_settings_page_changed(on_window!(|state, index: i32| {
         state.settings.tab = index;
     }));
+    app.on_settings_show_log(on_window!(|state| {
+        // The file this run is writing, when there is one, so the manager
+        // opens with it selected; the folder when there is not, which is
+        // still where the previous runs are.
+        let target = concat_host::logs::current()
+            .map(std::path::Path::to_path_buf)
+            .unwrap_or_else(|| concat_host::logs::folder(&state.host.dirs));
+        if let Err(error) = platform::reveal(&target.to_string_lossy()) {
+            state.notify(&i18n::tf("Could not show the log: {0}", &[&error]), true);
+        }
+    }));
     app.on_settings_language_changed(on_window!(|state, index: i32| {
         let index = index.max(0) as usize;
         if let Some(language) = state.languages.get(index).cloned() {
@@ -1098,12 +1131,6 @@ pub fn run() -> Result<(), slint::PlatformError> {
             // their way through `t`, the tree's through `I18n.lang`.
             i18n::select(&language.code, &state.host.dirs);
         }
-        state.prefs.save(&state.host.dirs);
-    }));
-    app.on_settings_audio_tracks_changed(on_window!(|state, index: i32| {
-        let choice = prefs::AudioTracks::from_row(index);
-        state.settings.audio_tracks = choice.row();
-        state.prefs.audio_tracks = choice;
         state.prefs.save(&state.host.dirs);
     }));
     app.on_settings_playhead_stops_changed(on_window!(|state, on: bool| {
@@ -1134,16 +1161,6 @@ pub fn run() -> Result<(), slint::PlatformError> {
     }));
     editor.on_speak(on_window!(|state| {
         state.speech_open();
-    }));
-    editor.on_detach_audio(on_window!(|state| {
-        if let Some(clip_id) = state.sole_selection() {
-            state.apply(concat_project::Command::DetachAudio { clip_id });
-        }
-    }));
-    editor.on_reattach_audio(on_window!(|state| {
-        if let Some(clip_id) = state.sole_selection() {
-            state.apply(concat_project::Command::ReattachAudio { clip_id });
-        }
     }));
 
     app.on_captions_closed(on_window!(|state| {
@@ -1228,6 +1245,7 @@ pub fn run() -> Result<(), slint::PlatformError> {
                         }
                         "template" => state.save_template(),
                         "speech" => state.speech_open(),
+                        "clear-cache" => state.clear_project_cache(),
                         "settings" => {
                             state.refresh_models();
                             state.settings.open = true;
