@@ -388,6 +388,15 @@ pub fn from_document(document: &Value) -> Option<Project> {
         });
     }
 
+    // Version 1 briefly wrote the original six-property `keys` array beside
+    // the generic keyframe tracks. Fold it in at the read boundary so every
+    // editor, graph, preview and export consumer sees the same collection.
+    for timeline in &mut timelines {
+        for clip in &mut timeline.clips {
+            clip.migrate_legacy_keyframes();
+        }
+    }
+
     let active_timeline_id = document
         .get("activeTimelineId")
         .and_then(Value::as_str)

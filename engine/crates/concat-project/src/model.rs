@@ -437,9 +437,9 @@ pub enum BrushTool {
 
 /// A geometric or hand-authored alpha mask attached to a picture clip.
 ///
-/// Coordinates are relative to the decoded picture rather than the output
-/// frame, so the mask follows crop, flip, placement and animation exactly as
-/// if it had been painted on the source itself.
+/// Coordinates are relative to the original source picture rather than the
+/// output frame. A decoded pixel is mapped back through crop and flip before
+/// the mask is sampled, so painting and rendered coverage stay aligned.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ClipMask {
@@ -460,10 +460,10 @@ pub struct ClipMask {
     /// Vertical centre offset on the same terms as `position_x`.
     #[serde(default)]
     pub position_y: f64,
-    /// Fractions of the decoded picture's width and height.
+    /// Fraction of the original source picture's width.
     #[serde(default = "default_mask_size")]
     pub width: f64,
-    /// Fraction of the decoded picture's height.
+    /// Fraction of the original source picture's height.
     #[serde(default = "default_mask_size")]
     pub height: f64,
     /// Clockwise degrees about the mask's centre.
@@ -638,6 +638,20 @@ impl ClipMask {
             points: Vec::new(),
             brush_size: default_mask_brush(),
         }
+    }
+
+    /// Changes to another built-in preset without carrying the previous
+    /// shape's dimensions or authored path into it. Placement and edge
+    /// treatment stay put, so trying another shape does not make the mask
+    /// jump around the picture.
+    pub fn apply_shape_preset(&mut self, shape: MaskShape) {
+        let preset = Self::new(self.id.clone(), shape);
+        self.shape = shape;
+        self.width = preset.width;
+        self.height = preset.height;
+        self.roundness = preset.roundness;
+        self.brush_size = preset.brush_size;
+        self.points.clear();
     }
 
     /// Reads an animatable property.
@@ -896,18 +910,21 @@ pub enum PostKeyBehavior {
 impl KeyframeEase {
     /// Map a linear segment fraction through this easing shape.
     pub fn apply(self, t: f64) -> f64 {
-        let t = t.clamp(0.0, 1.0);
+        self.runtime().apply(t)
+    }
+
+    /// Instantaneous temporal rate of the exact curve used by preview and
+    /// export. The graph editor uses this for its derivative/speed view.
+    pub fn slope(self, t: f64) -> f64 {
+        self.runtime().slope(t)
+    }
+
+    fn runtime(self) -> concat_core::animate::Ease {
         match self {
-            Self::Linear => t,
-            Self::In => t * t,
-            Self::Out => 1.0 - (1.0 - t) * (1.0 - t),
-            Self::InOut => {
-                if t < 0.5 {
-                    2.0 * t * t
-                } else {
-                    1.0 - (-2.0 * t + 2.0).powi(2) / 2.0
-                }
-            }
+            Self::Linear => concat_core::animate::Ease::LINEAR,
+            Self::In => concat_core::animate::Ease::IN,
+            Self::Out => concat_core::animate::Ease::OUT,
+            Self::InOut => concat_core::animate::Ease::IN_OUT,
         }
     }
 }
@@ -947,6 +964,37 @@ impl ClipKeyframe {
             value,
             ease: KeyframeEase::Linear,
             temporal_curve: None,
+            spatial_in: None,
+            spatial_out: None,
+        }
+    }
+
+    /// Convert a key written by the original clip-key format without losing
+    /// its arbitrary cubic timing curve. Named curves stay named so the graph
+    /// can light the matching preset; every other curve becomes a custom
+    /// temporal handle.
+    pub fn from_key_ease(at: f64, value: f64, ease: KeyEase) -> Self {
+        let ease = ease.sane();
+        let (named, temporal_curve) = if ease.is(KeyEase::LINEAR) {
+            (KeyframeEase::Linear, None)
+        } else if ease.is(KeyEase::IN) {
+            (KeyframeEase::In, None)
+        } else if ease.is(KeyEase::OUT) {
+            (KeyframeEase::Out, None)
+        } else if ease.is(KeyEase::IN_OUT) {
+            (KeyframeEase::InOut, None)
+        } else {
+            let KeyEase([x1, y1, x2, y2]) = ease;
+            (
+                KeyframeEase::Linear,
+                Some(TemporalCurve { x1, y1, x2, y2 }.tidy()),
+            )
+        };
+        Self {
+            at,
+            value,
+            ease: named,
+            temporal_curve,
             spatial_in: None,
             spatial_out: None,
         }
@@ -1125,6 +1173,19 @@ impl KeyframeProperty {
             Self::Volume => "volume",
             Self::LayerOrder => "layerOrder",
             Self::TimeRemap => "timeRemap",
+        }
+    }
+}
+
+impl From<KeyProperty> for KeyframeProperty {
+    fn from(property: KeyProperty) -> Self {
+        match property {
+            KeyProperty::Scale => Self::Scale,
+            KeyProperty::OffsetX => Self::OffsetX,
+            KeyProperty::OffsetY => Self::OffsetY,
+            KeyProperty::Rotation => Self::Rotation,
+            KeyProperty::Opacity => Self::Opacity,
+            KeyProperty::Volume => Self::Volume,
         }
     }
 }
@@ -1836,6 +1897,31 @@ pub struct Clip {
 }
 
 impl Clip {
+    /// Move keys from the original six-property list into the generic track
+    /// store. A generic track wins if a transitional document contains both;
+    /// this makes loading idempotent and leaves one source of truth afterward.
+    pub fn migrate_legacy_keyframes(&mut self) {
+        if self.keys.is_empty() {
+            return;
+        }
+        let legacy = std::mem::take(&mut self.keys);
+        for property in KeyProperty::ALL {
+            let generic = KeyframeProperty::from(property);
+            if !self.keyframes.track(generic).is_empty() {
+                continue;
+            }
+            let converted = legacy
+                .iter()
+                .filter(|key| key.property == property)
+                .map(|key| ClipKeyframe::from_key_ease(key.at, key.value, key.ease))
+                .collect::<Vec<_>>();
+            if !converted.is_empty() {
+                self.keyframes.named_track_mut(generic.id()).keys = converted;
+            }
+        }
+        self.keyframes = std::mem::take(&mut self.keyframes).tidy();
+    }
+
     /// The clip's own constant for a keyable property - what the property is
     /// worth everywhere its track is silent.
     pub fn constant(&self, property: KeyProperty) -> f64 {
@@ -1861,7 +1947,11 @@ impl Clip {
     /// Whether this property is keyed at all. A property with keys is one
     /// the panel shows as animated, however few there are.
     pub fn is_keyed(&self, property: KeyProperty) -> bool {
-        self.keys_on(property).next().is_some()
+        !self
+            .keyframes
+            .track(KeyframeProperty::from(property))
+            .is_empty()
+            || self.keys_on(property).next().is_some()
     }
 
     /// The index into `keys` of this property's key at `at`, within
@@ -1900,6 +1990,10 @@ impl Clip {
     /// renderer.
     pub fn value_at(&self, property: KeyProperty, at: f64) -> f64 {
         let constant = self.constant(property);
+        let generic = KeyframeProperty::from(property);
+        if !self.keyframes.track(generic).is_empty() {
+            return self.keyframes.value_at(generic, at, constant);
+        }
         if !self.is_keyed(property) {
             return constant;
         }
@@ -1910,6 +2004,19 @@ impl Clip {
     /// What the panel's two chevrons move the playhead to; `None` on a side
     /// is that chevron greyed out.
     pub fn keys_around(&self, property: KeyProperty, at: f64) -> (Option<f64>, Option<f64>) {
+        let generic = self.keyframes.track(KeyframeProperty::from(property));
+        if !generic.is_empty() {
+            let before = generic
+                .iter()
+                .rev()
+                .find(|key| key.at < at - KEY_EPSILON)
+                .map(|key| key.at);
+            let after = generic
+                .iter()
+                .find(|key| key.at > at + KEY_EPSILON)
+                .map(|key| key.at);
+            return (before, after);
+        }
         let mut before: Option<f64> = None;
         let mut after: Option<f64> = None;
         for key in self.keys_on(property) {
@@ -2203,7 +2310,8 @@ mod keyframe_tests {
                 },
             ],
         )]);
-        assert!((keys.value_at(KeyframeProperty::Opacity, 0.2, 7.0) - 0.75).abs() < 1e-9);
+        let expected = concat_core::animate::Ease::OUT.apply(0.5);
+        assert!((keys.value_at(KeyframeProperty::Opacity, 0.2, 7.0) - expected).abs() < 1e-9);
         assert_eq!(keys.value_at(KeyframeProperty::Opacity, 0.8, 7.0), 1.0);
     }
 

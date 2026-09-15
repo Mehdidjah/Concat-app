@@ -41,8 +41,8 @@ mod tests {
     use crate::doc::DocumentSettings;
     use crate::editor::Editor;
     use crate::model::{
-        AudioTrack, ClipKeyframe, ClipKeyframes, ClipKind, KeyframeProperty, MaskProperty,
-        MaskShape, MediaKind, SpeedPoint, TextStyle,
+        AudioTrack, ClipKeyframe, ClipKeyframes, ClipKind, ClipMask, KeyframeProperty,
+        MaskProperty, MaskShape, MediaKind, SpeedPoint, TextStyle,
     };
 
     fn media(path: &str, duration: f64, has_audio: bool) -> Command {
@@ -196,6 +196,29 @@ mod tests {
         );
         assert!(editor.undo());
         assert_eq!(editor.project().active().clips[0].masks.len(), 1);
+    }
+
+    #[test]
+    fn changing_a_mask_preset_uses_the_new_shapes_geometry() {
+        let mut mask = ClipMask::new("mask1".to_owned(), MaskShape::Filmstrip);
+        mask.position_x = 0.2;
+        mask.position_y = -0.3;
+        mask.rotation = 18.0;
+        mask.feather = 0.12;
+        mask.inverted = true;
+        mask.points = vec![[0.1, 0.2], [0.8, 0.9]];
+
+        let heart = ClipMask::new("mask1".to_owned(), MaskShape::Heart);
+        mask.apply_shape_preset(MaskShape::Heart);
+
+        assert_eq!(mask.shape, MaskShape::Heart);
+        assert_eq!((mask.width, mask.height), (heart.width, heart.height));
+        assert_eq!(mask.roundness, heart.roundness);
+        assert!(mask.points.is_empty());
+        assert_eq!((mask.position_x, mask.position_y), (0.2, -0.3));
+        assert_eq!(mask.rotation, 18.0);
+        assert_eq!(mask.feather, 0.12);
+        assert!(mask.inverted);
     }
 
     #[test]
@@ -842,17 +865,65 @@ mod tests {
                         ] }]
         });
         let editor = Editor::from_document(&document).expect("loads");
-        let keys = &editor.project().active().clips[0].keys;
+        let clip = &editor.project().active().clips[0];
+        let keys = clip.keyframes.track(KeyframeProperty::Opacity);
 
         // The out-of-range key and the one naming an unknown property are
-        // dropped; the other three survive in order.
+        // dropped; the other three survive in the generic source of truth.
         assert_eq!(keys.len(), 3);
         assert!(keys.windows(2).all(|pair| pair[0].at <= pair[1].at));
+        assert!(clip.keys.is_empty(), "the legacy list is consumed on load");
 
-        assert_eq!(keys[0].ease, crate::model::KeyEase::IN_OUT);
-        assert_eq!(keys[1].ease, crate::model::KeyEase([0.1, 0.2, 0.3, 0.4]));
+        assert_eq!(keys[0].ease, crate::model::KeyframeEase::InOut);
+        assert_eq!(
+            keys[1].temporal_curve,
+            Some(crate::model::TemporalCurve {
+                x1: 0.1,
+                y1: 0.2,
+                x2: 0.3,
+                y2: 0.4,
+            })
+        );
         // Absent is a straight line, not a refusal to load.
-        assert_eq!(keys[2].ease, crate::model::KeyEase::LINEAR);
+        assert_eq!(keys[2].ease, crate::model::KeyframeEase::Linear);
+    }
+
+    #[test]
+    fn original_key_commands_feed_the_generic_track_store() {
+        let (mut editor, _, clip_id) = fixture();
+        editor
+            .apply(Command::SetClipKey {
+                clip_id: clip_id.clone(),
+                property: crate::model::KeyProperty::Scale,
+                at: 0.5,
+                value: 1.75,
+                ease: crate::model::KeyEase::IN_OUT,
+            })
+            .expect("sets a key");
+        let clip = editor.project().active().clip(&clip_id).expect("clip");
+        assert!(clip.keys.is_empty());
+        let keys = clip.keyframes.track(KeyframeProperty::Scale);
+        assert_eq!(keys.len(), 1);
+        assert_eq!(keys[0].value, 1.75);
+        assert_eq!(keys[0].ease, crate::model::KeyframeEase::InOut);
+
+        editor
+            .apply(Command::ClearClipKey {
+                clip_id: clip_id.clone(),
+                property: crate::model::KeyProperty::Scale,
+                at: 0.5,
+            })
+            .expect("clears the key");
+        assert!(
+            editor
+                .project()
+                .active()
+                .clip(&clip_id)
+                .expect("clip")
+                .keyframes
+                .track(KeyframeProperty::Scale)
+                .is_empty()
+        );
     }
 
     #[test]

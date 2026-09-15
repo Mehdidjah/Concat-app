@@ -445,6 +445,31 @@ mod tests {
     }
 
     #[test]
+    fn inspector_keys_reach_the_preview_and_export_payload() {
+        let (mut editor, _, clip_id) = project_with_clip();
+        for (at, value) in [(0.0, 1.0), (0.5, 2.0)] {
+            editor
+                .apply(Command::SetClipKey {
+                    clip_id: clip_id.clone(),
+                    property: KeyProperty::Scale,
+                    at,
+                    value,
+                    ease: concat_project::model::KeyEase::LINEAR,
+                })
+                .expect("sets scale key");
+        }
+        let flat = flatten_timeline(editor.project(), None);
+        let keys = flat[0]
+            .animation
+            .iter()
+            .filter(|key| key.property == "scale")
+            .collect::<Vec<_>>();
+        assert_eq!(keys.len(), 2);
+        assert_eq!((keys[0].at, keys[0].value), (0.0, 1.0));
+        assert_eq!((keys[1].at, keys[1].value), (0.5, 2.0));
+    }
+
+    #[test]
     fn text_clips_are_left_for_the_rasteriser() {
         let (mut editor, _, _) = project_with_clip();
         let track_id = Some(editor.project().timelines[0].tracks[0].id.clone());

@@ -12,9 +12,10 @@ use std::collections::HashSet;
 use serde::{Deserialize, Serialize};
 
 use crate::model::{
-    AnimationSlot, AppliedFilter, AudioTrack, Clip, ClipAnimation, ClipKeyframes, ClipKind,
-    ClipMask, Crop, CustomFont, Cutout, CutoutMode, KeyEase, KeyProperty, MaskShape, MediaItem,
-    MediaKind, Project, SpeedPoint, Stroke, TextStyle, Timeline, Track, Transition, VideoSettings,
+    AnimationSlot, AppliedFilter, AudioTrack, Clip, ClipAnimation, ClipKeyframe, ClipKeyframes,
+    ClipKind, ClipMask, Crop, CustomFont, Cutout, CutoutMode, KEY_EPSILON, KeyEase, KeyProperty,
+    KeyframeProperty, MaskShape, MediaItem, MediaKind, Project, SpeedPoint, Stroke, TextStyle,
+    Timeline, Track, Transition, VideoSettings,
 };
 
 /// Fallback length for media whose container reports no duration.
@@ -1797,11 +1798,22 @@ pub fn apply(
                 KeyProperty::Volume => value.max(0.0),
                 KeyProperty::OffsetX | KeyProperty::OffsetY | KeyProperty::Rotation => value,
             };
-            let before = clip.keys.clone();
-            clip.set_key(property, at, value, ease);
+            let before = clip.keyframes.clone();
+            let property = KeyframeProperty::from(property);
+            clip.keyframes.set_at(property, at, value, KEY_EPSILON);
+            if let Some(key) = clip
+                .keyframes
+                .track_mut(property)
+                .iter_mut()
+                .find(|key| (key.at - at.clamp(0.0, 1.0)).abs() <= KEY_EPSILON)
+            {
+                let styled = ClipKeyframe::from_key_ease(key.at, key.value, ease);
+                key.ease = styled.ease;
+                key.temporal_curve = styled.temporal_curve;
+            }
             Ok(Outcome {
                 created_id: None,
-                applied: clip.keys != before,
+                applied: clip.keyframes != before,
             })
         }
 
@@ -1814,7 +1826,11 @@ pub fn apply(
             let Some(clip) = timeline.clip_mut(&clip_id) else {
                 return Ok(Outcome::default());
             };
-            let applied = clip.clear_key(property, at);
+            let property = KeyframeProperty::from(property);
+            let applied = clip.keyframes.remove_at(property, at, KEY_EPSILON);
+            if clip.keyframes.track(property).is_empty() {
+                clip.keyframes.tracks.remove(property.id());
+            }
             Ok(Outcome {
                 created_id: None,
                 applied,
@@ -1826,7 +1842,11 @@ pub fn apply(
             let Some(clip) = timeline.clip_mut(&clip_id) else {
                 return Ok(Outcome::default());
             };
-            let applied = clip.clear_keys(property);
+            let applied = clip
+                .keyframes
+                .tracks
+                .remove(KeyframeProperty::from(property).id())
+                .is_some();
             Ok(Outcome {
                 created_id: None,
                 applied,

@@ -58,34 +58,14 @@ impl CubicBezier {
     /// Evaluate Y at a supplied X. Newton iteration gives the fast common
     /// path and bisection makes unusual user handles deterministic.
     pub fn solve(self, x: f64) -> f64 {
-        let x = x.clamp(0.0, 1.0);
-        let sample = |t: f64, a: f64, b: f64| {
-            let u = 1.0 - t;
-            3.0 * u * u * t * a + 3.0 * u * t * t * b + t * t * t
-        };
-        let derivative = |t: f64, a: f64, b: f64| {
-            3.0 * (1.0 - t).powi(2) * a + 6.0 * (1.0 - t) * t * (b - a) + 3.0 * t * t * (1.0 - b)
-        };
-        let mut t = x;
-        for _ in 0..5 {
-            let error = sample(t, self.x1, self.x2) - x;
-            let slope = derivative(t, self.x1, self.x2);
-            if slope.abs() < 1e-7 {
-                break;
-            }
-            t = (t - error / slope).clamp(0.0, 1.0);
-        }
-        let mut low = 0.0;
-        let mut high = 1.0;
-        for _ in 0..10 {
-            if sample(t, self.x1, self.x2) < x {
-                low = t;
-            } else {
-                high = t;
-            }
-            t = (low + high) * 0.5;
-        }
-        sample(t, self.y1, self.y2)
+        bezier_y_at_x(self.x1, self.y1, self.x2, self.y2, x)
+    }
+
+    /// The instantaneous output rate at a supplied input progress. This is
+    /// the speed graph's source of truth, so its curve is the derivative of
+    /// exactly the easing preview and export evaluate.
+    pub fn slope(self, x: f64) -> f64 {
+        bezier_slope_at_x(self.x1, self.y1, self.x2, self.y2, x)
     }
 }
 
@@ -127,6 +107,14 @@ impl Ease {
         }
         bezier_y_at_x(self.x1, self.y1, self.x2, self.y2, t)
     }
+
+    /// The instantaneous rate of the easing curve at input progress `t`.
+    pub fn slope(self, t: f64) -> f64 {
+        if self.is_linear() {
+            return 1.0;
+        }
+        bezier_slope_at_x(self.x1, self.y1, self.x2, self.y2, t)
+    }
 }
 
 /// x of a cubic bezier with endpoints pinned at 0 and 1, at parameter `t`.
@@ -140,29 +128,20 @@ fn bezier_axis_slope(p1: f64, p2: f64, t: f64) -> f64 {
     3.0 * u * u * p1 + 6.0 * u * t * (p2 - p1) + 3.0 * t * t * (1.0 - p2)
 }
 
-/// Solve a CSS cubic-bezier for y at a given x: Newton first, bisection as
-/// the fallback where the curve is flat enough that Newton stalls.
-///
-/// The one solver. The window's `Curves.ease` global reaches it through
-/// `format::bezier_y_at_x`, because Slint's expression language has no loops
-/// and so cannot do this itself; the engine reaches it through `Ease::apply`
-/// on every frame of every keyed property. Two callers, one definition -
-/// which matters here more than most, because a preview whose easing
-/// disagreed with the export's would disagree invisibly.
-pub fn bezier_y_at_x(x1: f64, y1: f64, x2: f64, y2: f64, x: f64) -> f64 {
+fn bezier_parameter_at_x(x1: f64, x2: f64, x: f64) -> f64 {
     let x = x.clamp(0.0, 1.0);
     let mut t = x;
 
     for _ in 0..8 {
         let error = bezier_axis(x1, x2, t) - x;
         if error.abs() < 1e-7 {
-            return bezier_axis(y1, y2, t);
+            return t.clamp(0.0, 1.0);
         }
         let slope = bezier_axis_slope(x1, x2, t);
         if slope.abs() < 1e-9 {
             break;
         }
-        t -= error / slope;
+        t = (t - error / slope).clamp(0.0, 1.0);
     }
 
     let (mut lo, mut hi) = (0.0_f64, 1.0_f64);
@@ -179,7 +158,34 @@ pub fn bezier_y_at_x(x1: f64, y1: f64, x2: f64, y2: f64, x: f64) -> f64 {
         }
         t = (lo + hi) / 2.0;
     }
-    bezier_axis(y1, y2, t)
+    t
+}
+
+/// Solve a CSS cubic-bezier for y at a given x: Newton first, bisection as
+/// the fallback where the curve is flat enough that Newton stalls.
+///
+/// The one solver. The window's `Curves.ease` global reaches it through
+/// `format::bezier_y_at_x`, because Slint's expression language has no loops
+/// and so cannot do this itself; the engine reaches it through `Ease::apply`
+/// on every frame of every keyed property. Two callers, one definition -
+/// which matters here more than most, because a preview whose easing
+/// disagreed with the export's would disagree invisibly.
+pub fn bezier_y_at_x(x1: f64, y1: f64, x2: f64, y2: f64, x: f64) -> f64 {
+    bezier_axis(y1, y2, bezier_parameter_at_x(x1, x2, x))
+}
+
+/// The derivative `dy/dx` of the same CSS cubic Bézier evaluator used by
+/// playback and export. Flat vertical tangents are capped rather than allowed
+/// to put infinities into graph ranges or path strings.
+pub fn bezier_slope_at_x(x1: f64, y1: f64, x2: f64, y2: f64, x: f64) -> f64 {
+    let t = bezier_parameter_at_x(x1, x2, x);
+    let dx = bezier_axis_slope(x1, x2, t);
+    let dy = bezier_axis_slope(y1, y2, t);
+    if dx.abs() < 1e-9 {
+        (dy.signum() * 1_000.0).clamp(-1_000.0, 1_000.0)
+    } else {
+        (dy / dx).clamp(-1_000.0, 1_000.0)
+    }
 }
 
 /// One key of one property.
@@ -317,13 +323,18 @@ impl Track {
     /// eased costs nothing and reads identically on both sides.
     pub fn resample(&self, steps: usize) -> Track {
         let steps = steps.max(1);
-        if self.keys.len() < 2 || self.keys.iter().all(|key| key.ease.is_linear()) {
+        if self.keys.len() < 2
+            || self
+                .keys
+                .iter()
+                .all(|key| key.curve.is_none() && key.ease.is_linear())
+        {
             return self.clone();
         }
         let mut out = vec![self.keys[0]];
         for pair in self.keys.windows(2) {
             let (a, b) = (pair[0], pair[1]);
-            if b.ease.is_linear() || b.at <= a.at {
+            if (b.curve.is_none() && b.ease.is_linear()) || b.at <= a.at {
                 out.push(Key {
                     ease: Ease::LINEAR,
                     ..b
@@ -334,7 +345,10 @@ impl Track {
                 let t = step as f64 / steps as f64;
                 out.push(Key {
                     at: a.at + (b.at - a.at) * t,
-                    value: a.value + (b.value - a.value) * b.ease.apply(t),
+                    value: a.value
+                        + (b.value - a.value)
+                            * b.curve
+                                .map_or_else(|| b.ease.apply(t), |curve| curve.solve(t)),
                     ease: Ease::LINEAR,
                     curve: None,
                     spatial_in: None,
@@ -647,6 +661,22 @@ mod tests {
     }
 
     #[test]
+    fn speed_graph_derivatives_use_the_playback_curve() {
+        assert!((Ease::LINEAR.slope(0.37) - 1.0).abs() < 1e-9);
+        assert!(Ease::IN.slope(0.1) < Ease::IN.slope(0.9));
+        assert!(Ease::OUT.slope(0.1) > Ease::OUT.slope(0.9));
+        let curve = CubicBezier {
+            x1: 0.42,
+            y1: 0.0,
+            x2: 0.58,
+            y2: 1.0,
+        };
+        let epsilon = 1e-5;
+        let numerical = (curve.solve(0.5 + epsilon) - curve.solve(0.5 - epsilon)) / (2.0 * epsilon);
+        assert!((curve.slope(0.5) - numerical).abs() < 1e-3);
+    }
+
+    #[test]
     fn resampling_follows_the_curve_it_flattens() {
         let track = Track::new(vec![
             key(0.0, 0.0, Ease::LINEAR),
@@ -675,5 +705,34 @@ mod tests {
             key(1.0, 1.0, Ease::LINEAR),
         ]);
         assert_eq!(straight.resample(12), straight);
+    }
+
+    #[test]
+    fn resampling_does_not_skip_a_custom_curve_on_a_linear_named_ease() {
+        let track = Track::new(vec![
+            key(0.0, 0.0, Ease::LINEAR),
+            Key {
+                curve: Some(CubicBezier {
+                    x1: 0.42,
+                    y1: 0.0,
+                    x2: 1.0,
+                    y2: 1.0,
+                }),
+                ..key(1.0, 4.0, Ease::LINEAR)
+            },
+        ]);
+        let flat = track.resample(24);
+
+        assert!(flat.keys().len() > track.keys().len());
+        assert!(
+            flat.keys()
+                .iter()
+                .all(|key| key.ease.is_linear() && key.curve.is_none())
+        );
+        for step in 0..=80 {
+            let x = f64::from(step) / 80.0;
+            let error = (flat.value_at(x, 0.0) - track.value_at(x, 0.0)).abs();
+            assert!(error < 0.015, "at {x}: off by {error}");
+        }
     }
 }
