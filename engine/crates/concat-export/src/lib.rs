@@ -36,7 +36,7 @@ use concat_core::timeline::{Clip, ClipId, MediaRef, Timeline, Track, TrackKind, 
 use concat_effects::Catalogue;
 use concat_media::audio::{self, AudioClip};
 use concat_media::{DecodeOptions, Decoder, EncodeOptions, Encoder, FrameSink, FrameSource};
-use concat_project::model::{AppliedFilter, ClipMask, Cutout, MaskShape};
+use concat_project::model::{AppliedFilter, ClipMask, Cutout, MaskProperty, MaskShape};
 use concat_render::{
     Compositor, CpuCompositor, Layer, Placement, Treatment as GpuTreatment, plan_frame,
 };
@@ -880,6 +880,17 @@ struct Source<F> {
 /// lime the brushes and the selection are drawn in.
 const HIGHLIGHT: [u8; 3] = [0xcb, 0xf5, 0x3f];
 
+fn source_mapping(clip: &ExportClip) -> Mapping {
+    Mapping {
+        crop: clip
+            .crop
+            .map(|edges| edges.map(|edge| edge as f32))
+            .unwrap_or([0.0; 4]),
+        flip_h: clip.flip_h,
+        flip_v: clip.flip_v,
+    }
+}
+
 /// A cutout as the frame loop runs it: the masks, what to paint on them,
 /// and how a decoded pixel finds its place in the source.
 struct CutoutJob {
@@ -905,14 +916,7 @@ impl CutoutJob {
         Some(CutoutJob {
             store: MaskStore::open(Path::new(&clip.mask_dir)),
             cutout,
-            mapping: Mapping {
-                crop: clip
-                    .crop
-                    .map(|edges| edges.map(|edge| edge as f32))
-                    .unwrap_or([0.0; 4]),
-                flip_h: clip.flip_h,
-                flip_v: clip.flip_v,
-            },
+            mapping: source_mapping(clip),
             aspect,
         })
     }
@@ -946,6 +950,10 @@ impl CutoutJob {
 struct GeometricMaskJob {
     masks: Vec<ClipMask>,
     text_masks: BTreeMap<String, Mask>,
+    mapping: Mapping,
+    /// Masks without their own keys keep the same alpha across every frame,
+    /// even when the clip's transform or source time is animated.
+    static_mattes: std::sync::Mutex<HashMap<(u32, u32), std::sync::Arc<[u8]>>>,
 }
 
 impl GeometricMaskJob {
@@ -981,7 +989,7 @@ impl GeometricMaskJob {
                     tracking: 0.0,
                 };
                 if let Ok(rendered) = concat_text::render(&fonts, &style, 512, 256)
-                    && let Some(raster) = Mask::from_png(&rendered.png)
+                    && let Some(raster) = Mask::from_png_alpha(&rendered.png)
                 {
                     text_masks.insert(mask.id.clone(), raster);
                 }
@@ -990,12 +998,73 @@ impl GeometricMaskJob {
         Some(Self {
             masks: clip.masks.clone(),
             text_masks,
+            mapping: source_mapping(clip),
+            static_mattes: std::sync::Mutex::new(HashMap::new()),
         })
+    }
+
+    fn mask_is_animated(&self, animation: Option<&Animation>) -> bool {
+        animation.is_some_and(|animation| {
+            self.masks.iter().any(|mask| {
+                MaskProperty::ALL.iter().any(|property| {
+                    animation
+                        .parameters
+                        .get(&property.id(&mask.id))
+                        .is_some_and(|track| !track.is_empty())
+                })
+            })
+        })
+    }
+
+    fn static_matte(&self, width: u32, height: u32) -> std::sync::Arc<[u8]> {
+        let mut cache = self
+            .static_mattes
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(matte) = cache.get(&(width, height)) {
+            return std::sync::Arc::clone(matte);
+        }
+        let mut blank = Frame::black(width, height);
+        concat_vision::cut_geometric(
+            &mut blank,
+            &self.masks,
+            &self.mapping,
+            None,
+            0.0,
+            &self.text_masks,
+        );
+        let matte: std::sync::Arc<[u8]> = blank
+            .pixels()
+            .chunks_exact(4)
+            .map(|pixel| pixel[3])
+            .collect::<Vec<_>>()
+            .into();
+        // Playback and pointer gestures may ask for different preview sizes.
+        // Do not keep an unlimited series of full-frame mattes in the plan.
+        if cache.len() >= 4 {
+            cache.clear();
+        }
+        cache.insert((width, height), std::sync::Arc::clone(&matte));
+        matte
     }
 
     fn cut(&self, frame: &Frame, animation: Option<&Animation>, at: f64) -> Frame {
         let mut out = frame.clone();
-        concat_vision::cut_geometric(&mut out, &self.masks, animation, at, &self.text_masks);
+        if !self.mask_is_animated(animation) {
+            let matte = self.static_matte(frame.width(), frame.height());
+            for (pixel, &coverage) in out.pixels_mut().chunks_exact_mut(4).zip(matte.iter()) {
+                pixel[3] = ((u16::from(pixel[3]) * u16::from(coverage) + 127) / 255) as u8;
+            }
+            return out;
+        }
+        concat_vision::cut_geometric(
+            &mut out,
+            &self.masks,
+            &self.mapping,
+            animation,
+            at,
+            &self.text_masks,
+        );
         out
     }
 }
@@ -2080,15 +2149,38 @@ pub fn preview_sources_of(
         let pre = pre_chains.get(&layer.clip).map(String::as_str);
         // A source that fails to decode contributes nothing rather than
         // blanking the monitor - same grace the exporter extends.
-        match pool.frame_at(
-            std::path::Path::new(&layer.media),
-            layer.source_time,
-            decode_width,
-            decode_height,
-            stills.contains(&layer.clip),
-            chain,
-            pre,
-        ) {
+        let still = stills.contains(&layer.clip);
+        let decoded = if layer.paced && !still {
+            // Playback asks once per output frame. Pace conversion at that
+            // cadence so high-frame-rate sources do not scale every skipped
+            // source picture on the critical path.
+            let delivery_rate = if layer.speed == Rational::ONE {
+                rate
+            } else {
+                FrameRate::new(rate.fps() / layer.speed)
+            };
+            pool.frame_at_rate(
+                std::path::Path::new(&layer.media),
+                layer.source_time,
+                decode_width,
+                decode_height,
+                false,
+                chain,
+                pre,
+                delivery_rate,
+            )
+        } else {
+            pool.frame_at(
+                std::path::Path::new(&layer.media),
+                layer.source_time,
+                decode_width,
+                decode_height,
+                still,
+                chain,
+                pre,
+            )
+        };
+        match decoded {
             Ok(frame) => {
                 let highlighted = highlight == Some(layer.clip);
                 let frame = match cutouts.get(&layer.clip).and_then(|job| {
@@ -2245,7 +2337,7 @@ pub fn preview_prefetch_of(
     } = &plan.built;
     let fps = rate.fps().as_f64();
 
-    for ahead in 0..frames {
+    for ahead in 1..=frames {
         let time = seconds + f64::from(ahead) / fps;
         let plan_at = plan_frame(timeline, quantise(time, rate));
         for layer in &plan_at.layers {
@@ -2255,15 +2347,34 @@ pub fn preview_prefetch_of(
                 .unwrap_or((plan.width, plan.height));
             let chain = filter_chains.get(&layer.clip).map(String::as_str);
             let pre = pre_chains.get(&layer.clip).map(String::as_str);
-            let _ = pool.frame_at(
-                std::path::Path::new(&layer.media),
-                layer.source_time,
-                decode_width,
-                decode_height,
-                stills.contains(&layer.clip),
-                chain,
-                pre,
-            );
+            let still = stills.contains(&layer.clip);
+            if layer.paced && !still {
+                let delivery_rate = if layer.speed == Rational::ONE {
+                    rate
+                } else {
+                    FrameRate::new(rate.fps() / layer.speed)
+                };
+                let _ = pool.frame_at_rate(
+                    std::path::Path::new(&layer.media),
+                    layer.source_time,
+                    decode_width,
+                    decode_height,
+                    false,
+                    chain,
+                    pre,
+                    delivery_rate,
+                );
+            } else {
+                let _ = pool.frame_at(
+                    std::path::Path::new(&layer.media),
+                    layer.source_time,
+                    decode_width,
+                    decode_height,
+                    still,
+                    chain,
+                    pre,
+                );
+            }
         }
     }
 }
@@ -2345,6 +2456,252 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn static_mask_matte_is_reused_under_clip_motion_but_not_mask_motion() {
+        let mut masked = clip("video", 0, 0.0, 1.0, 0.0);
+        masked.masks_enabled = true;
+        let mut mask = ClipMask::new("mask1".to_owned(), MaskShape::Circle);
+        mask.width = 0.3;
+        mask.height = 0.3;
+        masked.masks.push(mask.clone());
+        let job = GeometricMaskJob::of(&masked).unwrap();
+        let mut frame = Frame::black(128, 72);
+        for pixel in frame.pixels_mut().chunks_exact_mut(4) {
+            pixel[3] = 128;
+        }
+
+        let mut clip_motion = Animation::default();
+        clip_motion.scale = AnimTrack::new(vec![AnimKey {
+            at: 0.0,
+            value: 1.0,
+            ease: AnimEase::LINEAR,
+            curve: None,
+            spatial_in: None,
+            spatial_out: None,
+        }]);
+        let first = job.cut(&frame, Some(&clip_motion), 0.0);
+        let second = job.cut(&frame, Some(&clip_motion), 0.5);
+        assert_eq!(first.pixels(), second.pixels());
+        assert_eq!(job.static_mattes.lock().unwrap().len(), 1);
+
+        let mut direct = frame.clone();
+        concat_vision::cut_geometric(
+            &mut direct,
+            &masked.masks,
+            &Mapping::IDENTITY,
+            None,
+            0.0,
+            &BTreeMap::new(),
+        );
+        for (cached, uncached) in first.pixels().iter().zip(direct.pixels()) {
+            assert!(cached.abs_diff(*uncached) <= 1);
+        }
+
+        let mut mask_motion = Animation::default();
+        mask_motion.parameters.insert(
+            MaskProperty::PositionX.id(&mask.id),
+            AnimTrack::new(vec![
+                AnimKey {
+                    at: 0.0,
+                    value: -0.5,
+                    ease: AnimEase::LINEAR,
+                    curve: None,
+                    spatial_in: None,
+                    spatial_out: None,
+                },
+                AnimKey {
+                    at: 1.0,
+                    value: 0.5,
+                    ease: AnimEase::LINEAR,
+                    curve: None,
+                    spatial_in: None,
+                    spatial_out: None,
+                },
+            ]),
+        );
+        let left = job.cut(&frame, Some(&mask_motion), 0.0);
+        let right = job.cut(&frame, Some(&mask_motion), 1.0);
+        assert_ne!(left.pixels(), right.pixels());
+    }
+
+    #[test]
+    fn rendered_text_mask_keeps_glyph_edge_transparency() {
+        let mut masked = clip("video", 0, 0.0, 1.0, 0.0);
+        masked.masks_enabled = true;
+        let mut mask = ClipMask::new("text1".to_owned(), MaskShape::Text);
+        mask.text = "Concat".to_owned();
+        masked.masks.push(mask);
+        let job = GeometricMaskJob::of(&masked).unwrap();
+        let raster = job.text_masks.get("text1").unwrap();
+        assert!(raster.bytes().contains(&0));
+        assert!(raster.bytes().contains(&255));
+        assert!(raster.bytes().iter().any(|value| (1..255).contains(value)));
+    }
+
+    /// Run manually with `--ignored --nocapture` when tuning the preview
+    /// budget. It has no timing assertion because machines differ widely.
+    #[test]
+    #[ignore]
+    fn preview_mask_cpu_budget_diagnostic() {
+        let mut masked = clip("video", 0, 0.0, 1.0, 0.0);
+        masked.masks_enabled = true;
+        let mask = ClipMask::new("mask1".to_owned(), MaskShape::Heart);
+        masked.masks.push(mask.clone());
+        let job = GeometricMaskJob::of(&masked).unwrap();
+        let frame = Frame::black(960, 540);
+        let mut motion = Animation::default();
+        motion.parameters.insert(
+            MaskProperty::PositionX.id(&mask.id),
+            AnimTrack::new(vec![
+                AnimKey {
+                    at: 0.0,
+                    value: -0.2,
+                    ease: AnimEase::LINEAR,
+                    curve: None,
+                    spatial_in: None,
+                    spatial_out: None,
+                },
+                AnimKey {
+                    at: 1.0,
+                    value: 0.2,
+                    ease: AnimEase::LINEAR,
+                    curve: None,
+                    spatial_in: None,
+                    spatial_out: None,
+                },
+            ]),
+        );
+        let static_start = std::time::Instant::now();
+        for index in 0..30 {
+            std::hint::black_box(job.cut(&frame, None, f64::from(index) / 29.0));
+        }
+        let static_ms = static_start.elapsed().as_secs_f64() * 1000.0 / 30.0;
+        let animated_start = std::time::Instant::now();
+        for index in 0..30 {
+            std::hint::black_box(job.cut(&frame, Some(&motion), f64::from(index) / 29.0));
+        }
+        let animated_ms = animated_start.elapsed().as_secs_f64() * 1000.0 / 30.0;
+        println!("960x540 matte: static {static_ms:.2} ms, animated {animated_ms:.2} ms/frame");
+
+        let mut brush = ClipMask::new("mask1".to_owned(), MaskShape::Brush);
+        brush.points = (0..80)
+            .map(|index| {
+                let t = index as f64 / 79.0;
+                [0.1 + 0.8 * t, 0.5 + 0.2 * (t * std::f64::consts::TAU).sin()]
+            })
+            .collect();
+        let mut pen = ClipMask::new("mask1".to_owned(), MaskShape::Pen);
+        pen.points = (0..64)
+            .map(|index| {
+                let t = index as f64 / 64.0 * std::f64::consts::TAU;
+                [0.5 + 0.35 * t.cos(), 0.5 + 0.35 * t.sin()]
+            })
+            .collect();
+        for (label, mask) in [("brush-80", brush), ("pen-64", pen)] {
+            let mut clip = masked.clone();
+            clip.masks = vec![mask];
+            let job = GeometricMaskJob::of(&clip).unwrap();
+            let start = std::time::Instant::now();
+            for index in 0..10 {
+                std::hint::black_box(job.cut(&frame, Some(&motion), index as f64 / 9.0));
+            }
+            println!(
+                "960x540 {label}: animated {:.2} ms/frame",
+                start.elapsed().as_secs_f64() * 1000.0 / 10.0
+            );
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn preview_keyframe_mask_pipeline_diagnostic() {
+        use concat_media::{EncodeOptions, Encoder, FrameSink};
+        let external = std::env::var_os("CONCAT_DIAG_MEDIA").map(PathBuf::from);
+        let path = external.clone().unwrap_or_else(|| {
+            std::env::temp_dir().join("concat-keyframe-mask-preview-diagnostic.mp4")
+        });
+        if external.is_none() {
+            let mut encoder = Encoder::create(
+                &path,
+                320,
+                180,
+                FrameRate::THIRTY,
+                &EncodeOptions::default(),
+            )
+            .unwrap();
+            for index in 0..30 {
+                let mut frame = Frame::black(320, 180);
+                frame.fill([index as u8 * 5, 90, 170, 255]);
+                encoder.write_frame(&frame).unwrap();
+            }
+            encoder.finish().unwrap();
+        }
+        let info = concat_media::probe(&path).unwrap();
+        let video = info.video.as_ref().unwrap();
+        let source_start = std::env::var("CONCAT_DIAG_AT")
+            .ok()
+            .and_then(|value| value.parse::<f64>().ok())
+            .unwrap_or(0.0);
+
+        let mut base = clip("video", 0, 0.0, 1.0, source_start);
+        base.path = path.to_string_lossy().into_owned();
+        base.media_width = Some(video.width);
+        base.media_height = Some(video.height);
+        let mut static_mask = base.clone();
+        static_mask.masks_enabled = true;
+        let mask = ClipMask::new("mask1".to_owned(), MaskShape::Heart);
+        static_mask.masks.push(mask.clone());
+        let mut animated_mask = static_mask.clone();
+        animated_mask.animation = [-0.3, 0.3]
+            .into_iter()
+            .enumerate()
+            .map(|(index, value)| ExportKey {
+                property: MaskProperty::PositionX.id(&mask.id),
+                at: index as f64,
+                value,
+                ease: linear_ease(),
+                curve: None,
+                spatial_in: None,
+                spatial_out: None,
+                post: String::new(),
+            })
+            .collect();
+        for (label, request_clip) in [
+            ("base", base),
+            ("static-mask", static_mask),
+            ("animated-mask", animated_mask),
+        ] {
+            if std::env::var_os("CONCAT_DIAG_BASE_ONLY").is_some() && label != "base" {
+                continue;
+            }
+            let pool = concat_media::ReaderPool::with_defaults();
+            let plan = preview_plan(&[request_clip], 960, 540, 30, 1, false);
+            let mut samples = Vec::new();
+            for index in 0..30 {
+                let start = std::time::Instant::now();
+                let sources = preview_sources_of(&pool, &plan, index as f64 / 30.0).unwrap();
+                let decoded = start.elapsed().as_secs_f64() * 1000.0;
+                std::hint::black_box(sources.composite(&mut CpuCompositor));
+                let elapsed = start.elapsed().as_secs_f64() * 1000.0;
+                if std::env::var_os("CONCAT_DIAG_VERBOSE").is_some() {
+                    println!(
+                        "{label} frame {index:02}: {elapsed:.2} ms (source {decoded:.2}, composite {:.2})",
+                        elapsed - decoded
+                    );
+                }
+                samples.push(elapsed);
+            }
+            samples.sort_by(f64::total_cmp);
+            println!(
+                "{label}: median {:.2} ms, p90 {:.2} ms, max {:.2} ms",
+                samples[15], samples[27], samples[29]
+            );
+        }
+        if external.is_none() {
+            let _ = std::fs::remove_file(&path);
+        }
+    }
 
     fn clip(kind: &str, track: usize, start: f64, duration: f64, source_start: f64) -> ExportClip {
         ExportClip {
@@ -2455,11 +2812,20 @@ mod tests {
         use concat_media::{EncodeOptions, Encoder, FrameSink};
 
         let path = std::env::temp_dir().join("concat-preview-test.mp4");
-        let Ok(mut encoder) =
-            Encoder::create(&path, 64, 64, FrameRate::THIRTY, &EncodeOptions::default())
-        else {
-            return; // no ffmpeg here
-        };
+        let mut encoder =
+            match Encoder::create(&path, 64, 64, FrameRate::THIRTY, &EncodeOptions::default()) {
+                Ok(encoder) => encoder,
+                Err(error) => {
+                    if std::process::Command::new("ffmpeg")
+                        .arg("-version")
+                        .output()
+                        .is_ok()
+                    {
+                        panic!("FFmpeg is installed but the test encoder failed: {error}");
+                    }
+                    return;
+                }
+            };
         for _ in 0..30 {
             let mut frame = Frame::black(64, 64);
             frame.fill([200, 30, 30, 255]);
@@ -2489,6 +2855,99 @@ mod tests {
             "centre pixel should be red-ish, got {:?}",
             &bytes[centre..centre + 4],
         );
+
+        // Geometric masks must survive the complete paused-preview path:
+        // flattening/build, decode, matte, and composition. A Heart keeps
+        // the red centre and reveals the black stage at the corner.
+        let mut masked = clip("video", 0, 0.0, 1.0, 0.0);
+        masked.path = path.to_string_lossy().into_owned();
+        masked.media_width = Some(64);
+        masked.media_height = Some(64);
+        masked.masks_enabled = true;
+        masked.masks = vec![ClipMask::new("mask1".to_owned(), MaskShape::Heart)];
+        let masked = PreviewFrameRequest {
+            time: 0.5,
+            width: 64,
+            height: 64,
+            rate_num: 30,
+            rate_den: 1,
+            clips: vec![masked],
+        };
+        let bytes = preview_frame(&pool, &masked).expect("previews a geometric mask");
+        assert!(
+            bytes[centre] > 120 && bytes[centre + 1] < 90,
+            "the Heart should retain the red centre, got {:?}",
+            &bytes[centre..centre + 4],
+        );
+        assert!(
+            bytes[0] < 10 && bytes[1] < 10 && bytes[2] < 10,
+            "the Heart should reveal the black stage at its corner, got {:?}",
+            &bytes[..4],
+        );
+
+        // Painted points refer to the uncropped, unflipped source. They must
+        // still land on the same content after FFmpeg's crop and horizontal
+        // flip have changed the pixels delivered to the compositor.
+        let mut painted = clip("video", 0, 0.0, 1.0, 0.0);
+        painted.path = path.to_string_lossy().into_owned();
+        painted.media_width = Some(64);
+        painted.media_height = Some(64);
+        painted.crop = Some([0.2, 0.0, 0.0, 0.0]);
+        painted.flip_h = true;
+        painted.masks_enabled = true;
+        let mut brush = ClipMask::new("brush1".to_owned(), MaskShape::Brush);
+        brush.points = vec![[0.25, 0.5]];
+        brush.brush_size = 0.12;
+        painted.masks = vec![brush];
+        let painted = PreviewFrameRequest {
+            time: 0.5,
+            width: 64,
+            height: 64,
+            rate_num: 30,
+            rate_den: 1,
+            clips: vec![painted],
+        };
+        let bytes = preview_frame(&pool, &painted).expect("previews a cropped and flipped mask");
+        let kept = (32 * 64 + 54) * 4;
+        let dropped = (32 * 64 + 10) * 4;
+        assert!(
+            bytes[kept] > 120,
+            "source-space brush should retain the right side"
+        );
+        assert!(
+            bytes[dropped] < 10,
+            "source-space brush should drop the left side"
+        );
+
+        let output = std::env::temp_dir().join("concat-preview-mask-export-test.mp4");
+        let mut export_clip = painted.clips[0].clone();
+        export_clip.muted = true;
+        let export = ExportRequest {
+            output: output.to_string_lossy().into_owned(),
+            width: 64,
+            height: 64,
+            rate_num: 30,
+            rate_den: 1,
+            crf: 18,
+            preset: "ultrafast".to_owned(),
+            clips: vec![export_clip],
+        };
+        let cancel = AtomicBool::new(false);
+        let mut progress = |_, _, _| {};
+        render(
+            &export,
+            Reporter {
+                progress: &mut progress,
+                cancel: &cancel,
+            },
+        )
+        .expect("exports the same cropped and flipped mask");
+        let exported = pool
+            .frame_at(&output, Rational::new(1, 2), 64, 64, false, None, None)
+            .expect("decodes the masked export");
+        assert!(exported.pixel(54, 32).unwrap()[0] > 120);
+        assert!(exported.pixel(10, 32).unwrap()[0] < 20);
+        let _ = std::fs::remove_file(&output);
 
         // A clip trimmed past its media's end: the paused monitor at that
         // time must show the last real frame, not a black composite and not

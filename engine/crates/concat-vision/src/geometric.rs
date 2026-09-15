@@ -15,7 +15,7 @@ use concat_core::animate::Animation;
 use concat_core::frame::Frame;
 use concat_project::model::{ClipMask, MaskProperty, MaskShape};
 
-use crate::Mask;
+use crate::{Mapping, Mask};
 
 /// Applies all enabled masks as one additive alpha matte. An empty Brush or
 /// Pen is ignored until the user puts a path in it, so choosing a drawing
@@ -23,6 +23,7 @@ use crate::Mask;
 pub fn cut(
     frame: &mut Frame,
     masks: &[ClipMask],
+    mapping: &Mapping,
     animation: Option<&Animation>,
     at: f64,
     text_masks: &BTreeMap<String, Mask>,
@@ -32,38 +33,120 @@ pub fn cut(
     if width == 0 || height == 0 {
         return;
     }
+    // The decoder has already cropped and flipped this picture. Evaluate the
+    // matte in the original source's coordinates, as the painted points and
+    // mask settings are stored, rather than in the decoded frame's bounds.
+    let [left, top, right, bottom] = mapping.crop.map(f64::from);
+    let crop_width = (1.0 - left - right).max(0.0);
+    let crop_height = (1.0 - top - bottom).max(0.0);
+    let source_width = f64::from(width) / crop_width.max(0.1);
+    let source_height = f64::from(height) / crop_height.max(0.1);
     let evaluated: Vec<_> = masks
         .iter()
         .filter(|mask| {
             mask.enabled
-                && (!matches!(mask.shape, MaskShape::Brush | MaskShape::Pen)
-                    || !mask.points.is_empty())
+                && match mask.shape {
+                    MaskShape::Brush => !mask.points.is_empty(),
+                    MaskShape::Pen => mask.points.len() >= 3,
+                    _ => true,
+                }
         })
-        .map(|mask| Evaluated::new(mask, animation, at, width, height))
+        .map(|mask| {
+            Evaluated::new(
+                mask,
+                animation,
+                at,
+                source_width,
+                source_height,
+                text_masks.get(&mask.id),
+            )
+        })
         .collect();
     if evaluated.is_empty() {
         return;
     }
 
+    let xs: Vec<f64> = (0..width)
+        .map(|x| {
+            let fraction = (f64::from(x) + 0.5) / f64::from(width);
+            let fraction = if mapping.flip_h {
+                1.0 - fraction
+            } else {
+                fraction
+            };
+            (left + fraction * crop_width) * source_width
+        })
+        .collect();
+    let ys: Vec<f64> = (0..height)
+        .map(|y| {
+            let fraction = (f64::from(y) + 0.5) / f64::from(height);
+            let fraction = if mapping.flip_v {
+                1.0 - fraction
+            } else {
+                fraction
+            };
+            (top + fraction * crop_height) * source_height
+        })
+        .collect();
+
     let row = width as usize * 4;
-    for y in 0..height {
-        for x in 0..width {
+    // Borrow once for the whole matte. `pixels_mut` also changes the frame's
+    // upload identity, so calling it for every pixel used to perform one
+    // atomic identity update per pixel and made masked previews needlessly
+    // expensive.
+    let pixels = frame.pixels_mut();
+    // Polygon and brush coverage is independent for each row. Like the model
+    // cutout, spread large pictures across cores without spawning workers for
+    // small previews.
+    let workers = if width as usize * height as usize >= 400_000 {
+        std::thread::available_parallelism()
+            .map(|count| count.get())
+            .unwrap_or(1)
+            .clamp(1, 8)
+    } else {
+        1
+    };
+    if workers == 1 {
+        cut_band(pixels, row, 0, &xs, &ys, &evaluated);
+        return;
+    }
+    let rows_per = (height as usize).div_ceil(workers);
+    std::thread::scope(|scope| {
+        for (chunk, band) in pixels.chunks_mut(rows_per * row).enumerate() {
+            let first_row = chunk * rows_per;
+            let evaluated = &evaluated;
+            let xs = &xs;
+            let ys = &ys;
+            scope.spawn(move || {
+                cut_band(band, row, first_row, xs, ys, evaluated);
+            });
+        }
+    });
+}
+
+fn cut_band(
+    band: &mut [u8],
+    row: usize,
+    first_row: usize,
+    xs: &[f64],
+    ys: &[f64],
+    evaluated: &[Evaluated<'_>],
+) {
+    for (row_index, line) in band.chunks_exact_mut(row).enumerate() {
+        let y = ys[first_row + row_index];
+        for (x, pixel) in line.chunks_exact_mut(4).enumerate() {
             let mut matte = 0.0_f32;
-            for mask in &evaluated {
-                let text = text_masks.get(&mask.id);
-                matte = matte.max(mask.coverage(x as f64 + 0.5, y as f64 + 0.5, text));
+            for mask in evaluated {
+                matte = matte.max(mask.coverage(xs[x], y));
             }
-            let alpha = y as usize * row + x as usize * 4 + 3;
-            let source_alpha = frame.pixels()[alpha];
-            frame.pixels_mut()[alpha] =
-                (f32::from(source_alpha) * matte.clamp(0.0, 1.0)).round() as u8;
+            pixel[3] = (f32::from(pixel[3]) * matte.clamp(0.0, 1.0)).round() as u8;
         }
     }
 }
 
 struct Evaluated<'a> {
-    id: String,
     source: &'a ClipMask,
+    text: Option<&'a Mask>,
     cx: f64,
     cy: f64,
     width: f64,
@@ -81,8 +164,9 @@ impl<'a> Evaluated<'a> {
         mask: &'a ClipMask,
         animation: Option<&Animation>,
         at: f64,
-        frame_width: u32,
-        frame_height: u32,
+        frame_width: f64,
+        frame_height: f64,
+        text: Option<&'a Mask>,
     ) -> Self {
         let value = |property: MaskProperty| {
             let rest = mask.value(property);
@@ -90,15 +174,13 @@ impl<'a> Evaluated<'a> {
                 animation.parameter_at(&property.id(&mask.id), at, rest)
             })
         };
-        let frame_width = f64::from(frame_width);
-        let frame_height = f64::from(frame_height);
         let width = value(MaskProperty::Width).clamp(0.01, 4.0) * frame_width;
         let height = value(MaskProperty::Height).clamp(0.01, 4.0) * frame_height;
         let angle = value(MaskProperty::Rotation).to_radians();
         let (sin, cos) = angle.sin_cos();
         Self {
-            id: mask.id.clone(),
             source: mask,
+            text,
             cx: frame_width * (0.5 + value(MaskProperty::PositionX) * 0.5),
             cy: frame_height * (0.5 + value(MaskProperty::PositionY) * 0.5),
             width,
@@ -126,16 +208,17 @@ impl<'a> Evaluated<'a> {
         (x / self.width, y / self.height)
     }
 
-    fn coverage(&self, x: f64, y: f64, text: Option<&Mask>) -> f32 {
+    fn coverage(&self, x: f64, y: f64) -> f32 {
         let (x, y) = self.local(x, y);
         let mut coverage = match self.source.shape {
             MaskShape::Split => self.from_distance(y * self.height),
             MaskShape::Filmstrip => {
                 let mut bands = 0.0_f64;
                 for centre in [-0.34_f64, 0.0, 0.34] {
-                    let qx = x.abs() - 0.5;
-                    let qy = (y - centre).abs() - 0.12;
-                    let distance = qx.max(0.0).hypot(qy.max(0.0)) + qx.max(qy).min(0.0);
+                    let radius = self.roundness * 0.12;
+                    let qx = x.abs() - (0.5 - radius);
+                    let qy = (y - centre).abs() - (0.12 - radius);
+                    let distance = qx.max(0.0).hypot(qy.max(0.0)) + qx.max(qy).min(0.0) - radius;
                     bands = bands.max(self.from_distance(distance * self.min_dimension));
                 }
                 bands
@@ -151,17 +234,11 @@ impl<'a> Evaluated<'a> {
             MaskShape::Circle => {
                 self.from_distance(((x * 2.0).hypot(y * 2.0) - 1.0) * self.min_dimension * 0.5)
             }
-            MaskShape::Star => {
-                self.from_distance(polygon_distance(x, y, star_points()) * self.min_dimension)
-            }
-            MaskShape::Heart => {
-                self.from_distance(polygon_distance(x, y, heart_points()) * self.min_dimension)
-            }
-            MaskShape::Text => self.text_coverage(x, y, text),
+            MaskShape::Star => self.polygon_coverage(x, y, star_points()),
+            MaskShape::Heart => self.polygon_coverage(x, y, heart_points()),
+            MaskShape::Text => self.text_coverage(x, y, self.text),
             MaskShape::Brush => self.brush_coverage(x, y),
-            MaskShape::Pen => {
-                self.from_distance(polygon_distance(x, y, &self.points) * self.min_dimension)
-            }
+            MaskShape::Pen => self.polygon_coverage(x, y, &self.points),
         };
         if self.source.inverted {
             coverage = 1.0 - coverage;
@@ -174,19 +251,36 @@ impl<'a> Evaluated<'a> {
         (0.5 - signed / (2.0 * softness)).clamp(0.0, 1.0)
     }
 
+    fn far_from_unit_box(&self, x: f64, y: f64, extra: f64) -> bool {
+        let margin = extra + self.feather_pixels.max(0.75) / self.min_dimension;
+        x.abs() > 0.5 + margin || y.abs() > 0.5 + margin
+    }
+
+    fn polygon_coverage(&self, x: f64, y: f64, points: &[(f64, f64)]) -> f64 {
+        if self.far_from_unit_box(x, y, 0.0) {
+            0.0
+        } else {
+            self.from_distance(polygon_distance(x, y, points) * self.min_dimension)
+        }
+    }
+
     fn brush_coverage(&self, x: f64, y: f64) -> f64 {
         let radius = self.source.brush_size.clamp(0.002, 1.0) * 0.5;
-        let mut distance = f64::INFINITY;
+        if self.far_from_unit_box(x, y, radius) {
+            return 0.0;
+        }
+        let mut distance_squared = f64::INFINITY;
         for pair in self.points.windows(2) {
             if pair[0].0 < -0.5 || pair[1].0 < -0.5 {
                 continue;
             }
-            distance = distance.min(segment_distance((x, y), pair[0], pair[1]) - radius);
+            distance_squared =
+                distance_squared.min(segment_distance_squared((x, y), pair[0], pair[1]));
         }
         for (px, py) in self.points.iter().filter(|point| point.0 >= -0.5) {
-            distance = distance.min((x - px).hypot(y - py) - radius);
+            distance_squared = distance_squared.min((x - px).powi(2) + (y - py).powi(2));
         }
-        self.from_distance(distance * self.min_dimension)
+        self.from_distance((distance_squared.sqrt() - radius) * self.min_dimension)
     }
 
     fn text_coverage(&self, x: f64, y: f64, text: Option<&Mask>) -> f64 {
@@ -216,14 +310,14 @@ impl<'a> Evaluated<'a> {
     }
 }
 
-fn segment_distance(point: (f64, f64), a: (f64, f64), b: (f64, f64)) -> f64 {
+fn segment_distance_squared(point: (f64, f64), a: (f64, f64), b: (f64, f64)) -> f64 {
     let ab = (b.0 - a.0, b.1 - a.1);
     let length = ab.0 * ab.0 + ab.1 * ab.1;
     if length <= f64::EPSILON {
-        return (point.0 - a.0).hypot(point.1 - a.1);
+        return (point.0 - a.0).powi(2) + (point.1 - a.1).powi(2);
     }
     let t = (((point.0 - a.0) * ab.0 + (point.1 - a.1) * ab.1) / length).clamp(0.0, 1.0);
-    (point.0 - (a.0 + ab.0 * t)).hypot(point.1 - (a.1 + ab.1 * t))
+    (point.0 - (a.0 + ab.0 * t)).powi(2) + (point.1 - (a.1 + ab.1 * t)).powi(2)
 }
 
 /// Negative inside, positive outside a closed polygon.
@@ -232,15 +326,16 @@ fn polygon_distance(x: f64, y: f64, points: &[(f64, f64)]) -> f64 {
         return f64::INFINITY;
     }
     let mut inside = false;
-    let mut distance = f64::INFINITY;
+    let mut distance_squared = f64::INFINITY;
     for index in 0..points.len() {
         let a = points[index];
         let b = points[(index + 1) % points.len()];
-        distance = distance.min(segment_distance((x, y), a, b));
+        distance_squared = distance_squared.min(segment_distance_squared((x, y), a, b));
         if ((a.1 > y) != (b.1 > y)) && x < (b.0 - a.0) * (y - a.1) / (b.1 - a.1) + a.0 {
             inside = !inside;
         }
     }
+    let distance = distance_squared.sqrt();
     if inside { -distance } else { distance }
 }
 
@@ -283,12 +378,20 @@ fn heart_points() -> &'static [(f64, f64)] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use concat_core::animate::{Ease, Key, Track};
 
     fn masked(shape: MaskShape, inverted: bool) -> Frame {
         let mut frame = Frame::from_rgba(32, 32, vec![255; 32 * 32 * 4]).unwrap();
         let mut mask = ClipMask::new("mask1".to_owned(), shape);
         mask.inverted = inverted;
-        cut(&mut frame, &[mask], None, 0.0, &BTreeMap::new());
+        cut(
+            &mut frame,
+            &[mask],
+            &Mapping::IDENTITY,
+            None,
+            0.0,
+            &BTreeMap::new(),
+        );
         frame
     }
 
@@ -307,10 +410,147 @@ mod tests {
     }
 
     #[test]
+    fn concave_presets_keep_the_centre_and_remove_the_corners() {
+        for shape in [MaskShape::Star, MaskShape::Heart] {
+            let frame = masked(shape, false);
+            assert!(
+                frame.pixel(16, 16).unwrap()[3] > 240,
+                "{shape:?} should retain its centre"
+            );
+            assert_eq!(
+                frame.pixel(0, 0).unwrap()[3],
+                0,
+                "{shape:?} should cut away its corners"
+            );
+        }
+    }
+
+    #[test]
     fn empty_drawing_masks_leave_the_picture_alone() {
         let mut frame = Frame::from_rgba(8, 8, vec![255; 8 * 8 * 4]).unwrap();
         let mask = ClipMask::new("mask1".to_owned(), MaskShape::Brush);
-        cut(&mut frame, &[mask], None, 0.0, &BTreeMap::new());
+        cut(
+            &mut frame,
+            &[mask],
+            &Mapping::IDENTITY,
+            None,
+            0.0,
+            &BTreeMap::new(),
+        );
         assert_eq!(frame.pixel(0, 0).unwrap()[3], 255);
+    }
+
+    #[test]
+    fn an_incomplete_pen_does_not_blank_the_clip() {
+        let mut mask = ClipMask::new("mask1".to_owned(), MaskShape::Pen);
+        let points = [[0.2, 0.2], [0.8, 0.2], [0.5, 0.8]];
+        for count in 1..=2 {
+            mask.points = points[..count].to_vec();
+            let mut frame = Frame::from_rgba(32, 32, vec![255; 32 * 32 * 4]).unwrap();
+            cut(
+                &mut frame,
+                &[mask.clone()],
+                &Mapping::IDENTITY,
+                None,
+                0.0,
+                &BTreeMap::new(),
+            );
+            assert_eq!(frame.pixel(0, 0).unwrap()[3], 255, "{count} point(s)");
+        }
+        mask.points = points.to_vec();
+        let mut frame = Frame::from_rgba(32, 32, vec![255; 32 * 32 * 4]).unwrap();
+        cut(
+            &mut frame,
+            &[mask],
+            &Mapping::IDENTITY,
+            None,
+            0.0,
+            &BTreeMap::new(),
+        );
+        assert!(frame.pixel(16, 16).unwrap()[3] > 240);
+        assert_eq!(frame.pixel(0, 0).unwrap()[3], 0);
+    }
+
+    #[test]
+    fn painted_points_follow_crop_and_flip() {
+        let mut mask = ClipMask::new("mask1".to_owned(), MaskShape::Brush);
+        mask.points = vec![[0.25, 0.5]];
+        let mapping = Mapping {
+            crop: [0.2, 0.0, 0.0, 0.0],
+            flip_h: true,
+            flip_v: false,
+        };
+        let mut frame = Frame::from_rgba(64, 64, vec![255; 64 * 64 * 4]).unwrap();
+        cut(&mut frame, &[mask], &mapping, None, 0.0, &BTreeMap::new());
+        assert!(frame.pixel(59, 32).unwrap()[3] > 240);
+        assert_eq!(frame.pixel(4, 32).unwrap()[3], 0);
+    }
+
+    #[test]
+    fn animated_mask_position_changes_at_the_requested_instant() {
+        let mut mask = ClipMask::new("mask1".to_owned(), MaskShape::Circle);
+        mask.width = 0.2;
+        mask.height = 0.2;
+        let mut animation = Animation::default();
+        let key = |at, value| Key {
+            at,
+            value,
+            ease: Ease::LINEAR,
+            curve: None,
+            spatial_in: None,
+            spatial_out: None,
+        };
+        animation.parameters.insert(
+            MaskProperty::PositionX.id(&mask.id),
+            Track::new(vec![key(0.0, -0.5), key(1.0, 0.5)]),
+        );
+        let render = |at| {
+            let mut frame = Frame::from_rgba(64, 64, vec![255; 64 * 64 * 4]).unwrap();
+            cut(
+                &mut frame,
+                &[mask.clone()],
+                &Mapping::IDENTITY,
+                Some(&animation),
+                at,
+                &BTreeMap::new(),
+            );
+            frame
+        };
+        let start = render(0.0);
+        let end = render(1.0);
+        assert!(start.pixel(16, 32).unwrap()[3] > 240);
+        assert_eq!(start.pixel(48, 32).unwrap()[3], 0);
+        assert_eq!(end.pixel(16, 32).unwrap()[3], 0);
+        assert!(end.pixel(48, 32).unwrap()[3] > 240);
+    }
+
+    #[test]
+    fn filmstrip_roundness_changes_its_corner() {
+        let mut mask = ClipMask::new("mask1".to_owned(), MaskShape::Filmstrip);
+        mask.width = 0.65;
+        mask.height = 0.8;
+        mask.roundness = 0.0;
+        let mut square = Frame::from_rgba(200, 200, vec![255; 200 * 200 * 4]).unwrap();
+        cut(
+            &mut square,
+            &[mask.clone()],
+            &Mapping::IDENTITY,
+            None,
+            0.0,
+            &BTreeMap::new(),
+        );
+        mask.roundness = 1.0;
+        let mut rounded = Frame::from_rgba(200, 200, vec![255; 200 * 200 * 4]).unwrap();
+        cut(
+            &mut rounded,
+            &[mask],
+            &Mapping::IDENTITY,
+            None,
+            0.0,
+            &BTreeMap::new(),
+        );
+        assert!(square.pixel(161, 116).unwrap()[3] > 240);
+        assert!(rounded.pixel(161, 116).unwrap()[3] < 20);
+        assert!(rounded.pixel(100, 100).unwrap()[3] > 240);
     }
 }

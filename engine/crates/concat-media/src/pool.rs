@@ -48,6 +48,10 @@ struct FrameKey {
     chain: Option<String>,
     /// The pre-fit chain - a crop - on the same terms.
     pre: Option<String>,
+    /// A playback reader converts only the pictures chosen by this cadence.
+    /// Keep those separate from unpaced scrub frames because variable-rate
+    /// media can choose different pictures for one nominal source index.
+    delivery_rate: Option<FrameRate>,
     index: i64,
 }
 
@@ -167,6 +171,7 @@ impl Reader {
         rate: FrameRate,
         still: bool,
         index: i64,
+        delivery_rate: Option<FrameRate>,
     ) -> Result<Self> {
         // Unpaced, so every source frame comes out with its own timestamp
         // and the index is read from that; a seek lands on the keyframe at
@@ -174,6 +179,9 @@ impl Reader {
         let mut options = DecodeOptions::default()
             .starting_at(rate.time_of_frame(index))
             .scaled_to(width, height);
+        if let Some(delivery_rate) = delivery_rate {
+            options = options.at_rate(delivery_rate);
+        }
         if still {
             // One frame, served for every time, and never sought: a seek
             // on a single-image JPEG leaves FFmpeg's image demuxer with
@@ -228,8 +236,15 @@ struct MediaFacts {
     frames: Option<i64>,
 }
 
-/// One reader's identity: the file, the decode size, the effect chain.
-type ReaderKey = (PathBuf, u32, u32, Option<String>, Option<String>);
+/// One reader's identity: file, decode size, effect chain and playback cadence.
+type ReaderKey = (
+    PathBuf,
+    u32,
+    u32,
+    Option<String>,
+    Option<String>,
+    Option<FrameRate>,
+);
 
 /// The warm readers and their recency, behind one short lock. A reader is
 /// found here and then used outside this lock, under its own, so a decode
@@ -309,6 +324,50 @@ impl ReaderPool {
         chain: Option<&str>,
         pre: Option<&str>,
     ) -> Result<Arc<Frame>> {
+        self.frame_at_inner(path, time, width, height, still, chain, pre, None)
+    }
+
+    /// The frame at `time` for sequential playback at `delivery_rate`.
+    ///
+    /// An unpaced reader converts every source frame it passes. That is useful
+    /// for arbitrary scrubbing because the intermediate pictures seed the
+    /// cache, but wasteful for 60 fps footage on a 30 fps timeline. A paced
+    /// reader still decodes in order and scales/converts only the picture each
+    /// output tick will display.
+    pub fn frame_at_rate(
+        &self,
+        path: &Path,
+        time: Rational,
+        width: u32,
+        height: u32,
+        still: bool,
+        chain: Option<&str>,
+        pre: Option<&str>,
+        delivery_rate: FrameRate,
+    ) -> Result<Arc<Frame>> {
+        self.frame_at_inner(
+            path,
+            time,
+            width,
+            height,
+            still,
+            chain,
+            pre,
+            Some(delivery_rate),
+        )
+    }
+
+    fn frame_at_inner(
+        &self,
+        path: &Path,
+        time: Rational,
+        width: u32,
+        height: u32,
+        still: bool,
+        chain: Option<&str>,
+        pre: Option<&str>,
+        delivery_rate: Option<FrameRate>,
+    ) -> Result<Arc<Frame>> {
         let facts = self.facts_for(path, still)?;
         let rate = facts.rate;
         let mut target = if facts.still {
@@ -332,13 +391,24 @@ impl ReaderPool {
             height,
             chain: chain_key.clone(),
             pre: pre_key.clone(),
+            delivery_rate,
             index: target,
         };
         if let Some(frame) = self.cached(&key) {
             return Ok(frame);
         }
 
-        let shared = self.reader(path, width, height, chain, pre, rate, facts.still, target)?;
+        let shared = self.reader(
+            path,
+            width,
+            height,
+            chain,
+            pre,
+            rate,
+            facts.still,
+            target,
+            delivery_rate,
+        )?;
         let mut reader = shared.lock().map_err(|_| crate::error::Error::NoFrame {
             path: path.to_path_buf(),
         })?;
@@ -366,6 +436,7 @@ impl ReaderPool {
                     height,
                     chain: chain_key.clone(),
                     pre: pre_key.clone(),
+                    delivery_rate,
                     index,
                 },
                 Arc::clone(&frame),
@@ -396,6 +467,7 @@ impl ReaderPool {
                             height,
                             chain: chain_key.clone(),
                             pre: pre_key.clone(),
+                            delivery_rate,
                             index,
                         },
                         Arc::clone(&frame),
@@ -482,6 +554,7 @@ impl ReaderPool {
         rate: FrameRate,
         still: bool,
         target: i64,
+        delivery_rate: Option<FrameRate>,
     ) -> Result<Arc<Mutex<Reader>>> {
         let key = (
             path.to_path_buf(),
@@ -489,6 +562,7 @@ impl ReaderPool {
             height,
             chain.map(str::to_owned),
             pre.map(str::to_owned),
+            delivery_rate,
         );
         {
             let mut readers = self
@@ -508,7 +582,15 @@ impl ReaderPool {
         // part, and nobody else needs to wait for it. A decode in flight on
         // an evicted reader finishes on its own handle.
         let opened = Arc::new(Mutex::new(Reader::open(
-            path, width, height, chain, pre, rate, still, target,
+            path,
+            width,
+            height,
+            chain,
+            pre,
+            rate,
+            still,
+            target,
+            delivery_rate,
         )?));
         let mut readers = self
             .readers
@@ -589,6 +671,7 @@ mod tests {
             height: 2,
             chain: None,
             pre: None,
+            delivery_rate: None,
             index,
         };
         cache.insert(key(0), Arc::new(Frame::black(2, 2)));
@@ -616,6 +699,7 @@ mod tests {
                 height: 2,
                 chain: None,
                 pre: None,
+                delivery_rate: None,
                 index: 0,
             },
             Arc::new(Frame::black(2, 2)),
@@ -676,6 +760,48 @@ mod tests {
             near(past_end, 89),
             "past the end read {past_end}, wanted the last frame"
         );
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Playback converts at the timeline cadence rather than converting and
+    /// throwing away every intermediate source picture. The chosen pictures
+    /// must still be the ones visible at each requested source instant.
+    #[test]
+    fn paced_access_samples_a_high_rate_source_correctly() {
+        let path = std::env::temp_dir().join("concat-pool-paced-test.mp4");
+        let source_rate = FrameRate::SIXTY;
+        let delivery_rate = FrameRate::THIRTY;
+        let mut encoder = Encoder::create(&path, 64, 64, source_rate, &EncodeOptions::default())
+            .expect("the linked FFmpeg encodes h264");
+        for index in 0..60u32 {
+            let mut frame = Frame::black(64, 64);
+            frame.fill([(index * 4) as u8, 30, 30, 255]);
+            encoder.write_frame(&frame).expect("writes");
+        }
+        encoder.finish().expect("finishes");
+
+        let pool = ReaderPool::new(64 * 1024 * 1024, 4);
+        for output in 0..20i64 {
+            let frame = pool
+                .frame_at_rate(
+                    &path,
+                    delivery_rate.time_of_frame(output),
+                    64,
+                    64,
+                    false,
+                    None,
+                    None,
+                    delivery_rate,
+                )
+                .expect("paced frame decodes");
+            let red = i64::from(frame.pixel(32, 32).expect("in bounds")[0]);
+            let expected = output * 8;
+            assert!(
+                (red - expected).abs() <= 12,
+                "output {output} read red {red}, wanted about {expected}"
+            );
+        }
 
         let _ = std::fs::remove_file(&path);
     }

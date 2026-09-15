@@ -161,17 +161,36 @@ impl Mask {
     /// A mask read back from [`Mask::to_png`], or from any PNG whose first
     /// channel is the mask. `None` for anything that is not a PNG.
     pub fn from_png(bytes: &[u8]) -> Option<Mask> {
+        Self::from_png_channel(bytes, false)
+    }
+
+    /// Reads a PNG's transparency as coverage. Title rasterisation writes
+    /// white RGBA pixels, so its colour channel is not the anti-aliased matte.
+    pub fn from_png_alpha(bytes: &[u8]) -> Option<Mask> {
+        Self::from_png_channel(bytes, true)
+    }
+
+    fn from_png_channel(bytes: &[u8], alpha: bool) -> Option<Mask> {
         let mut decoder = png::Decoder::new(Cursor::new(bytes));
         decoder.set_transformations(png::Transformations::normalize_to_color8());
         let mut reader = decoder.read_info().ok()?;
         let mut buffer = vec![0u8; reader.output_buffer_size()];
         let info = reader.next_frame(&mut buffer).ok()?;
         let channels = info.color_type.samples();
+        let channel = if alpha {
+            match info.color_type {
+                png::ColorType::Rgba => 3,
+                png::ColorType::GrayscaleAlpha => 1,
+                _ => 0,
+            }
+        } else {
+            0
+        };
         let count = info.width as usize * info.height as usize;
         let data: Vec<u8> = buffer
             .chunks_exact(channels)
             .take(count)
-            .map(|pixel| pixel[0])
+            .map(|pixel| pixel[channel])
             .collect();
         Mask::from_bytes(info.width, info.height, data)
     }
@@ -254,5 +273,24 @@ mod tests {
         let back = Mask::from_png(&mask.to_png()).expect("decodes");
         assert_eq!(back, mask);
         assert!(Mask::from_png(b"not a png").is_none());
+    }
+
+    #[test]
+    fn a_white_rgba_title_uses_alpha_for_coverage() {
+        let mut bytes = Vec::new();
+        {
+            let mut encoder = png::Encoder::new(&mut bytes, 3, 1);
+            encoder.set_color(png::ColorType::Rgba);
+            encoder.set_depth(png::BitDepth::Eight);
+            let mut writer = encoder.write_header().unwrap();
+            writer
+                .write_image_data(&[255, 255, 255, 0, 255, 255, 255, 128, 255, 255, 255, 255])
+                .unwrap();
+        }
+        assert_eq!(Mask::from_png(&bytes).unwrap().bytes(), &[255, 255, 255]);
+        assert_eq!(
+            Mask::from_png_alpha(&bytes).unwrap().bytes(),
+            &[0, 128, 255]
+        );
     }
 }
