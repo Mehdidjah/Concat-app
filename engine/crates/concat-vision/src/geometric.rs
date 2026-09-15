@@ -202,9 +202,10 @@ impl<'a> Evaluated<'a> {
             MaskShape::Filmstrip => {
                 let mut bands = 0.0_f64;
                 for centre in [-0.34_f64, 0.0, 0.34] {
-                    let qx = x.abs() - 0.5;
-                    let qy = (y - centre).abs() - 0.12;
-                    let distance = qx.max(0.0).hypot(qy.max(0.0)) + qx.max(qy).min(0.0);
+                    let radius = self.roundness * 0.12;
+                    let qx = x.abs() - (0.5 - radius);
+                    let qy = (y - centre).abs() - (0.12 - radius);
+                    let distance = qx.max(0.0).hypot(qy.max(0.0)) + qx.max(qy).min(0.0) - radius;
                     bands = bands.max(self.from_distance(distance * self.min_dimension));
                 }
                 bands
@@ -224,9 +225,7 @@ impl<'a> Evaluated<'a> {
             MaskShape::Heart => self.from_distance(heart_field().sample(x, y) * self.min_dimension),
             MaskShape::Text => self.text_coverage(x, y, self.text),
             MaskShape::Brush => self.brush_coverage(x, y),
-            MaskShape::Pen => {
-                self.from_distance(polygon_distance(x, y, &self.points) * self.min_dimension)
-            }
+            MaskShape::Pen => self.polygon_coverage(x, y, &self.points),
         };
         if self.source.inverted {
             coverage = 1.0 - coverage;
@@ -239,19 +238,36 @@ impl<'a> Evaluated<'a> {
         (0.5 - signed / (2.0 * softness)).clamp(0.0, 1.0)
     }
 
+    fn far_from_unit_box(&self, x: f64, y: f64, extra: f64) -> bool {
+        let margin = extra + self.feather_pixels.max(0.75) / self.min_dimension;
+        x.abs() > 0.5 + margin || y.abs() > 0.5 + margin
+    }
+
+    fn polygon_coverage(&self, x: f64, y: f64, points: &[(f64, f64)]) -> f64 {
+        if self.far_from_unit_box(x, y, 0.0) {
+            0.0
+        } else {
+            self.from_distance(polygon_distance(x, y, points) * self.min_dimension)
+        }
+    }
+
     fn brush_coverage(&self, x: f64, y: f64) -> f64 {
         let radius = self.source.brush_size.clamp(0.002, 1.0) * 0.5;
-        let mut distance = f64::INFINITY;
+        if self.far_from_unit_box(x, y, radius) {
+            return 0.0;
+        }
+        let mut distance_squared = f64::INFINITY;
         for pair in self.points.windows(2) {
             if pair[0].0 < -0.5 || pair[1].0 < -0.5 {
                 continue;
             }
-            distance = distance.min(segment_distance((x, y), pair[0], pair[1]) - radius);
+            distance_squared =
+                distance_squared.min(segment_distance_squared((x, y), pair[0], pair[1]));
         }
         for (px, py) in self.points.iter().filter(|point| point.0 >= -0.5) {
-            distance = distance.min((x - px).hypot(y - py) - radius);
+            distance_squared = distance_squared.min((x - px).powi(2) + (y - py).powi(2));
         }
-        self.from_distance(distance * self.min_dimension)
+        self.from_distance((distance_squared.sqrt() - radius) * self.min_dimension)
     }
 
     fn text_coverage(&self, x: f64, y: f64, text: Option<&Mask>) -> f64 {
@@ -281,14 +297,14 @@ impl<'a> Evaluated<'a> {
     }
 }
 
-fn segment_distance(point: (f64, f64), a: (f64, f64), b: (f64, f64)) -> f64 {
+fn segment_distance_squared(point: (f64, f64), a: (f64, f64), b: (f64, f64)) -> f64 {
     let ab = (b.0 - a.0, b.1 - a.1);
     let length = ab.0 * ab.0 + ab.1 * ab.1;
     if length <= f64::EPSILON {
-        return (point.0 - a.0).hypot(point.1 - a.1);
+        return (point.0 - a.0).powi(2) + (point.1 - a.1).powi(2);
     }
     let t = (((point.0 - a.0) * ab.0 + (point.1 - a.1) * ab.1) / length).clamp(0.0, 1.0);
-    (point.0 - (a.0 + ab.0 * t)).hypot(point.1 - (a.1 + ab.1 * t))
+    (point.0 - (a.0 + ab.0 * t)).powi(2) + (point.1 - (a.1 + ab.1 * t)).powi(2)
 }
 
 /// Negative inside, positive outside a closed polygon.
@@ -297,15 +313,16 @@ fn polygon_distance(x: f64, y: f64, points: &[(f64, f64)]) -> f64 {
         return f64::INFINITY;
     }
     let mut inside = false;
-    let mut distance = f64::INFINITY;
+    let mut distance_squared = f64::INFINITY;
     for index in 0..points.len() {
         let a = points[index];
         let b = points[(index + 1) % points.len()];
-        distance = distance.min(segment_distance((x, y), a, b));
+        distance_squared = distance_squared.min(segment_distance_squared((x, y), a, b));
         if ((a.1 > y) != (b.1 > y)) && x < (b.0 - a.0) * (y - a.1) / (b.1 - a.1) + a.0 {
             inside = !inside;
         }
     }
+    let distance = distance_squared.sqrt();
     if inside { -distance } else { distance }
 }
 
@@ -498,5 +515,22 @@ mod tests {
         let mask = ClipMask::new("mask1".to_owned(), MaskShape::Brush);
         cut(&mut frame, &[mask], 0.0, &BTreeMap::new());
         assert_eq!(frame.pixel(0, 0).unwrap()[3], 255);
+    }
+
+    #[test]
+    fn an_incomplete_pen_does_not_blank_the_clip() {
+        let mut mask = ClipMask::new("pen".to_owned(), MaskShape::Pen);
+        let points = [[0.2, 0.2], [0.8, 0.2], [0.5, 0.8]];
+        for count in 1..=2 {
+            mask.points = points[..count].to_vec();
+            let mut frame = Frame::black(32, 32);
+            cut(&mut frame, &[mask.clone()], 0.0, &BTreeMap::new());
+            assert_eq!(frame.pixel(0, 0).unwrap()[3], 255, "{count} point(s)");
+        }
+        mask.points = points.to_vec();
+        let mut frame = Frame::black(32, 32);
+        cut(&mut frame, &[mask], 0.0, &BTreeMap::new());
+        assert!(frame.pixel(16, 16).unwrap()[3] > 200);
+        assert_eq!(frame.pixel(0, 0).unwrap()[3], 0);
     }
 }

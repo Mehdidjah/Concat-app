@@ -431,9 +431,9 @@ pub enum BrushTool {
 
 /// A geometric or hand-authored alpha mask attached to a picture clip.
 ///
-/// Coordinates are relative to the decoded picture rather than the output
-/// frame, so the mask follows crop, flip, placement and animation exactly as
-/// if it had been painted on the source itself.
+/// Coordinates are relative to the original source picture rather than the
+/// output frame. A decoded pixel is mapped back through crop and flip before
+/// the mask is sampled, so painting and rendered coverage stay aligned.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ClipMask {
@@ -454,10 +454,10 @@ pub struct ClipMask {
     /// Vertical centre offset on the same terms as `position_x`.
     #[serde(default)]
     pub position_y: f64,
-    /// Fractions of the decoded picture's width and height.
+    /// Fraction of the original source picture's width.
     #[serde(default = "default_mask_size")]
     pub width: f64,
-    /// Fraction of the decoded picture's height.
+    /// Fraction of the original source picture's height.
     #[serde(default = "default_mask_size")]
     pub height: f64,
     /// Clockwise degrees about the mask's centre.
@@ -680,6 +680,18 @@ impl ClipMask {
         }
     }
 
+    /// Switches presets without carrying the previous shape's dimensions
+    /// or authored path into the next one. Placement and feather stay put.
+    pub fn apply_shape_preset(&mut self, shape: MaskShape) {
+        let preset = Self::new(self.id.clone(), shape);
+        self.shape = shape;
+        self.width = preset.width;
+        self.height = preset.height;
+        self.roundness = preset.roundness;
+        self.brush_size = preset.brush_size;
+        self.points.clear();
+    }
+
     /// Reads an animatable property.
     pub fn value(&self, property: MaskProperty) -> f64 {
         match property {
@@ -811,6 +823,30 @@ impl ClipMask {
         self.keys
             .dedup_by(|a, b| a.property == b.property && (a.at - b.at).abs() <= f64::EPSILON);
         self
+    }
+}
+
+#[cfg(test)]
+mod mask_preset_tests {
+    use super::*;
+
+    #[test]
+    fn switching_shapes_restores_the_new_preset_without_moving_the_mask() {
+        let mut mask = ClipMask::new("one".to_owned(), MaskShape::Brush);
+        mask.position_x = 0.4;
+        mask.feather = 0.03;
+        mask.brush_size = 0.2;
+        mask.points = vec![[0.2, 0.3], [0.8, 0.7]];
+        mask.apply_shape_preset(MaskShape::Filmstrip);
+        let preset = ClipMask::new("one".to_owned(), MaskShape::Filmstrip);
+        assert_eq!(
+            (mask.width, mask.height, mask.roundness),
+            (preset.width, preset.height, preset.roundness)
+        );
+        assert_eq!(mask.brush_size, preset.brush_size);
+        assert!(mask.points.is_empty());
+        assert_eq!(mask.position_x, 0.4);
+        assert_eq!(mask.feather, 0.03);
     }
 }
 

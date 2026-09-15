@@ -4477,11 +4477,7 @@ impl Studio {
             return;
         }
         self.edit_active_mask(|mask| {
-            let defaults = model::ClipMask::new(mask.id.clone(), shape);
-            mask.shape = shape;
-            mask.width = defaults.width;
-            mask.height = defaults.height;
-            mask.roundness = defaults.roundness;
+            mask.apply_shape_preset(shape);
             mask.keys.retain(|key| {
                 !matches!(
                     key.property,
@@ -4490,7 +4486,6 @@ impl Studio {
                         | model::MaskProperty::Roundness
                 )
             });
-            mask.points.clear();
         });
         self.mask_drawing = matches!(shape, model::MaskShape::Brush | model::MaskShape::Pen);
     }
