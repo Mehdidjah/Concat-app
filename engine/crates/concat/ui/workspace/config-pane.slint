@@ -199,14 +199,12 @@ export component ConfigPane inherits Rectangle {
     callback mask-track();
 
 
-    // The tab strip follows the selection, and stays short: three tabs at
-    // most, each with a dropdown of its sections, because seven tabs on a
-    // strip this narrow cannot be read. Video holds what happens to the
-    // picture - its placement, its speed, its animation, its colour; Audio
-    // the level, the fades and the voice and room chain; Effects the two
-    // shelves and the picture's chain. A still loses Audio, a sound clip
-    // keeps Audio alone, and a title gets Text alone — offering the others
-    // would be offering panels that can only say "nothing here".
+    // The tab strip follows the selection. Video holds what happens to the
+    // picture - its placement, speed, animation and colour; Audio the level,
+    // fades and voice/room chain; Effects the picture's chain; Mask the full
+    // geometric/drawn-mask and tracking workflow. A still loses Audio, a
+    // sound clip keeps Audio alone, and a title gets Text alone — offering
+    // the others would be offering panels that can only say "nothing here".
     property <bool> is-text: root.selected.kind == ClipKind.text;
     property <bool> is-image: root.selected.kind == ClipKind.image;
     property <bool> is-audio: root.selected.kind == ClipKind.audio;
@@ -216,16 +214,16 @@ export component ConfigPane inherits Rectangle {
     property <bool> is-layer: root.selected.kind == ClipKind.filter;
     property <[string]> tabs: root.is-text ? ["Text"]
         : root.is-layer ? ["Filter"]
-        : root.is-image ? ["Video", "Effects"]
+        : root.is-image ? ["Video", "Effects", "Mask"]
         : root.is-audio ? ["Audio"]
-        : ["Video", "Audio", "Effects"];
+        : ["Video", "Audio", "Effects", "Mask"];
     /// The same tabs in the interface's language. `tabs` stays English,
     /// because the panels are picked by comparing against it.
     property <[string]> tabs-shown: root.is-text ? [I18n.t("Text")]
         : root.is-layer ? [I18n.t("Filter")]
-        : root.is-image ? [I18n.t("Video"), I18n.t("Effects")]
+        : root.is-image ? [I18n.t("Video"), I18n.t("Effects"), I18n.t("Mask")]
         : root.is-audio ? [I18n.t("Audio")]
-        : [I18n.t("Video"), I18n.t("Audio"), I18n.t("Effects")];
+        : [I18n.t("Video"), I18n.t("Audio"), I18n.t("Effects"), I18n.t("Mask")];
     /// A one-segment segmented control is a label wearing a costume, so a lone
     /// tab renders as the panel's plain heading instead.
     property <bool> single: root.tabs.length < 2;
@@ -241,8 +239,8 @@ export component ConfigPane inherits Rectangle {
     changed selected => {
         if (root.selected.kind != root.strip-kind) {
             root.strip-kind = root.selected.kind;
-            // Clamped rather than reset: going from a video to a still should
-            // stay on Effects, which both offer, instead of jumping back.
+            // Clamp rather than reset so changing selection keeps the closest
+            // available inspector tab instead of always jumping to the first.
             root.tab = Math.min(root.tab, root.tabs.length - 1);
         }
     }
@@ -253,20 +251,22 @@ export component ConfigPane inherits Rectangle {
 
     /// The sections of the current tab, as the dropdown lists them.
     property <[string]> sections: root.heading == "Video"
-            ? (root.is-image ? ["Basic", "Mask", "Animation", "Adjust"]
-                : ["Basic", "Mask", "Speed", "Animation", "Adjust"])
+            ? (root.is-image ? ["Basic", "Animation", "Adjust"]
+                : ["Basic", "Speed", "Animation", "Adjust"])
         : root.heading == "Audio"
             ? (root.is-audio ? ["Sound", "Speed"] : ["Sound"])
         : root.heading == "Effects" ? ["Effects"]
+        : root.heading == "Mask" ? ["Mask"]
         : root.heading == "Text" ? ["Text", "Animation"]
         : ["Layer"];
     /// The sections as the dropdown shows them; see `tabs-shown`.
     property <[string]> sections-shown: root.heading == "Video"
-            ? (root.is-image ? [I18n.t("Basic"), I18n.t("Mask"), I18n.t("Animation"), I18n.t("Adjust")]
-                : [I18n.t("Basic"), I18n.t("Mask"), I18n.t("Speed"), I18n.t("Animation"), I18n.t("Adjust")])
+            ? (root.is-image ? [I18n.t("Basic"), I18n.t("Animation"), I18n.t("Adjust")]
+                : [I18n.t("Basic"), I18n.t("Speed"), I18n.t("Animation"), I18n.t("Adjust")])
         : root.heading == "Audio"
             ? (root.is-audio ? [I18n.t("Sound"), I18n.t("Speed")] : [I18n.t("Sound")])
         : root.heading == "Effects" ? [I18n.t("Effects")]
+        : root.heading == "Mask" ? [I18n.t("Mask")]
         : root.heading == "Text" ? [I18n.t("Text"), I18n.t("Animation")]
         : [I18n.t("Layer")];
 
@@ -301,7 +301,7 @@ export component ConfigPane inherits Rectangle {
         if (root.jump-token == 0) { return; }
         if (root.jump-tab == "Video") { root.tab = 0; }
         else if (root.jump-tab == "Audio") { root.tab = root.is-audio ? 0 : 1; }
-        else if (root.jump-tab == "Effects") { root.tab = root.tabs.length - 1; }
+        else if (root.jump-tab == "Effects") { root.tab = root.is-image ? 1 : 2; }
         root.pick-section(0);
     }
     changed jump-token => { root.jump(); }

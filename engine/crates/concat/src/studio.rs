@@ -5670,16 +5670,22 @@ impl Studio {
     pub fn mask_shape(&mut self, shape: i32) {
         let shape_index = shape;
         let shape = mask_shape(shape);
-        if self.active_mask_id().is_none() {
+        let (Some(clip_id), Some(mask_id)) = (self.sole_selection(), self.active_mask_id()) else {
             self.mask_add(shape_index);
             return;
-        }
-        self.edit_active_mask(|mask| {
-            mask.shape = shape;
-            if !matches!(shape, model::MaskShape::Brush | model::MaskShape::Pen) {
-                mask.points.clear();
+        };
+        self.begin_echo();
+        if let Some(clip) = self.echo_clip_mut(&clip_id)
+            && let Some(index) = clip.masks.iter().position(|mask| mask.id == mask_id)
+        {
+            // Re-clicking a drawing tool must not erase an authored path.
+            if clip.masks[index].shape != shape
+                || !matches!(shape, model::MaskShape::Brush | model::MaskShape::Pen)
+            {
+                apply_mask_shape_preset(&mut clip.masks[index], &mut clip.keyframes, shape);
+                self.clip_commit();
             }
-        });
+        }
         self.mask_drawing = matches!(shape, model::MaskShape::Brush | model::MaskShape::Pen);
     }
 
@@ -5835,9 +5841,18 @@ impl Studio {
     }
 
     pub fn mask_reset(&mut self) {
-        self.edit_active_mask(|mask| {
-            *mask = model::ClipMask::new(mask.id.clone(), mask.shape);
-        });
+        let (Some(clip_id), Some(mask_id)) = (self.sole_selection(), self.active_mask_id()) else {
+            return;
+        };
+        self.begin_echo();
+        let Some(clip) = self.echo_clip_mut(&clip_id) else {
+            return;
+        };
+        let Some(mask) = clip.masks.iter_mut().find(|mask| mask.id == mask_id) else {
+            return;
+        };
+        reset_mask_properties(mask, &mut clip.keyframes);
+        self.clip_commit();
     }
 
     pub fn mask_track_direction(&mut self, index: i32) {
@@ -5909,15 +5924,8 @@ impl Studio {
                     _ => 180,
                 };
                 let pool = concat_media::ReaderPool::with_defaults();
-                let source_at = |at: f64| {
-                    let covered = clip.duration * clip.speed.max(0.0625);
-                    clip.source_start
-                        + if clip.reverse {
-                            (1.0 - at) * covered
-                        } else {
-                            at * covered
-                        }
-                };
+                let curve = clip_retime_curve(&clip);
+                let source_at = |at: f64| clip_source_time(&clip, at, curve.as_ref());
                 let decode = |at: f64| {
                     let time = concat_core::Rational::approximate(source_at(at))
                         .unwrap_or(concat_core::Rational::ZERO);
