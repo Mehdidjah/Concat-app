@@ -2013,6 +2013,8 @@ impl Studio {
             time: f64::from(self.playhead),
             width,
             height,
+            live: self.playing || self.echo.is_some() || self.mask_drawing,
+            prewarm: true,
         };
         let settings = session.settings();
         let monitor = self.host.monitor.clone();
