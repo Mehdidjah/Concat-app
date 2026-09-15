@@ -336,8 +336,8 @@ mod tests {
         let clips = Arc::new(vec![clip]);
         let settings = DocumentSettings {
             name: "diagnostic".to_owned(),
-            width: 960,
-            height: 540,
+            width: 480,
+            height: 270,
             rate_num: 30,
             rate_den: 1,
         };
@@ -360,19 +360,19 @@ mod tests {
                     &settings,
                     FrameSpec {
                         time: index as f64 / 30.0,
-                        width: 960,
-                        height: 540,
+                        width: 480,
+                        height: 270,
                         live: true,
                         prewarm: true,
                     },
                 )
                 .unwrap();
-            assert_eq!(bytes.len(), 960 * 540 * 4);
+            assert_eq!(bytes.len(), 480 * 270 * 4);
             samples.push(start.elapsed().as_secs_f64() * 1000.0);
         }
         samples.sort_by(f64::total_cmp);
         println!(
-            "live animated scale-and-mask monitor: median {:.2} ms, p90 {:.2} ms",
+            "480×270 live animated scale-and-mask: median {:.2} ms, p90 {:.2} ms",
             samples[15], samples[27]
         );
         assert_ne!(
@@ -382,7 +382,11 @@ mod tests {
         monitor
             .frame(
                 Arc::clone(&clips),
-                &settings,
+                &DocumentSettings {
+                    width: 960,
+                    height: 540,
+                    ..settings
+                },
                 FrameSpec {
                     time: 0.5,
                     width: 960,

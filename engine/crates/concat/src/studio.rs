@@ -1928,10 +1928,26 @@ impl Studio {
         // The frame's own additions - a look being shown, a cutout being
         // painted - go on a copy, so the kept list stays the document's.
         let mut own: Option<Vec<concat_export::ExportClip>> = None;
-        let scale = match self.quality_of() {
+        let quality_scale: f64 = match self.quality_of() {
             0 => 1.0,
             1 => 0.5,
             _ => 0.25,
+        };
+        // During animated playback the newest frame matters more than
+        // settled detail. Decode and matte at a small live size, then use
+        // the selected quality again as soon as playback stops. Without
+        // motion, honour the user's monitor quality unchanged.
+        let animated_live = self.playing
+            && clips.iter().any(|clip| {
+                let time = f64::from(self.playhead);
+                time >= clip.start
+                    && time < clip.start + clip.duration
+                    && (clip.masks_enabled || !clip.animation.is_empty())
+            });
+        let scale = if animated_live {
+            quality_scale.min(480.0 / f64::from(width.max(height)))
+        } else {
+            quality_scale
         };
         let width = ((f64::from(width) * scale).round() as u32).max(2) & !1;
         let height = ((f64::from(height) * scale).round() as u32).max(2) & !1;
