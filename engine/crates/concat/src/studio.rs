@@ -49,7 +49,7 @@ use crate::format::{
 };
 use crate::host::{
     Host, MediaArt, cached_media_art, image_at, image_of, media_art, on_ui, spawn, spawn_art,
-    spawn_unpublished,
+    spawn_detached, spawn_unpublished,
 };
 use crate::i18n::{self, t, tf};
 use crate::prefs::{AudioTracks, Preferences};
@@ -415,13 +415,129 @@ impl GraphProperty {
             Self::Speed => Some(KeyframeProperty::TimeRemap),
         }
     }
+
+    fn default_mode(self) -> GraphMode {
+        if self == Self::LayerOrder {
+            GraphMode::Step
+        } else {
+            GraphMode::Value
+        }
+    }
+}
+
+/// The way the expanded editor visualises one property. Value is the actual
+/// property curve, Speed is its temporal derivative, and Step shows the
+/// rounded/discrete result used by properties such as layer order.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum GraphMode {
+    Value,
+    Speed,
+    Step,
+}
+
+impl GraphMode {
+    fn from_index(index: i32, property: GraphProperty) -> Self {
+        if property == GraphProperty::LayerOrder {
+            return Self::Step;
+        }
+        match index {
+            1 => Self::Speed,
+            _ => Self::Value,
+        }
+    }
+
+    fn index(self) -> i32 {
+        match self {
+            Self::Value => 0,
+            Self::Speed => 1,
+            Self::Step => 2,
+        }
+    }
+}
+
+#[derive(Clone)]
+struct GraphDragPoint {
+    index: usize,
+    at: f64,
+    value: f64,
+}
+
+#[derive(Clone)]
+struct GraphDragState {
+    anchor: usize,
+    anchor_at: f64,
+    anchor_value: f64,
+    duration: f64,
+    points: Vec<GraphDragPoint>,
 }
 
 #[derive(Clone)]
 pub struct KeyframeGraphState {
     pub clip: String,
     pub property: GraphProperty,
-    pub selected: Option<usize>,
+    pub mode: GraphMode,
+    /// Selected key indices are view state shared by the expanded graph and
+    /// the clip's timeline diamonds. `primary` owns the temporal handles.
+    pub selected: Vec<usize>,
+    pub primary: Option<usize>,
+    drag: Option<GraphDragState>,
+}
+
+#[derive(Clone)]
+struct GraphClipboardPoint {
+    offset: f64,
+    value: f64,
+    ease: KeyframeEase,
+    temporal_curve: Option<TemporalCurve>,
+}
+
+#[derive(Clone)]
+struct GraphClipboard {
+    points: Vec<GraphClipboardPoint>,
+}
+
+/// Semantic messages emitted by the graph UI. Keeping pointer mechanics out
+/// of document mutations makes selection and one-undo-per-gesture explicit.
+#[allow(missing_docs)]
+pub(crate) enum GraphAction {
+    PropertyChanged(i32),
+    ModeChanged(i32),
+    PointPressed {
+        index: i32,
+        additive: bool,
+    },
+    PointDragged {
+        index: i32,
+        at: f32,
+        value: f32,
+    },
+    EditFinished,
+    PointAdded {
+        at: f32,
+        value: f32,
+    },
+    SelectionChanged {
+        from_at: f32,
+        to_at: f32,
+        from_value: f32,
+        to_value: f32,
+        additive: bool,
+    },
+    DeleteSelected,
+    CopySelected,
+    PasteAtPlayhead,
+    SelectAll,
+    EaseChanged(i32),
+    CurvePressed,
+    CurveChanged {
+        x1: f32,
+        y1: f32,
+        x2: f32,
+        y2: f32,
+    },
+    CurveReleased,
+    PostChanged(i32),
+    Close,
 }
 
 impl Default for LaneView {
@@ -778,6 +894,9 @@ pub struct Studio {
     preview_frame: slint::Timer,
     /// One clip, held for Paste.
     pub clipboard: Option<Clip>,
+    /// Keyframes copied inside the expanded graph. Kept separate from the
+    /// clip clipboard so graph shortcuts cannot overwrite a copied clip.
+    graph_clipboard: Option<GraphClipboard>,
     /// The monitor's last frame, and whether another is wanted.
     pub preview: slint::Image,
     preview_busy: bool,
@@ -980,6 +1099,32 @@ fn mask_property(index: i32) -> Option<model::MaskProperty> {
     model::MaskProperty::ALL.get(index.max(0) as usize).copied()
 }
 
+fn reset_mask_properties(mask: &mut model::ClipMask, keyframes: &mut model::ClipKeyframes) {
+    let mask_id = mask.id.clone();
+    *mask = model::ClipMask::new(mask_id.clone(), mask.shape);
+    // Reset must also forget authored motion: otherwise the evaluator
+    // immediately overrides these defaults with the old named tracks.
+    let prefix = format!("mask:{mask_id}:");
+    keyframes.tracks.retain(|id, _| !id.starts_with(&prefix));
+}
+
+/// A new shape preset owns its dimensions. Old size keys from a different
+/// shape must not immediately replace the chosen preset in the monitor.
+fn apply_mask_shape_preset(
+    mask: &mut model::ClipMask,
+    keyframes: &mut model::ClipKeyframes,
+    shape: model::MaskShape,
+) {
+    mask.apply_shape_preset(shape);
+    for property in [
+        model::MaskProperty::Width,
+        model::MaskProperty::Height,
+        model::MaskProperty::Roundness,
+    ] {
+        keyframes.tracks.remove(&property.id(&mask.id));
+    }
+}
+
 fn clip_property(clip: &Clip, property: KeyframeProperty) -> f64 {
     match property {
         KeyframeProperty::Scale => clip.scale,
@@ -1045,6 +1190,60 @@ fn keyframe_time(clip: &Clip, playhead: f32, frame_rate: f32) -> (f64, f64) {
     let at = ((f64::from(playhead) - clip.start) / duration).clamp(0.0, 1.0);
     let tolerance = (0.5 / f64::from(frame_rate.max(1.0)) / duration).max(1e-7);
     (at, tolerance)
+}
+
+/// The same sampled time-remap curve sent to the preview and exporter.
+/// Mask tracking must inspect those exact source instants, not a constant
+/// speed approximation that drifts away from the picture on the timeline.
+fn clip_retime_curve(clip: &Clip) -> Option<concat_core::SpeedCurve> {
+    let points: Vec<(f64, f64)> = if clip.keyframes.track(KeyframeProperty::TimeRemap).is_empty() {
+        clip.speed_curve
+            .as_deref()
+            .unwrap_or(&[])
+            .iter()
+            .map(|point| (point.at, point.speed))
+            .collect()
+    } else {
+        let segments = ((clip.duration * 60.0).ceil() as usize).clamp(64, 512);
+        clip.keyframes
+            .sampled_named_values(KeyframeProperty::TimeRemap.id(), clip.speed, segments)
+    };
+    concat_core::SpeedCurve::new(&points)
+}
+
+fn clip_source_time(clip: &Clip, at: f64, curve: Option<&concat_core::SpeedCurve>) -> f64 {
+    source_time_at(
+        clip.source_start,
+        clip.duration,
+        clip.speed,
+        clip.reverse,
+        at,
+        curve,
+    )
+}
+
+fn source_time_at(
+    source_start: f64,
+    duration: f64,
+    speed: f64,
+    reverse: bool,
+    at: f64,
+    curve: Option<&concat_core::SpeedCurve>,
+) -> f64 {
+    let at = at.clamp(0.0, 1.0);
+    let (consumed, covered) = match curve {
+        Some(curve) => (curve.consumed(at) * duration, curve.mean() * duration),
+        None => {
+            let covered = duration * speed.clamp(0.0625, 16.0);
+            (at * covered, covered)
+        }
+    };
+    source_start
+        + if reverse {
+            covered - consumed
+        } else {
+            consumed
+        }
 }
 
 fn clip_property_at(clip: &Clip, property: KeyframeProperty, playhead: f32) -> f64 {
@@ -1171,6 +1370,79 @@ fn graph_range(property: GraphProperty, points: &[GraphPoint]) -> (f64, f64) {
     }
 }
 
+struct GraphPlot {
+    path: String,
+    min: f64,
+    max: f64,
+    /// Display-space values for key diamonds. In the speed graph these are
+    /// derivatives; the document still retains the authored property value.
+    point_values: Vec<f64>,
+}
+
+fn graph_progress(point: GraphPoint, t: f64) -> f64 {
+    point.3.map_or_else(
+        || point.2.apply(t),
+        |curve| {
+            concat_core::animate::CubicBezier {
+                x1: curve.x1,
+                y1: curve.y1,
+                x2: curve.x2,
+                y2: curve.y2,
+            }
+            .solve(t)
+        },
+    )
+}
+
+fn graph_progress_slope(point: GraphPoint, t: f64) -> f64 {
+    point.3.map_or_else(
+        || point.2.slope(t),
+        |curve| {
+            concat_core::animate::CubicBezier {
+                x1: curve.x1,
+                y1: curve.y1,
+                x2: curve.x2,
+                y2: curve.y2,
+            }
+            .slope(t)
+        },
+    )
+}
+
+fn graph_plot(property: GraphProperty, mode: GraphMode, points: &[GraphPoint]) -> GraphPlot {
+    match mode {
+        GraphMode::Value => {
+            let (min, max) = graph_range(property, points);
+            GraphPlot {
+                path: graph_value_path(points, min, max),
+                min,
+                max,
+                point_values: points.iter().map(|point| point.1).collect(),
+            }
+        }
+        GraphMode::Speed => graph_speed_plot(points),
+        GraphMode::Step => graph_step_plot(points),
+    }
+}
+
+fn padded_graph_range(values: impl Iterator<Item = f64>) -> (f64, f64) {
+    let (mut min, mut max) = values
+        .filter(|value| value.is_finite())
+        .fold((0.0_f64, 0.0_f64), |(min, max), value| {
+            (min.min(value), max.max(value))
+        });
+    if (max - min).abs() < 1e-9 {
+        let padding = max.abs().max(1.0) * 0.5;
+        min -= padding;
+        max += padding;
+    } else {
+        let padding = (max - min) * 0.08;
+        min -= padding;
+        max += padding;
+    }
+    (min, max)
+}
+
 fn graph_labels(property: GraphProperty) -> (&'static str, &'static str) {
     match property {
         GraphProperty::Scale => ("Position & Size", "Scale"),
@@ -1190,7 +1462,7 @@ fn graph_labels(property: GraphProperty) -> (&'static str, &'static str) {
     }
 }
 
-fn graph_path(points: &[GraphPoint], min: f64, max: f64) -> String {
+fn graph_value_path(points: &[GraphPoint], min: f64, max: f64) -> String {
     let span = (max - min).max(1e-9);
     let Some(&(first_at, first_value, _, _)) = points.first() else {
         return String::new();
@@ -1203,26 +1475,124 @@ fn graph_path(points: &[GraphPoint], min: f64, max: f64) -> String {
     let mut path = format!("M {}", point(first_at, first_value));
     for pair in points.windows(2) {
         let (left, right) = (pair[0], pair[1]);
-        for step in 1..=12 {
-            let t = f64::from(step) / 12.0;
-            let eased = right.3.map_or_else(
-                || right.2.apply(t),
-                |curve| {
-                    concat_core::animate::CubicBezier {
-                        x1: curve.x1,
-                        y1: curve.y1,
-                        x2: curve.x2,
-                        y2: curve.y2,
-                    }
-                    .solve(t)
-                },
-            );
+        for step in 1..=32 {
+            let t = f64::from(step) / 32.0;
+            let eased = graph_progress(right, t);
             let at = left.0 + (right.0 - left.0) * t;
             let value = left.1 + (right.1 - left.1) * eased;
             path.push_str(&format!(" L {}", point(at, value)));
         }
     }
     path
+}
+
+fn graph_speed_plot(points: &[GraphPoint]) -> GraphPlot {
+    let mut segments = Vec::new();
+    for pair in points.windows(2) {
+        let (left, right) = (pair[0], pair[1]);
+        let duration = right.0 - left.0;
+        if duration <= f64::EPSILON {
+            continue;
+        }
+        let base = (right.1 - left.1) / duration;
+        let samples = (0..=48)
+            .map(|step| {
+                let t = f64::from(step) / 48.0;
+                (left.0 + duration * t, base * graph_progress_slope(right, t))
+            })
+            .collect::<Vec<_>>();
+        segments.push(samples);
+    }
+    let (min, max) = padded_graph_range(
+        segments
+            .iter()
+            .flat_map(|segment| segment.iter().map(|point| point.1)),
+    );
+    let span = (max - min).max(1e-9);
+    let screen = |at: f64, value: f64| {
+        let x = at.clamp(0.0, 1.0) * 1000.0;
+        let y = (1.0 - (value - min) / span).clamp(0.0, 1.0) * 1000.0;
+        format!("{x:.3} {y:.3}")
+    };
+    let mut path = String::new();
+    for segment in &segments {
+        if let Some((first, rest)) = segment.split_first() {
+            path.push_str(&format!(" M {}", screen(first.0, first.1)));
+            for &(at, value) in rest {
+                path.push_str(&format!(" L {}", screen(at, value)));
+            }
+        }
+    }
+    if path.is_empty() {
+        path = format!("M {} L {}", screen(0.0, 0.0), screen(1.0, 0.0));
+    }
+    let point_values = points
+        .iter()
+        .enumerate()
+        .map(|(index, point)| {
+            if let Some(left) = index.checked_sub(1).and_then(|left| points.get(left)) {
+                let duration = point.0 - left.0;
+                if duration > f64::EPSILON {
+                    return (point.1 - left.1) / duration * graph_progress_slope(*point, 1.0);
+                }
+            }
+            points.get(index + 1).map_or(0.0, |right| {
+                let duration = right.0 - point.0;
+                if duration <= f64::EPSILON {
+                    0.0
+                } else {
+                    (right.1 - point.1) / duration * graph_progress_slope(*right, 0.0)
+                }
+            })
+        })
+        .collect();
+    GraphPlot {
+        path: path.trim_start().to_owned(),
+        min,
+        max,
+        point_values,
+    }
+}
+
+fn graph_step_plot(points: &[GraphPoint]) -> GraphPlot {
+    let values: Vec<f64> = points.iter().map(|point| point.1.round()).collect();
+    let (min, max) = padded_graph_range(values.iter().copied());
+    let span = (max - min).max(1e-9);
+    let screen = |at: f64, value: f64| {
+        let x = at.clamp(0.0, 1.0) * 1000.0;
+        let y = (1.0 - (value - min) / span).clamp(0.0, 1.0) * 1000.0;
+        format!("{x:.3} {y:.3}")
+    };
+    let Some(first) = points.first() else {
+        return GraphPlot {
+            path: format!("M {} L {}", screen(0.0, 0.0), screen(1.0, 0.0)),
+            min,
+            max,
+            point_values: values,
+        };
+    };
+    let mut path = format!("M {}", screen(first.0, first.1.round()));
+    let mut previous = first.1.round();
+    for pair in points.windows(2) {
+        let (left, right) = (pair[0], pair[1]);
+        for step in 1..=64 {
+            let t = f64::from(step) / 64.0;
+            let at = left.0 + (right.0 - left.0) * t;
+            let value = (left.1 + (right.1 - left.1) * graph_progress(right, t)).round();
+            if value != previous {
+                path.push_str(&format!(" L {}", screen(at, previous)));
+                path.push_str(&format!(" L {}", screen(at, value)));
+                previous = value;
+            }
+        }
+        path.push_str(&format!(" L {}", screen(right.0, previous)));
+    }
+    GraphPlot {
+        path,
+        min,
+        max,
+        point_values: values,
+    }
 }
 
 /// Snap a normalized clip position to its nearest project frame.
@@ -1308,6 +1678,183 @@ fn update_graph_point(
         clip.speed = mean;
         clip.duration = (covered / mean).max(f64::from(MIN_DURATION));
     }
+}
+
+/// Move every selected point as one rigid time group. The primary point owns
+/// the pointer, but all selected values receive the same value delta in the
+/// raw/step graph. Speed view is derivative-only, so vertical movement there
+/// deliberately leaves authored values unchanged.
+fn update_graph_points(
+    clip: &mut Clip,
+    property: GraphProperty,
+    mode: GraphMode,
+    drag: &GraphDragState,
+    requested_at: f64,
+    requested_value: f64,
+    frame_rate: f32,
+) {
+    if let [point] = drag.points.as_slice() {
+        let requested_value = if mode == GraphMode::Step {
+            requested_value.round()
+        } else {
+            requested_value
+        };
+        update_graph_point(
+            clip,
+            property,
+            point.index,
+            requested_at,
+            if mode == GraphMode::Speed {
+                point.value
+            } else {
+                requested_value
+            },
+            frame_rate,
+        );
+        return;
+    }
+    let Some(property) = property.keyframe() else {
+        return;
+    };
+    let covered = clip.duration * clip.speed;
+    let rest = clip.speed;
+    if property == KeyframeProperty::TimeRemap {
+        migrate_time_remap(clip);
+    }
+    let keys = clip.keyframes.track_mut(property);
+    if drag.points.is_empty() || drag.points.iter().any(|point| point.index >= keys.len()) {
+        return;
+    }
+
+    let frames = (drag.duration.max(1e-6) * f64::from(frame_rate.max(1.0)))
+        .round()
+        .max(1.0);
+    let frame = 1.0 / frames;
+    let selected: HashSet<usize> = drag.points.iter().map(|point| point.index).collect();
+    let snapped_anchor = snap_graph_at(drag.duration, frame_rate, requested_at);
+    let mut delta_at = snapped_anchor - drag.anchor_at;
+    let mut lower = -drag
+        .points
+        .iter()
+        .map(|point| point.at)
+        .fold(1.0_f64, f64::min);
+    let mut upper = 1.0
+        - drag
+            .points
+            .iter()
+            .map(|point| point.at)
+            .fold(0.0_f64, f64::max);
+    for point in &drag.points {
+        if point.index > 0 && !selected.contains(&(point.index - 1)) {
+            lower = lower.max(keys[point.index - 1].at + frame - point.at);
+        }
+        if point.index + 1 < keys.len() && !selected.contains(&(point.index + 1)) {
+            upper = upper.min(keys[point.index + 1].at - frame - point.at);
+        }
+    }
+    if lower <= upper {
+        delta_at = delta_at.clamp(lower, upper);
+    } else {
+        delta_at = 0.0;
+    }
+    let delta_value = if mode == GraphMode::Speed {
+        0.0
+    } else {
+        requested_value - drag.anchor_value
+    };
+    for point in &drag.points {
+        let key = &mut keys[point.index];
+        key.at = (point.at + delta_at).clamp(0.0, 1.0);
+        let value = point.value + delta_value;
+        key.value = clamp_keyframe_value(
+            property,
+            if mode == GraphMode::Step {
+                value.round()
+            } else {
+                value
+            },
+        );
+    }
+    if property == KeyframeProperty::TimeRemap {
+        sync_time_remap(clip, covered, rest);
+    }
+}
+
+/// Refresh the fields one clip can change during an in-flight gesture while
+/// keeping its already-resolved media and lane metadata. This avoids walking
+/// and cloning the entire project for every pointer event, but produces the
+/// same `ExportClip` values as the normal flattener.
+fn refresh_preview_clip(flattened: &mut ExportClip, source: &Clip, project_dir: &std::path::Path) {
+    flattened.audio_stream = source.audio_stream;
+    flattened.volume = source.volume;
+    flattened.fade_in = source.fade_in;
+    flattened.fade_out = source.fade_out;
+    flattened.filter_chain = concat_export::chains::audio_filter_chain(&source.filters);
+    flattened.speed = source.speed;
+    flattened.preserve_pitch = source.preserve_pitch;
+    flattened.speed_curve = if source
+        .keyframes
+        .track(KeyframeProperty::TimeRemap)
+        .is_empty()
+    {
+        source
+            .speed_curve
+            .as_deref()
+            .unwrap_or(&[])
+            .iter()
+            .map(|point| (point.at, point.speed))
+            .collect()
+    } else {
+        let segments = ((source.duration * 60.0).ceil() as usize).clamp(64, 512);
+        source.keyframes.sampled_named_values(
+            KeyframeProperty::TimeRemap.id(),
+            source.speed,
+            segments,
+        )
+    };
+    flattened.reverse = source.reverse;
+    flattened.animation = concat_export::flatten::export_keys(source);
+    flattened.flip_h = source.flip_h;
+    flattened.flip_v = source.flip_v;
+    flattened.blend = source.blend.clone();
+    flattened.crop = source
+        .crop
+        .filter(|crop| !crop.is_none())
+        .map(|crop| [crop.left, crop.top, crop.right, crop.bottom]);
+    flattened.effects = source.video_effects.clone();
+    flattened.transition_chain.clear();
+    flattened.scale = source.scale;
+    flattened.offset_x = source.offset_x;
+    flattened.offset_y = source.offset_y;
+    flattened.anchor_x = source.anchor_x;
+    flattened.anchor_y = source.anchor_y;
+    flattened.rotation = source.rotation;
+    flattened.rotation_x = source.rotation_x;
+    flattened.rotation_y = source.rotation_y;
+    flattened.position_z = source.position_z;
+    flattened.stretch_x = source.stretch_x;
+    flattened.stretch_y = source.stretch_y;
+    flattened.opacity = source.opacity;
+    flattened.layer_order = source.layer_order;
+    flattened.video_filter_chain = concat_export::chains::video_effect_chain(&source.video_effects);
+    flattened.transition =
+        source
+            .transition_in
+            .as_ref()
+            .map(|transition| concat_export::TransitionSpec {
+                kind: transition.id.clone(),
+                duration: transition.duration,
+            });
+    flattened.video_fade_in = 0.0;
+    flattened.cutout = source.cutout.clone();
+    flattened.mask_dir = source.cutout.as_ref().map_or_else(String::new, |cutout| {
+        concat_vision::mask_dir(project_dir, &flattened.path, cutout.subject)
+            .to_string_lossy()
+            .into_owned()
+    });
+    flattened.masks = source.masks.clone();
+    flattened.masks_enabled = source.masks_enabled;
+    flattened.highlighted = false;
 }
 
 fn media_kind_of(kind: model::MediaKind) -> MediaKind {
