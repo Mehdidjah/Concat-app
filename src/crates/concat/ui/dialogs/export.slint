@@ -1,0 +1,480 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-FileCopyrightText: 2026 Jareer and Concat contributors
+
+import { I18n } from "../i18n.slint";
+import { Theme } from "../theme/theme.slint";
+import { Glyph, Icon } from "../icons.slint";
+import { Button, CopyChip, DialogRow, DialogSection, Field, Modal, Progress } from "../primitives/modal.slint";
+import { Select } from "../primitives/select.slint";
+import { Switch } from "../inspector/controls.slint";
+
+// The export dialog.
+//
+// It states the format, asks where the file goes, offers three quality
+// presets and starts. The deciding number sits *on* each preset — what the
+// file will actually weigh — because that is the thing the choice hinges on,
+// and it belongs where the choice is made.
+
+export enum ExportPhase { idle, running, done, failed }
+
+export struct ExportData {
+    open: bool,
+    /// the file name, without folder or extension
+    name: string,
+    /// the whole path, already shortened for display by whoever owns it
+    path: string,
+    /// "1920 x 1080 · 30.00 fps"
+    format: string,
+    duration: string,
+    /// "8 clips · 3 titles"
+    contents: string,
+    resolution: int,
+    rate: int,
+    quality: int,
+    /// index into the codec list: H.264, HEVC, AV1
+    codec: int,
+    ten-bit: bool,
+    /// The Advanced section is open: bitrate controls show.
+    advanced: bool,
+    /// 0 = VBR, 1 = CBR.
+    rate-mode: int,
+    /// Target bitrate in kbps, used when rate-mode is CBR.
+    bitrate: int,
+    /// "HEVC 10-bit · hardware": what the file will be encoded as
+    encoding: string,
+    /// What each preset would weigh. Three strings rather than a list: a Slint
+    /// struct cannot hold an array.
+    size-high: string,
+    size-balanced: string,
+    size-small: string,
+    phase: ExportPhase,
+    /// 0..1
+    progress: float,
+    /// "Rendering video"
+    stage: string,
+    eta: string,
+    /// why it failed, when it did
+    message: string,
+    done-size: string,
+    /// nothing on the timeline to export
+    empty: bool,
+}
+
+// One tile of the summary block.
+//
+// The block is a rounded rectangle in the hairline colour with 1px gaps
+// between its rows, so the separators are the ground showing through rather
+// than lines drawn on top — which is why the rules stop exactly at the rounded
+// corners instead of running into them.
+component Fact inherits Rectangle {
+    in property <string> label;
+    in property <string> value;
+
+    height: 34px;
+    background: Theme.raised;
+
+    HorizontalLayout {
+        padding-left: 12px;
+        padding-right: 12px;
+        spacing: 12px;
+
+        Text {
+            text: root.label;
+            color: Theme.fg-muted;
+            font-size: Theme.fs-sm;
+            vertical-alignment: center;
+        }
+
+        Rectangle { horizontal-stretch: 1; }
+
+        Text {
+            text: root.value;
+            color: Theme.fg;
+            font-family: Theme.font-technical;
+            font-size: Theme.fs-sm;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+    }
+}
+
+// One of the three quality presets. The estimate is on the card, in the accent
+// when the card is the chosen one, because it is what the choice is actually
+// being made on.
+component QualityCard inherits Rectangle {
+    in property <string> label;
+    in property <string> note;
+    in property <string> size;
+    in property <bool> current;
+
+    callback clicked();
+
+    horizontal-stretch: 1;
+    height: 72px;
+    border-radius: Theme.r;
+    border-width: 1px;
+    border-color: root.current ? Theme.accent
+        : touch.has-hover ? Theme.line-strong
+        : Theme.line;
+    background: root.current ? Theme.accent-soft : Theme.raised;
+
+    animate background, border-color { duration: 120ms; easing: cubic-bezier(0.4, 0, 0.2, 1); }
+
+    VerticalLayout {
+        padding: 10px;
+        spacing: 1px;
+
+        Text {
+            text: root.label;
+            color: Theme.fg;
+            font-size: Theme.fs;
+            font-weight: Theme.weight-title;
+            overflow: elide;
+        }
+
+        Text {
+            text: root.note;
+            color: Theme.fg-dim;
+            font-size: Theme.fs-sm;
+            overflow: elide;
+        }
+
+        Rectangle { vertical-stretch: 1; }
+
+        Text {
+            text: "~" + root.size;
+            color: root.current ? Theme.accent : Theme.fg;
+            font-family: Theme.font-technical;
+            font-size: Theme.fs;
+            font-weight: Theme.weight-title;
+        }
+    }
+
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+}
+
+export component ExportDialog inherits Modal {
+    in property <ExportData> data;
+
+    callback name-edited(name: string);
+    callback browse();
+    callback resolution-changed(index: int);
+    callback rate-changed(index: int);
+    callback quality-changed(index: int);
+    callback codec-changed(index: int);
+    callback ten-bit-changed(on: bool);
+    callback advanced-toggled(on: bool);
+    callback rate-mode-changed(index: int);
+    callback bitrate-changed(text: string);
+    callback begin();
+    callback cancel();
+    callback reveal();
+    callback again();
+
+    property <bool> running: root.data.phase == ExportPhase.running;
+
+    open: root.data.open;
+    title: I18n.t("Export");
+    glyph: Glyph.export;
+    surface-width: 470px;
+    dismissable: !root.running;
+
+    // The sheet's own header carries the fact it is acting on.
+    note: root.data.format;
+
+    VerticalLayout {
+        DialogSection {
+            first: true;
+            title: I18n.t("Summary");
+
+            Rectangle {
+                border-radius: Theme.r;
+                // The ground the 1px gaps show through.
+                background: Theme.line;
+                clip: true;
+
+                VerticalLayout {
+                    spacing: 1px;
+
+                    Fact { label: I18n.t("Format"); value: root.data.format + " · " + root.data.encoding; }
+                    Fact { label: I18n.t("Duration"); value: root.data.duration; }
+                    Fact { label: I18n.t("Contents"); value: root.data.contents; }
+                }
+            }
+        }
+
+        if !root.running: DialogSection {
+            title: I18n.t("Destination");
+
+            DialogRow {
+                Field {
+                    value: root.data.name;
+                    technical: true;
+                    edited(text) => { root.name-edited(text); }
+                }
+
+                Button {
+                    label: I18n.t("Browse");
+                    glyph: Glyph.import;
+                    clicked => { root.browse(); }
+                }
+            }
+
+            // The whole path under the field rather than in it, so the part
+            // you are editing is never the part that gets truncated away.
+            Text {
+                text: root.data.path;
+                color: Theme.fg-dim;
+                font-family: Theme.font-technical;
+                font-size: Theme.fs-sm;
+                overflow: elide;
+            }
+        }
+
+        if !root.running: DialogSection {
+            title: I18n.t("Output");
+
+            DialogRow {
+                label: I18n.t("Resolution");
+                Select {
+                    current: root.data.resolution;
+                    options: ["3840 × 2160", "2560 × 1440", "1920 × 1080", "1280 × 720"];
+                    details: ["4K", "QHD", "1080p", "720p"];
+                    changed(index) => { root.resolution-changed(index); }
+                }
+            }
+
+            DialogRow {
+                label: I18n.t("Frame rate");
+                Select {
+                    current: root.data.rate;
+                    options: ["24 fps", "30 fps", "60 fps"];
+                    changed(index) => { root.rate-changed(index); }
+                }
+            }
+
+            // The standard, not the encoder: which encoder makes it is the
+            // platform's business, and the Format line above says when
+            // the hardware one will.
+            DialogRow {
+                label: I18n.t("Codec");
+                Select {
+                    current: root.data.codec;
+                    options: ["H.264", "HEVC", "AV1"];
+                    details: [I18n.t("Plays everywhere"), I18n.t("Half the size"), I18n.t("Smallest")];
+                    changed(index) => { root.codec-changed(index); }
+                }
+            }
+
+            DialogRow {
+                label: I18n.t("10-bit colour");
+                HorizontalLayout {
+                    alignment: end;
+                    VerticalLayout {
+                        alignment: center;
+                        Switch {
+                            checked: root.data.ten-bit;
+                            toggled(on) => { root.ten-bit-changed(on); }
+                        }
+                    }
+                }
+            }
+        }
+
+        if !root.running: DialogSection {
+            title: I18n.t("Quality");
+
+            HorizontalLayout {
+                spacing: 6px;
+
+                QualityCard {
+                    label: I18n.t("High");
+                    note: I18n.t("Master");
+                    size: root.data.size-high;
+                    current: root.data.quality == 0;
+                    clicked => { root.quality-changed(0); }
+                }
+                QualityCard {
+                    label: I18n.t("Balanced");
+                    note: I18n.t("Recommended");
+                    size: root.data.size-balanced;
+                    current: root.data.quality == 1;
+                    clicked => { root.quality-changed(1); }
+                }
+                QualityCard {
+                    label: I18n.t("Small");
+                    note: I18n.t("Share");
+                    size: root.data.size-small;
+                    current: root.data.quality == 2;
+                    clicked => { root.quality-changed(2); }
+                }
+            }
+        }
+
+        if !root.running: DialogSection {
+            title: I18n.t("Advanced");
+
+            DialogRow {
+                label: I18n.t("Show advanced options");
+                Switch {
+                    checked: root.data.advanced;
+                    toggled(on) => { root.advanced-toggled(on); }
+                }
+            }
+        }
+
+        if !root.running && root.data.advanced: DialogSection {
+            title: I18n.t("Bitrate");
+
+            DialogRow {
+                label: I18n.t("Mode");
+                Select {
+                    current: root.data.rate-mode;
+                    options: [I18n.t("VBR"), I18n.t("CBR")];
+                    changed(index) => { root.rate-mode-changed(index); }
+                }
+            }
+            if root.data.rate-mode == 1: DialogRow {
+                label: I18n.t("Target bitrate");
+                Field {
+                    value: root.data.bitrate + " kbps";
+                    edited(text) => { root.bitrate-changed(text); }
+                }
+            }
+        }
+
+        // ── the footer ───────────────────────────────────────────────────
+        Rectangle {
+            height: 1px;
+            background: Theme.line;
+        }
+
+        VerticalLayout {
+            padding: 14px;
+            spacing: 10px;
+
+            // A failure says what went wrong where the action was, not in a
+            // separate alert to be dismissed before you can try again.
+            if root.data.phase == ExportPhase.failed: Rectangle {
+                border-radius: Theme.r;
+                background: Theme.danger-soft;
+
+                HorizontalLayout {
+                    padding: 10px;
+                    spacing: 8px;
+
+                    VerticalLayout {
+                        alignment: start;
+                        Icon { glyph: Glyph.close; size: 13px; tint: Theme.danger; }
+                    }
+
+                    Text {
+                        horizontal-stretch: 1;
+                        text: root.data.message;
+                        color: Theme.danger;
+                        font-size: Theme.fs-sm;
+                        wrap: word-wrap;
+                    }
+
+                    VerticalLayout {
+                        alignment: start;
+                        CopyChip { text: root.data.message; }
+                    }
+                }
+            }
+
+            if root.running: HorizontalLayout {
+                spacing: 8px;
+
+                Text {
+                    text: root.data.stage;
+                    color: Theme.fg;
+                    font-size: Theme.fs;
+                    vertical-alignment: center;
+                }
+
+                Text {
+                    horizontal-stretch: 1;
+                    text: "\{Math.round(root.data.progress * 100)}%";
+                    color: Theme.fg-muted;
+                    font-family: Theme.font-technical;
+                    font-size: Theme.fs;
+                    vertical-alignment: center;
+                }
+
+                Text {
+                    text: root.data.eta;
+                    color: Theme.fg-muted;
+                    font-family: Theme.font-technical;
+                    font-size: Theme.fs;
+                    vertical-alignment: center;
+                }
+            }
+
+            if root.running: Progress { value: root.data.progress; }
+
+            if root.running: HorizontalLayout {
+                alignment: start;
+                Button {
+                    label: I18n.t("Cancel export");
+                    glyph: Glyph.close;
+                    ghost: true;
+                    clicked => { root.cancel(); }
+                }
+            }
+
+            if root.data.phase == ExportPhase.done: HorizontalLayout {
+                spacing: 8px;
+                alignment: start;
+
+                VerticalLayout {
+                    alignment: center;
+                    Icon { glyph: Glyph.check; size: 15px; tint: Theme.green; }
+                }
+
+                Text {
+                    text: I18n.t1("Exported · {0}", "\{root.data.done-size}");
+                    color: Theme.green;
+                    font-size: Theme.fs;
+                    font-weight: Theme.weight-title;
+                    vertical-alignment: center;
+                }
+            }
+
+            if root.data.phase == ExportPhase.done: HorizontalLayout {
+                spacing: 6px;
+                alignment: start;
+
+                Button {
+                    label: I18n.t("Show in folder");
+                    glyph: Glyph.import;
+                    clicked => { root.reveal(); }
+                }
+                Button {
+                    label: I18n.t("Export again");
+                    ghost: true;
+                    clicked => { root.again(); }
+                }
+            }
+
+            if root.data.phase == ExportPhase.idle || root.data.phase == ExportPhase.failed:
+            HorizontalLayout {
+                Button {
+                    block: true;
+                    primary: true;
+                    large: true;
+                    glyph: Glyph.export;
+                    label: root.data.empty ? I18n.t("Nothing to export")
+                        : I18n.t("Export · ~") + (root.data.quality == 0 ? root.data.size-high
+                            : root.data.quality == 1 ? root.data.size-balanced
+                            : root.data.size-small);
+                    enabled: !root.data.empty && root.data.name != "";
+                    clicked => { root.begin(); }
+                }
+            }
+        }
+    }
+}

@@ -7,10 +7,6 @@ target/
 **/target/
 *.pdb
 
-# JavaScript dependencies and generated build output
-node_modules/
-dist/
-
 # Nix build output
 /result
 /result-*
@@ -51,14 +47,14 @@ desktop.ini
 # Local environment
 .env
 .env.local
+.env*.local
+.vercel
 
 # An FFmpeg development build unpacked locally for the linked engine
 # (headers + import libraries), pointed at with FFMPEG_DIR. Large and
 # machine-specific.
 /vendor/
 /ffmpeg-dev/
-.vercel
-.env*.local
-# FFmpeg built for a phone by engine/scripts/ffmpeg-mobile.sh: sources,
+# FFmpeg built for a phone by src/scripts/ffmpeg-mobile.sh: sources,
 # build trees and the installed prefixes, all machine-built.
-/engine/vendor/
+/src/vendor/

@@ -1,0 +1,635 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-FileCopyrightText: 2026 Jareer and Concat contributors
+
+import { I18n } from "../i18n.slint";
+import { Theme, SegmentedControl } from "../primitives/primitives.slint";
+import { Select } from "../primitives/select.slint";
+import { Pane, PaneBody, PaneScroll } from "pane.slint";
+import { PaneKind, PaneSwitcher } from "pane-switcher.slint";
+import { EffectData } from "../demo/effects-panel.slint";
+import {
+    AdjustPanel, AnimationPanel, AppliedEntryData, AppliedParamData, AudioPanel, ProcessorRows,
+    CatalogueEntryData, FilterPanel, PresetStack, SpeedPanel, VideoPanel,
+} from "../inspector/clip-inspector.slint";
+import { TextPanel } from "../inspector/text-panel.slint";
+import {
+    ClipField, ClipKind, ClipTextField, SelectedClipData,
+} from "../timeline/model.slint";
+
+// The inspector column, in its two states:
+//
+// - Nothing selected: the Details panel — the project's facts, read-only,
+//   with Modify pinned to the foot.
+// - Something selected: the clip inspector — Video, Audio and Effects, or
+//   Text alone for a title, or the layer panel for a filter on the lanes.
+
+// One fact: muted label left, value right. The value wraps rather than
+// elides — a folder path you cannot read is a path you have to go find.
+component FactRow inherits HorizontalLayout {
+    in property <string> label;
+    in property <string> value;
+
+    padding-left: Theme.pad;
+    padding-right: Theme.pad;
+    spacing: 12px;
+    min-height: 21px;
+
+    Text {
+        text: root.label;
+        color: Theme.fg-muted;
+        font-size: Theme.fs;
+        vertical-alignment: center;
+    }
+
+    // A read-only TextInput and not a Text, so it can be selected and copied.
+    // Half of what this panel holds is only useful somewhere else — a folder
+    // path pasted into a terminal, an output size quoted to somebody — and a
+    // fact you cannot lift off the screen is a fact you have to retype.
+    TextInput {
+        horizontal-stretch: 1;
+        text: root.value;
+        color: Theme.fg;
+        font-family: Theme.font-technical;
+        font-size: Theme.fs;
+        horizontal-alignment: right;
+        // The label beside this one is centred and the row is taller than a
+        // line; without this the value rides at the top of it.
+        vertical-alignment: center;
+        // Selectable, never editable: this is a readout of the project, and
+        // the Modify button is where changing it lives.
+        read-only: true;
+        single-line: false;
+        wrap: word-wrap;
+        selection-background-color: Theme.accent;
+        selection-foreground-color: Theme.on-accent;
+    }
+}
+
+// "PROJECT", "CONTENTS" — the muted caps that break the facts into groups.
+component FactHeading inherits HorizontalLayout {
+    in property <string> title;
+
+    padding-left: Theme.pad;
+    padding-right: Theme.pad;
+    // The air belongs between the groups, not between the lines inside one.
+    padding-top: 12px;
+    padding-bottom: 3px;
+
+    Text {
+        text: root.title;
+        color: Theme.fg-dim;
+        font-size: Theme.fs-sm;
+        font-weight: Theme.weight-title;
+        letter-spacing: 1px;
+    }
+}
+
+export component ConfigPane inherits Rectangle {
+    // ── the demo-era seams, kept so main.rs keeps compiling ──────────────
+    // The meter/mute machinery has nothing to drive since the demo effects
+    // panel left the pane; the properties stay declared because app.slint
+    // and main.rs read them for the life of the process. Strip the whole
+    // group when the Rust side sheds its demo plumbing.
+    in property <[EffectData]> video-effects;
+    in property <[EffectData]> audio-effects;
+    in property <float> level;
+    in property <float> peak;
+    out property <bool> muted;
+    out property <bool> meter-hovered;
+    callback add-effect(audio: bool);
+    callback remove-effect(id: int);
+
+    // ── details ──────────────────────────────────────────────────────────
+    /// The selected clip, or `present: false` for the project details.
+    in property <SelectedClipData> selected;
+    /// The selected clip's media's audio tracks; see Editor.audio-tracks.
+    in property <[string]> audio-tracks;
+    property <bool> has-selection: root.selected.present;
+    in property <string> project-name: I18n.t("Untitled project");
+    in property <string> project-folder: "—";
+    /// The active timeline, whose frame, rate and duration the rows below
+    /// report. Named in the panel so a project with three cuts at three
+    /// frames never leaves anyone wondering which one "1080 × 1920" is.
+    in property <string> timeline-name: I18n.t("Timeline 1");
+    in property <string> project-output: "1080 x 1920";
+    in property <string> project-rate: "30.00 fps";
+    in property <string> project-duration: "00:00:00:00";
+    in property <int> count-media;
+    in property <int> count-tracks;
+    in property <int> count-clips;
+
+    callback modify-project();
+
+    /// The corner button: show something else in this pane's seat.
+    callback pane-picked(kind: PaneKind);
+    /// Which seat this pane is in. It travels no further than the corner
+    /// button, whose drag payload has to say where it is being taken from.
+    in property <int> pane-seat;
+    /// False when this is the last panel on screen. Travels the same way, and
+    /// only greys the one row that would close it.
+    in property <bool> pane-removable: true;
+    /// That row was used.
+    callback pane-removed();
+
+    // ── the clip inspector's chains, owned by Rust ───────────────────────
+    //
+    // The library shelves come from the effect catalogue, the applied lists
+    // from the selected clip. Two chains: the picture's, which Effects
+    // edits, and the sound's, which Audio edits. A `audio` flag on every
+    // callback says which. A filter is neither: it is a layer on the lanes,
+    // with a panel of its own.
+    in property <[CatalogueEntryData]> catalogue-effects;
+    in property <[CatalogueEntryData]> catalogue-audio;
+    in property <[string]> effect-groups;
+    in property <[string]> audio-groups;
+    in property <[AppliedEntryData]> applied-visual;
+    in property <[AppliedEntryData]> applied-audio;
+    in property <[AppliedParamData]> visual-params;
+    in property <[AppliedParamData]> audio-params;
+    /// The colour panel's knobs: the adjust package's parameters, at the
+    /// selected clip's values or the defaults.
+    in property <[AppliedParamData]> adjust-params;
+    callback adjust-set(key: string, value: float);
+
+    /// See Editor.inspector-jump-token: the library applied something and
+    /// this pane should show it.
+    in property <int> jump-token;
+    in property <string> jump-tab;
+    in property <string> jump-section;
+
+    callback chain-add(audio: bool, id: string);
+    callback chain-toggle(audio: bool, index: int);
+    callback chain-move-by(audio: bool, index: int, delta: int);
+    callback chain-remove(audio: bool, index: int);
+    callback chain-set-param(audio: bool, index: int, key: string, value: float);
+
+    callback clip-set(field: ClipField, value: float);
+    callback clip-set-text(field: ClipTextField, value: string);
+    callback clip-set-colour(field: ClipTextField, value: color);
+    callback clip-commit();
+
+    /// The cutout's brush and controls; see Editor.
+    in property <int> brush-tool;
+    in property <float> brush-size;
+    in property <bool> painting;
+    callback cutout-mode(mode: int);
+    callback cutout-tool(index: int);
+    callback cutout-size(size: float);
+    callback cutout-painting(on: bool);
+    callback cutout-subject(index: int);
+    callback cutout-clear();
+
+
+    // The tab strip follows the selection, and stays short: three tabs at
+    // most, each with a dropdown of its sections, because seven tabs on a
+    // strip this narrow cannot be read. Video holds what happens to the
+    // picture - its placement, its speed, its animation, its colour; Audio
+    // the level, the fades and the voice and room chain; Effects the two
+    // shelves and the picture's chain. A still loses Audio, a sound clip
+    // keeps Audio alone, and a title gets Text alone — offering the others
+    // would be offering panels that can only say "nothing here".
+    property <bool> is-text: root.selected.kind == ClipKind.text;
+    property <bool> is-image: root.selected.kind == ClipKind.image;
+    property <bool> is-audio: root.selected.kind == ClipKind.audio;
+    /// A filter layer gets its own lone tab for the same reason a title does:
+    /// it has no transform, no gain and no rate, and every other tab could
+    /// only say "nothing here".
+    property <bool> is-layer: root.selected.kind == ClipKind.filter;
+    property <[string]> tabs: root.is-text ? ["Text"]
+        : root.is-layer ? ["Filter"]
+        : root.is-image ? ["Video", "Effects"]
+        : root.is-audio ? ["Audio"]
+        : ["Video", "Audio", "Effects"];
+    /// The same tabs in the interface's language. `tabs` stays English,
+    /// because the panels are picked by comparing against it.
+    property <[string]> tabs-shown: root.is-text ? [I18n.t("Text")]
+        : root.is-layer ? [I18n.t("Filter")]
+        : root.is-image ? [I18n.t("Video"), I18n.t("Effects")]
+        : root.is-audio ? [I18n.t("Audio")]
+        : [I18n.t("Video"), I18n.t("Audio"), I18n.t("Effects")];
+    /// A one-segment segmented control is a label wearing a costume, so a lone
+    /// tab renders as the panel's plain heading instead.
+    property <bool> single: root.tabs.length < 2;
+
+    // The segmented control owns this: it writes to `current`, which would
+    // drop any binding declared here, so it is assigned and never bound.
+    property <int> tab;
+    /// The kind the strip was last built for. A selection change can leave the
+    /// strip pointing past the end of a shorter list — Audio on a still,
+    /// anything at all on a title — so the index is pulled back in when the
+    /// shape of the strip changes, and left alone when it has not.
+    property <ClipKind> strip-kind;
+    changed selected => {
+        if (root.selected.kind != root.strip-kind) {
+            root.strip-kind = root.selected.kind;
+            // Clamped rather than reset: going from a video to a still should
+            // stay on Effects, which both offer, instead of jumping back.
+            root.tab = Math.min(root.tab, root.tabs.length - 1);
+        }
+    }
+
+    /// Which tab the index names.
+    property <string> heading: root.tabs[Math.max(0,
+        Math.min(root.tab, root.tabs.length - 1))];
+
+    /// The sections of the current tab, as the dropdown lists them.
+    property <[string]> sections: root.heading == "Video"
+            ? (root.is-image ? ["Basic", "Animation", "Adjust"]
+                : ["Basic", "Speed", "Animation", "Adjust"])
+        : root.heading == "Audio"
+            ? (root.is-audio ? ["Sound", "Speed"] : ["Sound"])
+        : root.heading == "Effects" ? ["Effects"]
+        : root.heading == "Text" ? ["Text", "Animation"]
+        : ["Layer"];
+    /// The sections as the dropdown shows them; see `tabs-shown`.
+    property <[string]> sections-shown: root.heading == "Video"
+            ? (root.is-image ? [I18n.t("Basic"), I18n.t("Animation"), I18n.t("Adjust")]
+                : [I18n.t("Basic"), I18n.t("Speed"), I18n.t("Animation"), I18n.t("Adjust")])
+        : root.heading == "Audio"
+            ? (root.is-audio ? [I18n.t("Sound"), I18n.t("Speed")] : [I18n.t("Sound")])
+        : root.heading == "Effects" ? [I18n.t("Effects")]
+        : root.heading == "Text" ? [I18n.t("Text"), I18n.t("Animation")]
+        : [I18n.t("Layer")];
+
+    // Each tab remembers its own section, so flipping to Audio and back
+    // lands on the colour panel you were adjusting. Assigned, never bound,
+    // for the same reason `tab` is.
+    property <int> section-video;
+    property <int> section-audio;
+    property <int> section-effects;
+    property <int> section-text;
+    property <int> section: root.heading == "Video" ? root.section-video
+        : root.heading == "Audio" ? root.section-audio
+        : root.heading == "Effects" ? root.section-effects
+        : root.heading == "Text" ? root.section-text
+        : 0;
+    function pick-section(index: int) {
+        if (root.heading == "Video") { root.section-video = index; }
+        else if (root.heading == "Audio") { root.section-audio = index; }
+        else if (root.heading == "Effects") { root.section-effects = index; }
+        else if (root.heading == "Text") { root.section-text = index; }
+    }
+
+    /// Which panel is up, resolved once rather than at each `if`: the same
+    /// number means different things depending on what is selected.
+    property <string> showing: root.sections[Math.max(0,
+        Math.min(root.section, root.sections.length - 1))];
+
+    // Go where the library just put something. On a fresh token, and once
+    // on opening, so an inspector that was not on screen when the effect
+    // was applied still opens on it.
+    function jump() {
+        if (root.jump-token == 0) { return; }
+        if (root.jump-tab == "Video") { root.tab = 0; }
+        else if (root.jump-tab == "Audio") { root.tab = root.is-audio ? 0 : 1; }
+        else if (root.jump-tab == "Effects") { root.tab = root.tabs.length - 1; }
+        root.pick-section(0);
+    }
+    changed jump-token => { root.jump(); }
+    init => { root.jump(); }
+
+    Pane {
+        // ── details ──────────────────────────────────────────────────────
+        if !root.has-selection: Rectangle {
+            // The same 52px as the panes either side of it; see PaneHeader.
+            height: 52px;
+
+            Rectangle {
+                x: 0;
+                y: parent.height - 1px;
+                width: parent.width;
+                height: 1px;
+                background: Theme.line;
+            }
+
+            HorizontalLayout {
+                padding-left: Theme.pad;
+                padding-right: 8px;
+                spacing: 8px;
+
+                Text {
+                    text: I18n.t("DETAILS");
+                    color: Theme.fg-muted;
+                    // The small size, not the body one. Caps at 12px with a
+                    // point and a half of tracking is nearly as wide as the
+                    // Preview pane's 13px title and reads heavier than it —
+                    // which puts the loudest thing in the column on the one
+                    // panel that has nothing to say. It is a section label,
+                    // so it takes the same size and tracking as the FactHeadings
+                    // under it.
+                    font-size: Theme.fs-sm;
+                    font-weight: Theme.weight-title;
+                    letter-spacing: 1px;
+                    vertical-alignment: center;
+                }
+
+                Rectangle { horizontal-stretch: 1; }
+
+                VerticalLayout {
+                    alignment: center;
+                    PaneSwitcher {
+                        kind: PaneKind.inspector;
+                        seat: root.pane-seat;
+                        removable: root.pane-removable;
+                        picked(kind) => { root.pane-picked(kind); }
+                        removed => { root.pane-removed(); }
+                    }
+                }
+            }
+        }
+
+        if !root.has-selection: PaneBody {
+            padding: 0px;
+            spacing: 0px;
+
+            PaneScroll {
+                VerticalLayout {
+                    padding-top: 4px;
+                    // No gap: the rows carry their own height and a spacing on
+                    // top of it opens the table back up.
+                    spacing: 0px;
+
+                    FactHeading { title: I18n.t("PROJECT"); }
+                    FactRow { label: I18n.t("Name"); value: root.project-name; }
+                    FactRow { label: I18n.t("Folder"); value: root.project-folder; }
+
+                    // The frame is a timeline's, not the project's: two cuts
+                    // of one edit can be two shapes, and these rows say which
+                    // one they are describing.
+                    FactHeading { title: I18n.t("TIMELINE"); }
+                    FactRow { label: I18n.t("Name"); value: root.timeline-name; }
+                    FactRow { label: I18n.t("Frame"); value: root.project-output; }
+                    FactRow { label: I18n.t("Rate"); value: root.project-rate; }
+                    FactRow { label: I18n.t("Duration"); value: root.project-duration; }
+
+                    FactHeading { title: I18n.t("CONTENTS"); }
+                    FactRow { label: I18n.t("Media"); value: "\{root.count-media}"; }
+                    FactRow { label: I18n.t("Tracks"); value: "\{root.count-tracks}"; }
+                    FactRow { label: I18n.t("Clips"); value: "\{root.count-clips}"; }
+                }
+            }
+        }
+
+        if !root.has-selection: Rectangle {
+            height: 49px;
+
+            Rectangle {
+                x: 0;
+                y: 0;
+                width: parent.width;
+                height: 1px;
+                background: Theme.line;
+            }
+
+            modify := Rectangle {
+                x: parent.width - self.width - 10px;
+                y: (parent.height - self.height) / 2;
+                width: modify-label.width + 30px;
+                height: 30px;
+                // The control radius, not the pane's. It was the roundest of
+                // the named radii on the theory that the one button in the
+                // panel should stand apart from the fields; at 30px tall that
+                // is most of the way to a pill, and it stood apart from every
+                // other button in the window instead.
+                border-radius: Theme.r;
+                background: modify-touch.has-hover ? Theme.field-hover : Theme.field;
+
+                animate background { duration: 100ms; easing: cubic-bezier(0.4, 0, 0.2, 1); }
+
+                modify-label := Text {
+                    x: (parent.width - self.width) / 2;
+                    y: (parent.height - self.height) / 2;
+                    text: I18n.t("Modify");
+                    color: Theme.fg;
+                    font-size: Theme.fs;
+                    font-weight: Theme.weight-title;
+                }
+
+                modify-touch := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => { root.modify-project(); }
+                }
+            }
+        }
+
+        // ── the clip inspector ───────────────────────────────────────────
+        if root.has-selection: Rectangle {
+            // Matched to the Details bar above, or the top of the column
+            // would jump by four pixels every time a clip was selected.
+            height: 52px;
+
+            Rectangle {
+                x: 0;
+                y: parent.height - 1px;
+                width: parent.width;
+                height: 1px;
+                background: Theme.line;
+            }
+
+            HorizontalLayout {
+                padding-left: root.single ? Theme.pad : 8px;
+                padding-right: 8px;
+                spacing: 8px;
+
+                if root.single: Text {
+                    text: root.tabs-shown[0];
+                    color: Theme.fg-muted;
+                    font-size: Theme.fs-sm;
+                    font-weight: Theme.weight-title;
+                    letter-spacing: 1px;
+                    vertical-alignment: center;
+                }
+
+                if root.single: Rectangle { horizontal-stretch: 1; }
+
+                // The clip's own name on the trailing edge, so a panel of
+                // numbers says which clip it is describing. The strip below
+                // has no room for it, which is why it only appears here.
+                if root.single: Text {
+                    text: root.selected.name;
+                    color: Theme.fg-dim;
+                    font-size: Theme.fs-sm;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+
+                if !root.single: VerticalLayout {
+                    alignment: center;
+                    SegmentedControl {
+                        options: root.tabs-shown;
+                        current <=> root.tab;
+                    }
+                }
+
+                VerticalLayout {
+                    alignment: center;
+                    PaneSwitcher {
+                        kind: PaneKind.inspector;
+                        seat: root.pane-seat;
+                        removable: root.pane-removable;
+                        picked(kind) => { root.pane-picked(kind); }
+                        removed => { root.pane-removed(); }
+                    }
+                }
+            }
+        }
+
+        // The tab's sections, as a second strip under the first, in the
+        // same segmented style. One section needs no strip: the tab already
+        // says where you are.
+        if root.has-selection && root.sections.length > 1: Rectangle {
+            height: 40px;
+            background: Theme.panel;
+
+            Rectangle {
+                x: 0;
+                y: parent.height - 1px;
+                width: parent.width;
+                height: 1px;
+                background: Theme.line;
+            }
+
+            HorizontalLayout {
+                padding-left: 8px;
+                padding-right: 8px;
+                VerticalLayout {
+                    alignment: center;
+                    SegmentedControl {
+                        options: root.sections-shown;
+                        current: Math.max(0, Math.min(root.section, root.sections.length - 1));
+                        changed(index) => { root.pick-section(index); }
+                    }
+                }
+            }
+        }
+
+        if root.has-selection: PaneBody {
+            // No padding: the inspector rows carry their own 14px inset, and
+            // sections run edge to edge so their hairlines reach both sides.
+            padding: 0px;
+
+            PaneScroll {
+                if root.showing == "Basic": VideoPanel {
+                    selected: root.selected;
+                    applied: root.applied-visual;
+                    params: root.visual-params;
+                    brush-tool: root.brush-tool;
+                    brush-size: root.brush-size;
+                    painting: root.painting;
+                    set(field, value) => { root.clip-set(field, value); }
+                    commit => { root.clip-commit(); }
+                    chain-add(id) => { root.chain-add(false, id); }
+                    chain-remove(index) => { root.chain-remove(false, index); }
+                    chain-set-param(index, key, value) => {
+                        root.chain-set-param(false, index, key, value);
+                    }
+                    cutout-mode(mode) => { root.cutout-mode(mode); }
+                    cutout-tool(index) => { root.cutout-tool(index); }
+                    cutout-size(size) => { root.cutout-size(size); }
+                    cutout-painting(on) => { root.cutout-painting(on); }
+                    cutout-subject(index) => { root.cutout-subject(index); }
+                    cutout-clear => { root.cutout-clear(); }
+                }
+
+                if root.showing == "Animation": AnimationPanel {
+                    selected: root.selected;
+                    set(field, value) => { root.clip-set(field, value); }
+                    commit => { root.clip-commit(); }
+                }
+
+                if root.showing == "Speed": SpeedPanel {
+                    selected: root.selected;
+                    set(field, value) => { root.clip-set(field, value); }
+                    commit => { root.clip-commit(); }
+                }
+
+                if root.showing == "Adjust": AdjustPanel {
+                    params: root.adjust-params;
+                    set(key, value) => { root.adjust-set(key, value); }
+                    commit => { root.clip-commit(); }
+                }
+
+                if root.showing == "Layer": FilterPanel {
+                    selected: root.selected;
+                    set(field, value) => { root.clip-set(field, value); }
+                    commit => { root.clip-commit(); }
+                }
+
+                if root.showing == "Text": TextPanel {
+                    selected: root.selected;
+                    set(field, value) => { root.clip-set(field, value); }
+                    set-text(field, value) => { root.clip-set-text(field, value); }
+                    set-colour(field, value) => { root.clip-set-colour(field, value); }
+                    commit => { root.clip-commit(); }
+                }
+
+                // Audio: the level and fades, then the voice and room chain
+                // under them, as CapCut's audio tab has it.
+                if root.showing == "Sound": VerticalLayout {
+                    AudioPanel {
+                        selected: root.selected;
+                        audio-tracks: root.audio-tracks;
+                        set(field, value) => { root.clip-set(field, value); }
+                        commit => { root.clip-commit(); }
+                    }
+                    // The three treatments, between the mix and the library:
+                    // they are chain links like any other, but they are the
+                    // ones a sound clip usually needs, so they get a switch
+                    // rather than a search.
+                    ProcessorRows {
+                        applied: root.applied-audio;
+                        params: root.audio-params;
+                        add(id) => { root.chain-add(true, id); }
+                        remove(index) => { root.chain-remove(true, index); }
+                        set-param(index, key, value) => {
+                            root.chain-set-param(true, index, key, value);
+                        }
+                        commit => { root.clip-commit(); }
+                    }
+                    PresetStack {
+                        noun: I18n.t("audio effect");
+                        library-title: I18n.t("Audio effects");
+                        shelf: 2;
+                        hidden: ["concat.loudness", "concat.denoise", "concat.enhance-voice"];
+                        group-labels: root.audio-groups;
+                        catalogue: root.catalogue-audio;
+                        applied: root.applied-audio;
+                        params: root.audio-params;
+
+                        add(id) => { root.chain-add(true, id); }
+                        toggle(index) => { root.chain-toggle(true, index); }
+                        move-by(index, delta) => { root.chain-move-by(true, index, delta); }
+                        remove(index) => { root.chain-remove(true, index); }
+                        set-param(index, key, value) => {
+                            root.chain-set-param(true, index, key, value);
+                        }
+                        commit => { root.clip-commit(); }
+                    }
+                }
+
+                // The picture's chain. Filters are not in it: a filter is a
+                // layer on the lanes, edited in its own panel.
+                if root.showing == "Effects": PresetStack {
+                    noun: I18n.t("effect");
+                    library-title: I18n.t("Effects");
+                    library: false;
+                    empty-note: I18n.t("No effect on this clip yet. Pick one from the Library's Effects page.");
+                    shelf: 1;
+                    group-labels: root.effect-groups;
+                    catalogue: root.catalogue-effects;
+                    applied: root.applied-visual;
+                    params: root.visual-params;
+
+                    add(id) => { root.chain-add(false, id); }
+                    toggle(index) => { root.chain-toggle(false, index); }
+                    move-by(index, delta) => { root.chain-move-by(false, index, delta); }
+                    remove(index) => { root.chain-remove(false, index); }
+                    set-param(index, key, value) => {
+                        root.chain-set-param(false, index, key, value);
+                    }
+                    commit => { root.clip-commit(); }
+                }
+            }
+        }
+    }
+}

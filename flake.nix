@@ -6,8 +6,8 @@
   #   nix run              build and launch it
   #   nix develop          a shell with everything `cargo run -p concat` needs
   #
-  # The build is one Cargo workspace under engine/, so cargo dependencies
-  # come straight from engine/Cargo.lock and there is no vendor hash to keep
+  # The build is one Cargo workspace under src/, so cargo dependencies
+  # come straight from src/Cargo.lock and there is no vendor hash to keep
   # in sync. Three native pieces need care inside the sandbox, which has no
   # network:
   #
@@ -19,6 +19,9 @@
   # - sherpa-onnx (text to speech) links prebuilt static libraries that its
   #   sys crate would download at build time. They are fetched here as fixed-
   #   output derivations instead and handed over with SHERPA_ONNX_ARCHIVE_DIR.
+  # - ONNX Runtime (the cutout models) is likewise downloaded by its sys
+  #   crate. nixpkgs' onnxruntime is linked instead, through ORT_LIB_LOCATION,
+  #   dynamically, so the wrapper's rpath finds it.
   #
   # The window is built with the FemtoVG-over-wgpu renderer (`--features
   # wgpu`) rather than Skia: skia-bindings also downloads its binaries at
@@ -37,7 +40,7 @@
       ];
       eachSystem = f: nixpkgs.lib.genAttrs systems (system: f nixpkgs.legacyPackages.${system});
 
-      # Must match the sherpa-onnx-sys version in engine/Cargo.lock: the sys
+      # Must match the sherpa-onnx-sys version in src/Cargo.lock: the sys
       # crate names the archive after its own version and refuses any other.
       sherpaVersion = "1.13.7";
       sherpaArchives = {
@@ -91,12 +94,15 @@
           # 8, by name: the engine needs 7 or newer, and nixpkgs' unversioned
           # `ffmpeg` is whichever major the distribution defaults to.
           ffmpeg_8
+          # The cutout models' runtime; see ORT_LIB_LOCATION above.
+          onnxruntime
           alsa-lib
           fontconfig
           freetype
           gtk3
           libxkbcommon
           wayland
+          openssl
         ];
     in
     {
@@ -104,12 +110,12 @@
         default = concat;
         concat = pkgs.rustPlatform.buildRustPackage {
           pname = "concat";
-          version = "0.2.1";
+          version = "0.2.3";
           src = self;
 
-          cargoRoot = "engine";
-          buildAndTestSubdir = "engine";
-          cargoLock.lockFile = ./engine/Cargo.lock;
+          cargoRoot = "src";
+          buildAndTestSubdir = "src";
+          cargoLock.lockFile = ./src/Cargo.lock;
           cargoBuildFlags = [
             "-p"
             "concat"
@@ -124,6 +130,8 @@
           doCheck = false;
 
           env.SHERPA_ONNX_ARCHIVE_DIR = sherpaArchiveDir pkgs;
+          env.ORT_LIB_LOCATION = "${pkgs.onnxruntime}/lib";
+          env.ORT_PREFER_DYNAMIC_LINK = "1";
 
           nativeBuildInputs = (nativeInputs pkgs) ++ [
             pkgs.wrapGAppsHook3
@@ -180,10 +188,12 @@
             ]);
 
           env.SHERPA_ONNX_ARCHIVE_DIR = sherpaArchiveDir pkgs;
+          env.ORT_LIB_LOCATION = "${pkgs.onnxruntime}/lib";
+          env.ORT_PREFER_DYNAMIC_LINK = "1";
           LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath (runtimeLibs pkgs);
 
           shellHook = ''
-            echo "Concat: cd engine && cargo run -p concat --no-default-features --features wgpu"
+            echo "Concat: cd src && cargo run -p concat --no-default-features --features wgpu"
           '';
         };
       });

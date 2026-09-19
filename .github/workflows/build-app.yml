@@ -1,19 +1,19 @@
 name: Build app
 
-# Builds Concat - the Slint window, `engine/crates/concat` - for every
+# Builds Concat - the Slint window, `src/crates/concat` - for every
 # platform and architecture it ships on, each on a runner of that
 # architecture so nothing is cross-compiled, and uploads one artifact per
 # target:
 #
-#   macOS    arm64 (Apple silicon)   x86_64 (Intel)     -> DMG
-#   Linux    x86_64                  aarch64            -> tar.gz
-#   Windows  x86_64                  aarch64            -> zip
+#   macOS    arm64 (Apple silicon)   x86_64 (Intel)     -> Concat-*.dmg
+#   Linux    x86_64                  aarch64            -> Concat-*.deb, .rpm, .AppImage
+#   Windows  x86_64                  aarch64            -> Concat-*-setup.exe, .msi
 #
-# The primary desktop targets also publish stable installer names used by
-# concat-app.vercel.app: a macOS DMG, Windows NSIS EXE and Linux AppImage.
+# Installers and binaries only: the program is not shipped as an archive
+# of a folder to unpack, so what a person downloads is what they run.
 #
-# Reusable: nightly.yml calls it on every push to main, release.yml on every
-# tag. It is the one place the build environment is described:
+# Reusable: release.yml calls it on every tag. It is the one place the
+# build environment is described:
 #
 # - The engine links FFmpeg and compiles whisper.cpp in, so a build needs the
 #   FFmpeg 7+ development libraries (headers and import libraries), cmake, a
@@ -55,6 +55,17 @@ env:
   # BtbN's autobuilds: GPL (x264 in), shared, FFmpeg 8.1, one per arch.
   FFMPEG_RELEASE: https://github.com/BtbN/FFmpeg-Builds/releases/download/latest
   FFMPEG_VERSION: 8.1
+  # ONNX Runtime, for the Linux bundles: the version the ort crate is built
+  # against (see ort-sys's dist table), as Microsoft's own shared build.
+  ORT_VERSION: 1.28.0
+  # And for Intel Macs, which neither ort nor Microsoft build for any more:
+  # the last release Microsoft made for them. The ort crate asks for the
+  # runtime's API 17 and up, which this carries.
+  ORT_INTEL_MAC_VERSION: 1.23.2
+  # The Linux packagers: nfpm for the .deb and .rpm, appimagetool for the
+  # AppImage; and WiX for the Windows .msi.
+  NFPM_VERSION: 2.47.0
+  WIX_VERSION: 6.0.2
   # Oldest macOS the bundles run on. Apple silicon Macs all run newer than
   # this; it is the Intel floor.
   MACOSX_DEPLOYMENT_TARGET: "12.0"
@@ -94,24 +105,34 @@ jobs:
             target: x86_64-unknown-linux-gnu
             ffmpeg: linux64
             sherpa: linux-x64
+            ort: x64
+            nfpm: amd64
+            appimage: x86_64
           - platform: linux
             arch: aarch64
             os: ubuntu-22.04-arm
             target: aarch64-unknown-linux-gnu
             ffmpeg: linuxarm64
             sherpa: linux-aarch64
+            ort: aarch64
+            nfpm: arm64
+            appimage: aarch64
           - platform: windows
             arch: x86_64
             os: windows-2022
             target: x86_64-pc-windows-msvc
             ffmpeg: win64
             sherpa: win-x64
+            inno: x64compatible
+            wix: x64
           - platform: windows
             arch: aarch64
             os: windows-11-arm
             target: aarch64-pc-windows-msvc
             ffmpeg: winarm64
             sherpa: win-arm64
+            inno: arm64
+            wix: arm64
     runs-on: ${{ matrix.os }}
     # The slowest target (Intel macOS, fat LTO) finishes in under half an
     # hour. A job still running past this is stuck, not slow.
@@ -124,7 +145,7 @@ jobs:
         id: version
         shell: bash
         run: |
-          version=$(sed -n 's/^version = "\(.*\)"/\1/p' engine/Cargo.toml | head -1)
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' src/Cargo.toml | head -1)
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "Building Concat $version for ${{ matrix.target }}"
 
@@ -138,7 +159,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             libfontconfig1-dev libfreetype6-dev libxkbcommon-dev libgl1-mesa-dev \
-            libgtk-3-dev libasound2-dev libclang-dev cmake libfuse2 patchelf
+            libgtk-3-dev libasound2-dev libclang-dev cmake
 
       # Ubuntu's packaged FFmpeg is older than the 7 the engine needs.
       - name: FFmpeg development libraries (Linux)
@@ -160,6 +181,33 @@ jobs:
             echo "RUSTFLAGS=-C link-arg=-Wl,-rpath,\$ORIGIN/lib -C link-arg=-Wl,--disable-new-dtags"
           } >> "$GITHUB_ENV"
 
+      # ONNX Runtime, the cutout models' runtime. Left to itself ort-sys
+      # downloads a static build and links it in; sherpa-onnx links a
+      # static build of its own, and the two carry the same protobuf, which
+      # the linker refuses as duplicate symbols the moment both are pulled
+      # - every Linux link since the cutout arrived. So on Linux ort links
+      # Microsoft's shared build instead, through ORT_LIB_LOCATION with
+      # dynamic linking preferred, and the library ships in lib/ beside
+      # FFmpeg's, where the rpath above finds it. The Nix package links
+      # the same way against nixpkgs' onnxruntime.
+      - name: ONNX Runtime (Linux)
+        if: matrix.platform == 'linux'
+        run: |
+          set -euo pipefail
+          stem="onnxruntime-linux-${{ matrix.ort }}-$ORT_VERSION"
+          curl -fsSL --retry 5 --retry-all-errors -o onnxruntime.tgz \
+            "https://github.com/microsoft/onnxruntime/releases/download/v$ORT_VERSION/$stem.tgz"
+          tar -xzf onnxruntime.tgz
+          test -f "$stem/lib/libonnxruntime.so.$ORT_VERSION"
+          # The tarball carries the soname and the full version; the linker
+          # asks for the bare name.
+          ln -sf "libonnxruntime.so.$ORT_VERSION" "$stem/lib/libonnxruntime.so"
+          {
+            echo "ORT_LIB_LOCATION=$PWD/$stem/lib"
+            echo "ORT_PREFER_DYNAMIC_LINK=1"
+            echo "ORT_DIR=$PWD/$stem"
+          } >> "$GITHUB_ENV"
+
       # ── macOS ──────────────────────────────────────────────────────────
       # FFMPEG_DIR, same as the other platforms: ffmpeg-sys honours it ahead
       # of every fallback, so the build never depends on the runner image
@@ -170,9 +218,7 @@ jobs:
         run: |
           set -euo pipefail
           brew install ffmpeg cmake dylibbundler
-          ffmpeg_dir=$(brew --prefix ffmpeg)
-          echo "FFMPEG_DIR=$ffmpeg_dir" >> "$GITHUB_ENV"
-          echo "PKG_CONFIG_PATH=$ffmpeg_dir/lib/pkgconfig" >> "$GITHUB_ENV"
+          echo "FFMPEG_DIR=$(brew --prefix ffmpeg)" >> "$GITHUB_ENV"
           # ggml's Metal code asks `@available(macOS 15, *)` before using
           # residency sets. Below that deployment target the question is
           # answered at run time by ___isPlatformVersionAtLeast, which lives
@@ -181,6 +227,28 @@ jobs:
           # build on a developer's Mac never sees this: with no deployment
           # target set, the check is folded away at compile time.)
           echo "RUSTFLAGS=-C link-arg=$(xcrun clang --print-file-name=libclang_rt.osx.a)" >> "$GITHUB_ENV"
+
+      # ONNX Runtime on an Intel Mac. ort ships no static build for
+      # x86_64-apple-darwin, so the cutout's runtime is Microsoft's shared
+      # one, linked dynamically the way Linux does it, and bundled into
+      # Frameworks by dylibbundler along with FFmpeg's - the install name
+      # is @rpath, so the bundler is told where to look. Apple silicon
+      # keeps ort's static build.
+      - name: ONNX Runtime (Intel macOS)
+        if: matrix.platform == 'macos' && matrix.arch == 'x86_64'
+        run: |
+          set -euo pipefail
+          stem="onnxruntime-osx-x86_64-$ORT_INTEL_MAC_VERSION"
+          curl -fsSL --retry 5 --retry-all-errors -o onnxruntime.tgz \
+            "https://github.com/microsoft/onnxruntime/releases/download/v$ORT_INTEL_MAC_VERSION/$stem.tgz"
+          tar -xzf onnxruntime.tgz
+          test -f "$stem/lib/libonnxruntime.$ORT_INTEL_MAC_VERSION.dylib"
+          ln -sf "libonnxruntime.$ORT_INTEL_MAC_VERSION.dylib" "$stem/lib/libonnxruntime.dylib"
+          {
+            echo "ORT_LIB_LOCATION=$PWD/$stem/lib"
+            echo "ORT_PREFER_DYNAMIC_LINK=1"
+            echo "ORT_DIR=$PWD/$stem"
+          } >> "$GITHUB_ENV"
 
       # ── Windows ────────────────────────────────────────────────────────
       # LLVM: libclang for bindgen on both architectures, and the C/C++
@@ -243,7 +311,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          version=$(grep -A1 'name = "sherpa-onnx-sys"' engine/Cargo.lock | sed -n 's/^version = "\(.*\)"/\1/p')
+          version=$(grep -A1 'name = "sherpa-onnx-sys"' src/Cargo.lock | sed -n 's/^version = "\(.*\)"/\1/p')
           stem="sherpa-onnx-v$version-${{ matrix.sherpa }}-static-lib"
           echo "Downloading $stem"
           curl -fsSL --retry 5 --retry-all-errors -o sherpa.tar.bz2 "https://github.com/k2-fsa/sherpa-onnx/releases/download/v$version/$stem.tar.bz2"
@@ -272,7 +340,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          $version = (Select-String -Path engine\Cargo.lock -Pattern 'name = "sherpa-onnx-sys"' -Context 0,1).Context.PostContext[0] -replace '.*"(.*)".*', '$1'
+          $version = (Select-String -Path src\Cargo.lock -Pattern 'name = "sherpa-onnx-sys"' -Context 0,1).Context.PostContext[0] -replace '.*"(.*)".*', '$1'
           $stem = "sherpa-onnx-v$version-${{ matrix.sherpa }}-shared-MT-Release-lib"
           Write-Host "Downloading $stem"
           curl.exe -fsSL --retry 5 --retry-all-errors -o sherpa.tar.bz2 "https://github.com/k2-fsa/sherpa-onnx/releases/download/v$version/$stem.tar.bz2"
@@ -293,7 +361,7 @@ jobs:
       # under the old one.
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: engine
+          workspaces: src
           key: ${{ matrix.target }}
           env-vars: CARGO CC CFLAGS CXX CMAKE RUST GGML
 
@@ -305,7 +373,7 @@ jobs:
       # build goes there, and a red run explains itself to anyone.
       - name: Build
         shell: bash
-        working-directory: engine
+        working-directory: src
         run: |
           set -o pipefail
           cargo build --profile app -p concat --target ${{ matrix.target }} 2>&1 | tee build.log
@@ -314,11 +382,11 @@ jobs:
         if: failure()
         shell: bash
         run: |
-          if [ -f engine/build.log ]; then
+          if [ -f src/build.log ]; then
             {
               echo "### Build failed: ${{ matrix.target }}"
               echo '```'
-              tail -n 150 engine/build.log
+              tail -n 150 src/build.log
               echo '```'
             } >> "$GITHUB_STEP_SUMMARY"
           fi
@@ -337,7 +405,7 @@ jobs:
           app=Concat.app
           rm -rf "$app"
           mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources" "$app/Contents/Frameworks"
-          cp "engine/target/${{ matrix.target }}/app/concat" "$app/Contents/MacOS/concat"
+          cp "src/target/${{ matrix.target }}/app/concat" "$app/Contents/MacOS/concat"
 
           # The icon set Apple wants: each size and its @2x twin.
           iconset=Concat.iconset
@@ -381,7 +449,8 @@ jobs:
           dylibbundler -od -b \
             -x "$app/Contents/MacOS/concat" \
             -d "$app/Contents/Frameworks" \
-            -p @executable_path/../Frameworks
+            -p @executable_path/../Frameworks \
+            ${ORT_DIR:+-s "$ORT_DIR/lib"}
 
           # Nothing outside the bundle may remain: a load path into
           # Homebrew would break on a Mac without it.
@@ -429,12 +498,7 @@ jobs:
             codesign --force --deep -s - "$app"
           fi
 
-          dmg_root="$RUNNER_TEMP/concat-dmg-root"
-          rm -rf "$dmg_root"
-          mkdir -p "$dmg_root"
-          cp -R "$app" "$dmg_root/Concat.app"
-          ln -s /Applications "$dmg_root/Applications"
-          hdiutil create -volname Concat -srcfolder "$dmg_root" -ov -format UDZO "$dmg"
+          hdiutil create -volname Concat -srcfolder "$app" -ov -format UDZO "$dmg"
 
           if [ -n "${APPLE_ID}" ] && [ -n "${TEAM_ID}" ] && [ -n "${APP_PASSWORD}" ] && [ -n "${IDENTITY}" ]; then
             codesign --force --timestamp -s "$IDENTITY" "$dmg"
@@ -443,9 +507,6 @@ jobs:
             xcrun stapler staple "$dmg"
           fi
           mkdir -p stage && mv "$dmg" stage/
-          if [ "${{ matrix.arch }}" = "arm64" ]; then
-            cp "stage/$dmg" stage/Concat-macOS.dmg
-          fi
 
       # ── Package: Linux ─────────────────────────────────────────────────
       # The binary, the FFmpeg runtime libraries it loads from lib/ beside
@@ -458,8 +519,9 @@ jobs:
           set -euo pipefail
           name="Concat-${VERSION}-linux-${{ matrix.arch }}"
           mkdir -p "stage/$name/lib"
-          cp "engine/target/${{ matrix.target }}/app/concat" "stage/$name/concat"
+          cp "src/target/${{ matrix.target }}/app/concat" "stage/$name/concat"
           cp -a ffmpeg-dev/lib/*.so* "stage/$name/lib/"
+          cp -a "$ORT_DIR"/lib/libonnxruntime.so* "stage/$name/lib/"
           cp assets/icons/concat_logo_256.png "stage/$name/concat.png"
           cat > "stage/$name/concat.desktop" <<DESKTOP
           [Desktop Entry]
@@ -488,33 +550,63 @@ jobs:
             exit 1
           fi
 
-          if [ "${{ matrix.arch }}" = "x86_64" ]; then
-            appdir="$PWD/Concat.AppDir"
-            mkdir -p \
-              "$appdir/usr/bin" \
-              "$appdir/usr/lib" \
-              "$appdir/usr/share/applications" \
-              "$appdir/usr/share/icons/hicolor/512x512/apps"
-            cp "stage/$name/concat" "$appdir/usr/bin/concat"
-            cp -a "stage/$name/lib/." "$appdir/usr/lib/"
-            cp scripts/release/linux/io.concat.Concat.desktop "$appdir/usr/share/applications/"
-            cp assets/icons/concat_logo_512.png \
-              "$appdir/usr/share/icons/hicolor/512x512/apps/io.concat.Concat.png"
-            curl -fsSL --retry 5 --retry-all-errors \
-              -o linuxdeploy-x86_64.AppImage \
-              https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
-            chmod +x linuxdeploy-x86_64.AppImage
-            export LD_LIBRARY_PATH="$PWD/ffmpeg-dev/lib:$appdir/usr/lib:${LD_LIBRARY_PATH:-}"
-            export OUTPUT="$PWD/stage/Concat-Linux-x86_64.AppImage"
-            ./linuxdeploy-x86_64.AppImage \
-              --appdir "$appdir" \
-              --executable "$appdir/usr/bin/concat" \
-              --desktop-file "$appdir/usr/share/applications/io.concat.Concat.desktop" \
-              --icon-file "$appdir/usr/share/icons/hicolor/512x512/apps/io.concat.Concat.png" \
-              --output appimage
-            chmod +x "$OUTPUT"
-          fi
-          (cd stage && tar -czf "$name.tar.gz" "$name" && rm -r "$name")
+      # The folder three ways. A .deb and an .rpm, from one description in
+      # assets/linux/nfpm.yaml: the program whole under /opt/concat, a
+      # launcher on the path, a desktop entry and an icon. And an AppImage:
+      # the folder as an AppDir, one file that runs on any distribution
+      # with the toolkit installed, which every desktop has. All three from
+      # the one staged folder, so they ship the same files - see issue #83.
+      - name: Package (Linux)
+        if: matrix.platform == 'linux'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          NFPM_ARCH: ${{ matrix.nfpm }}
+          ARCH: ${{ matrix.appimage }}
+        run: |
+          set -euo pipefail
+          name="Concat-${VERSION}-linux-${{ matrix.arch }}"
+          export STAGE="$PWD/stage/$name"
+
+          # What the packages add over the folder: the launcher, and a
+          # desktop entry that names the program by its installed path.
+          mkdir -p "$STAGE/pkg"
+          printf '#!/bin/sh\nexec /opt/concat/concat "$@"\n' > "$STAGE/pkg/concat"
+          chmod +x "$STAGE/pkg/concat"
+          sed 's|^Exec=concat|Exec=/opt/concat/concat %U|' "$STAGE/concat.desktop" > "$STAGE/pkg/concat.desktop"
+
+          curl -fsSL --retry 5 --retry-all-errors -o nfpm.tar.gz \
+            "https://github.com/goreleaser/nfpm/releases/download/v$NFPM_VERSION/nfpm_${NFPM_VERSION}_Linux_$( [ "${{ matrix.arch }}" = x86_64 ] && echo x86_64 || echo arm64 ).tar.gz"
+          mkdir -p nfpm && tar -xzf nfpm.tar.gz -C nfpm
+          # From inside the folder: nfpm names files relative to where it
+          # runs, and expands no variables in their paths.
+          for kind in deb rpm; do
+            (cd "$STAGE" && "$OLDPWD/nfpm/nfpm" package -f "$OLDPWD/assets/linux/nfpm.yaml" -p "$kind" -t "$OLDPWD/stage/$name.$kind")
+          done
+          rm -r "$STAGE/pkg"
+
+          # The AppDir: the binary and its lib/ under usr/bin, so the
+          # rpath holds; the desktop entry and icon at the root, where
+          # the tool wants them; AppRun is the binary.
+          appdir="$PWD/Concat.AppDir"
+          rm -rf "$appdir"
+          mkdir -p "$appdir/usr/bin" "$appdir/usr/share/icons/hicolor/256x256/apps" "$appdir/usr/share/applications"
+          cp "$STAGE/concat" "$appdir/usr/bin/concat"
+          cp -a "$STAGE/lib" "$appdir/usr/bin/lib"
+          cp "$STAGE/concat.desktop" "$appdir/concat.desktop"
+          cp "$STAGE/concat.desktop" "$appdir/usr/share/applications/concat.desktop"
+          cp "$STAGE/concat.png" "$appdir/concat.png"
+          cp "$STAGE/concat.png" "$appdir/usr/share/icons/hicolor/256x256/apps/concat.png"
+          ln -s concat.png "$appdir/.DirIcon"
+          ln -s usr/bin/concat "$appdir/AppRun"
+          curl -fsSL --retry 5 --retry-all-errors -o appimagetool \
+            "https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-$ARCH.AppImage"
+          chmod +x appimagetool
+          # Extract-and-run: the runner has no FUSE to mount the tool with.
+          ./appimagetool --appimage-extract-and-run "$appdir" "stage/$name.AppImage"
+          chmod +x "stage/$name.AppImage"
+
+          rm -r "$STAGE" "$appdir"
+          ls -l stage
 
       # ── Package: Windows ───────────────────────────────────────────────
       - name: Stage (Windows)
@@ -526,23 +618,34 @@ jobs:
           $ErrorActionPreference = "Stop"
           $name = "Concat-$env:VERSION-windows-${{ matrix.arch }}"
           New-Item -ItemType Directory -Force "stage\$name" | Out-Null
-          Copy-Item "engine\target\${{ matrix.target }}\app\concat.exe" "stage\$name\"
-          Get-ChildItem "engine\target\${{ matrix.target }}\app" -Filter *.dll -ErrorAction SilentlyContinue |
-            Copy-Item -Destination "stage\$name\"
+          Copy-Item "src\target\${{ matrix.target }}\app\concat.exe" "stage\$name\"
           Copy-Item "$env:FFMPEG_DIR\bin\*.dll" "stage\$name\"
           # The sherpa-onnx runtime, set aside by the download step above.
           Copy-Item "$env:SHERPA_DLL_DIR\*.dll" "stage\$name\"
           Copy-Item LICENSE, THIRD_PARTY_NOTICES.md "stage\$name\"
-          Compress-Archive -Path "stage\$name" -DestinationPath "stage\$name.zip"
-          if ("${{ matrix.arch }}" -eq "x86_64") {
-            choco install nsis -y --no-progress
-            $stageDir = (Resolve-Path "stage\$name").Path
-            $output = Join-Path (Resolve-Path stage).Path "Concat-Windows-Setup.exe"
-            $makensis = Join-Path ${env:ProgramFiles(x86)} "NSIS\makensis.exe"
-            if (-not (Test-Path $makensis)) { throw "NSIS compiler not found at $makensis" }
-            & $makensis "/DSTAGE_DIR=$stageDir" "/DOUT_FILE=$output" "/DAPP_VERSION=$env:VERSION" scripts/release/windows/installer.nsi
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          # The installer, from that folder: Inno Setup, which the x64
+          # image carries and the ARM image is given. See
+          # assets/windows/concat.iss.
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) {
+            Write-Host "Installing Inno Setup"
+            choco install innosetup --no-progress -y | Out-Null
           }
+          if (-not (Test-Path $iscc)) { throw "Inno Setup is not at $iscc" }
+          & $iscc "/DVersion=$env:VERSION" "/DArch=${{ matrix.inno }}" "/DSuffix=${{ matrix.arch }}" `
+            "/DStage=$PWD\stage\$name" "/DOut=$PWD\stage" assets\windows\concat.iss
+          if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed with $LASTEXITCODE" }
+          if (-not (Test-Path "stage\$name-setup.exe")) { throw "stage\$name-setup.exe is not there" }
+          # And the .msi, with WiX, for the machines an administrator
+          # deploys to. See assets/windows/concat.wxs.
+          dotnet tool install --global wix --version $env:WIX_VERSION | Out-Null
+          # No .wixpdb: everything in stage/ is published, and a debug
+          # database for the installer is nothing a release should carry.
+          wix build -arch ${{ matrix.wix }} -pdbtype none "-d" "Version=$env:VERSION" "-d" "Root=$PWD" "-d" "Stage=$PWD\stage\$name" `
+            -o "stage\$name.msi" assets\windows\concat.wxs
+          if ($LASTEXITCODE -ne 0) { throw "WiX failed with $LASTEXITCODE" }
+          if (-not (Test-Path "stage\$name.msi")) { throw "stage\$name.msi is not there" }
+          # The folder itself is not published: the two installers are.
           Remove-Item -Recurse -Force "stage\$name"
 
       - uses: actions/upload-artifact@v7

@@ -1,0 +1,225 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-FileCopyrightText: 2026 Jareer and Concat contributors
+
+import { I18n } from "../i18n.slint";
+import { Theme } from "../theme/theme.slint";
+import { Glyph } from "../icons.slint";
+import { IconButton } from "../primitives/panel.slint";
+import { TimelineTool } from "model.slint";
+
+// The timeline's tool tray.
+//
+// The tool set: add-track first, then the three edit actions, then
+// snapping, then the tools a clip's sound and words need
+// - captions, a spoken title, detaching the sound - and the view controls
+// pushed to the far end behind the timecode readout. The metrics: 40px
+// tall, 4px between buttons, an 18px hairline with 4px of air on each side
+// between groups. Tight, without crowding a 26px button.
+//
+// The sound and word tools sit on the bar rather than behind a menu,
+// because a menu is where a tool goes to not be found. They are marks like
+// every other button here, and what names them is the tip: a sentence
+// saying what the press will do, which reads better on hover than a word
+// beside the mark reads at rest. Captions and Speak open whatever is
+// selected - each has a source of its own to fall back on - and the tip
+// says which. Detach is greyed rather than absent when the selection
+// cannot use it, because a greyed button with a tip answers "why not" and
+// an absent one only asks it.
+//
+// A disabled Merge carries the reason it is blocked, because a button that
+// greys out without saying why leaves you guessing at the rule:
+// `merge-blocked-because` is accepted and becomes the button's label, which
+// is its accessible name and where a tooltip reads from.
+
+component Divider inherits Rectangle {
+    width: 9px;
+
+    Rectangle {
+        x: 4px;
+        y: (parent.height - self.height) / 2;
+        width: 1px;
+        height: 18px;
+        background: Theme.line;
+    }
+}
+
+export component TimelineTray inherits Rectangle {
+    in property <TimelineTool> tool: TimelineTool.select;
+    in property <bool> snap: true;
+    in property <bool> magnetic: false;
+    in property <bool> pan-mode: false;
+    in property <int> selected-count;
+    /// Empty when the selection can be merged; otherwise why it cannot.
+    in property <string> merge-blocked-because;
+    /// What the selection offers the sound and word tools. Each is one
+    /// clip's worth of truth, decided by Rust; see the Editor global.
+    in property <bool> sound-selected;
+    in property <bool> title-selected;
+    /// hh:mm:ss:ff at the playhead, formatted by the caller
+    in property <string> readout;
+
+    callback tool-changed(tool: TimelineTool);
+    callback snap-changed(snap: bool);
+    callback magnetic-changed(on: bool);
+    callback pan-changed(on: bool);
+    callback split();
+    callback merge();
+    callback delete-selected();
+    callback captions();
+    callback speak();
+    callback add-track();
+    callback fit();
+    callback zoom(factor: float);
+
+    height: 40px;
+    background: Theme.panel;
+
+    Rectangle {
+        x: 0;
+        y: parent.height - 1px;
+        width: parent.width;
+        height: 1px;
+        background: Theme.line;
+    }
+
+    HorizontalLayout {
+        padding-left: 8px;
+        padding-right: 8px;
+        padding-top: 7px;
+        padding-bottom: 7px;
+        spacing: 4px;
+
+        IconButton {
+            glyph: Glyph.plus;
+            label: I18n.t("Add track");
+            icon-size: 14px;
+            clicked => { root.add-track(); }
+        }
+
+        Divider { }
+
+        // One way to cut: at the playhead. The razor that cut where you
+        // clicked is gone - two tools for one edit, and the playhead is
+        // already where you were looking.
+        IconButton {
+            glyph: Glyph.split;
+            label: I18n.t("Split at playhead (B, or ⌘B for every clip)");
+            icon-size: 16px;
+            clicked => { root.split(); }
+        }
+        IconButton {
+            glyph: Glyph.merge;
+            // The reason a blocked Merge is blocked rides on the button rather
+            // than being spelled out beside it. This tree has no tooltip yet,
+            // so `label` — the accessible name, and where a tooltip will read
+            // from — is the honest place to park it. A permanent caption in
+            // the tray would answer a question nobody had asked yet.
+            label: root.merge-blocked-because == "" ? "Merge selected"
+                : root.merge-blocked-because;
+            enabled: root.merge-blocked-because == "";
+            icon-size: 16px;
+            clicked => { root.merge(); }
+        }
+        IconButton {
+            glyph: Glyph.trash;
+            label: I18n.t("Delete selected");
+            danger: true;
+            icon-size: 16px;
+            enabled: root.selected-count > 0;
+            clicked => { root.delete-selected(); }
+        }
+
+        // The count of a multiple selection, in the accent so it reads as a
+        // fact about the selection rather than another control.
+        if root.selected-count > 1: Text {
+            width: 16px;
+            text: "\{root.selected-count}";
+            color: Theme.accent;
+            font-size: Theme.fs-sm;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+
+        Divider { }
+
+        IconButton {
+            glyph: Glyph.hand;
+            label: I18n.t("Pan tool");
+            icon-size: 16px;
+            checked: root.pan-mode;
+            clicked => { root.pan-changed(!root.pan-mode); }
+        }
+
+        Divider { }
+
+        IconButton {
+            glyph: Glyph.magnet;
+            label: I18n.t("Snap to edges");
+            icon-size: 16px;
+            checked: root.snap;
+            clicked => { root.snap-changed(!root.snap); }
+        }
+        // The magnetic timeline, beside the snap it is so often mistaken
+        // for: snap is where a drag lands, magnetic is that a delete or a
+        // trim leaves no hole. https://github.com/jub0t/Concat/issues/106
+        IconButton {
+            glyph: Glyph.fold;
+            label: I18n.t("Magnetic timeline: deleting and trimming close the gap");
+            icon-size: 16px;
+            checked: root.magnetic;
+            clicked => { root.magnetic-changed(!root.magnetic); }
+        }
+
+        Divider { }
+
+        IconButton {
+            glyph: Glyph.text-mark;
+            label: I18n.t("Generate Captions");
+            icon-size: 16px;
+            clicked => { root.captions(); }
+        }
+        IconButton {
+            glyph: Glyph.volume;
+            label: I18n.t("Text to Speech");
+            icon-size: 16px;
+            clicked => { root.speak(); }
+        }
+
+        Rectangle { horizontal-stretch: 1; }
+
+        // Fixed width, right-aligned: without it every control to its right
+        // shuffles sideways each time the frame digits change.
+        Text {
+            width: 92px;
+            text: root.readout;
+            color: Theme.fg-dim;
+            font-size: Theme.fs-sm;
+            letter-spacing: 0.24px;
+            horizontal-alignment: right;
+            vertical-alignment: center;
+        }
+
+        Divider { }
+
+        IconButton {
+            glyph: Glyph.fit;
+            label: I18n.t("Zoom to fit");
+            icon-size: 15px;
+            clicked => { root.fit(); }
+        }
+        IconButton {
+            glyph: Glyph.minus;
+            label: I18n.t("Zoom out");
+            icon-size: 14px;
+            // Above 1 is out: the factor multiplies seconds-per-pixel, so a
+            // bigger number is more seconds in the same pixel.
+            clicked => { root.zoom(1.4); }
+        }
+        IconButton {
+            glyph: Glyph.plus;
+            label: I18n.t("Zoom in");
+            icon-size: 14px;
+            clicked => { root.zoom(1 / 1.4); }
+        }
+    }
+}

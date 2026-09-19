@@ -1,0 +1,1076 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-FileCopyrightText: 2026 Jareer and Concat contributors
+
+import { I18n } from "../i18n.slint";
+import { Theme } from "../theme/theme.slint";
+import { Fmt } from "../util.slint";
+import { Glyph, Icon } from "../icons.slint";
+import { IconButton } from "../primitives/panel.slint";
+import { NumberField } from "../primitives/number-field.slint";
+import { Select } from "../primitives/select.slint";
+import { Pane, PaneHeader } from "pane.slint";
+import { PaneKind, PaneSwitcher } from "pane-switcher.slint";
+import { ClipKind, StageGuideData, StageItemData } from "../timeline/model.slint";
+
+// The programme monitor: a header that says what the output is, a stage on a
+// sunken viewport, and a transport tray under it in three parts — timecode on
+// the leading edge, the buttons dead centre, the output and zoom pickers on
+// the trailing edge.
+//
+// Time is held in frames, not seconds. A monitor that cannot land on a frame
+// is not a monitor, and every rounding question disappears once the unit is
+// the frame. The readout is a NumberField, so the same drag-to-scrub gesture
+// that moves a position field moves the playhead.
+//
+// The stage is black. A decoded frame is drawn fitted into it when there is
+// one; otherwise it says that nothing is under the playhead, which is a state
+// a real monitor spends plenty of its time in.
+//
+// The stage sits on a canvas, not in a frame. Fitted by default, and it
+// follows the pane while it is; but a wheel pans it, a ctrl or cmd wheel
+// zooms it about the pointer, a ctrl drag or a middle drag anywhere moves
+// it - as does a plain drag on the well, where there is nothing to select -
+// and from then on it stays where it was put until it is fitted again: the
+// picker in the tray, or a double-click on the well. A pane squeezed into
+// an odd shape by the splitters is then still a pane you can look closely
+// into, rather than one showing a postage stamp of the frame.
+
+/// An outline in the shape of the thing it selects. Beats any label at saying
+/// "tall" or "wide" at a glance, and it is drawn at ratio rather than to a
+/// fixed box, capped into a 14px slot so a row of them stays aligned.
+component RatioGlyph inherits Rectangle {
+    in property <float> ratio-w: 16;
+    in property <float> ratio-h: 9;
+    in property <brush> tint: Theme.fg-dim;
+
+    property <float> scale: 14 / Math.max(root.ratio-w, root.ratio-h);
+
+    width: 14px;
+    height: 14px;
+    background: transparent;
+
+    Rectangle {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        width: Math.round(root.ratio-w * root.scale) * 1px;
+        height: Math.round(root.ratio-h * root.scale) * 1px;
+        border-width: 1px;
+        border-color: root.tint;
+        border-radius: 2px;
+    }
+}
+
+// The output picker.
+//
+// Not the shared `Select`: that takes a list of strings and renders one label
+// per row, and this control wants three things on a row — a rectangle drawn at
+// the ratio it names, the ratio itself, and the pixel size. The size is set
+// against the trailing edge rather than joined on with a dash, so the column
+// of ratios stays scannable and the sizes line up as a column of their own.
+//
+// The trigger carries only the glyph. The ratio's name and its full size are
+// what you open the list to compare; either on a closed control spends the
+// width of the tray on something the shape already says, and the size is
+// stated in the panel's header besides.
+component RatioPicker inherits Rectangle {
+    in property <[int]> widths;
+    in property <[int]> heights;
+    in property <[string]> names;
+    in-out property <int> current;
+
+    callback changed(index: int);
+
+    // Read from the popup rather than tracked here: a click outside closes it
+    // without telling us, so a hand-rolled flag goes stale.
+    property <bool> open: list.is-open;
+    property <int> active;
+    property <length> row-h: 26px;
+
+    width: 8px + 14px + 6px + 12px + 6px;
+    height: Theme.h;
+    border-radius: Theme.r;
+    background: (root.open || trigger.has-hover) ? Theme.field-hover : Theme.field;
+
+    animate background { duration: 120ms; easing: cubic-bezier(0.4, 0, 0.2, 1); }
+
+    function commit(index: int) {
+        if (index >= 0 && index < root.names.length) {
+            root.current = index;
+            root.changed(index);
+        }
+        list.close();
+    }
+
+    HorizontalLayout {
+        padding-left: 8px;
+        padding-right: 6px;
+        spacing: 6px;
+
+        VerticalLayout {
+            alignment: center;
+            RatioGlyph {
+                ratio-w: root.widths[root.current];
+                ratio-h: root.heights[root.current];
+                tint: Theme.fg;
+            }
+        }
+
+        VerticalLayout {
+            alignment: center;
+            Icon { glyph: Glyph.chevron-down; size: 12px; tint: Theme.fg-muted; }
+        }
+    }
+
+    trigger := TouchArea {
+        mouse-cursor: pointer;
+        clicked => {
+            root.active = root.current;
+            list.show();
+        }
+    }
+
+    list := PopupWindow {
+        // Right-aligned to the trigger: the list is wider than the control and
+        // the control is already hard against the panel's trailing edge.
+        x: root.width - 208px;
+        y: root.height + 4px;
+        width: 208px;
+        height: root.names.length * root.row-h + 8px;
+        close-policy: close-on-click-outside;
+
+        Rectangle {
+            background: Theme.raised;
+            border-width: 1px;
+            border-color: Theme.line-strong;
+            border-radius: Theme.r;
+            clip: true;
+
+            VerticalLayout {
+                padding: 4px;
+                alignment: start;
+
+                for name[index] in root.names: Rectangle {
+                    height: root.row-h;
+                    border-radius: Theme.r-sm;
+                    background: index == root.active ? Theme.accent : Colors.transparent;
+
+                    HorizontalLayout {
+                        padding-left: 6px;
+                        padding-right: 8px;
+                        spacing: 8px;
+
+                        VerticalLayout {
+                            alignment: center;
+                            RatioGlyph {
+                                ratio-w: root.widths[index];
+                                ratio-h: root.heights[index];
+                                tint: index == root.active ? Theme.on-accent : Theme.fg-muted;
+                            }
+                        }
+
+                        Text {
+                            text: name;
+                            color: index == root.active ? Theme.on-accent : Theme.fg;
+                            font-family: Theme.font-technical;
+                            font-size: Theme.fs;
+                            vertical-alignment: center;
+                        }
+
+                        Rectangle { horizontal-stretch: 1; }
+
+                        Text {
+                            text: "\{root.widths[index]} × \{root.heights[index]}";
+                            color: index == root.active ? Theme.on-accent : Theme.fg-dim;
+                            font-family: Theme.font-technical;
+                            font-size: Theme.fs-sm;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    TouchArea {
+                        mouse-cursor: pointer;
+                        changed has-hover => {
+                            if (self.has-hover) {
+                                root.active = index;
+                            }
+                        }
+                        clicked => { root.commit(index); }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ── the stage's selection ────────────────────────────────────────────────────
+//
+// The selected pictures, outlined where the compositor put them, with a grip
+// at each corner to scale by and one above to turn by. The outline is the
+// accent — lime — because it is a selection, and a selection is the accent
+// everywhere else in the window.
+//
+// The geometry is fractions of the frame all the way from Rust, so the same
+// item draws correctly on a monitor of any size; only here does it meet
+// pixels. Rotation is drawn with `transform-rotation` and the grips are placed by
+// hand at the rotated corners, which is also why they are separate elements
+// and not children of the rotated box: a grip is a small square the pointer
+// has to find, and an unrotated square at a computed position is a thing a
+// TouchArea can be exactly the shape of. A rotated *body* is not, so a press
+// on the body goes to the floor beneath and Rust decides what it landed on.
+
+/// One grip. Sized in pixels, placed at a point the item computed.
+component Grip inherits Rectangle {
+    /// Where its centre is, in the overlay's pixels.
+    in property <length> at-x;
+    in property <length> at-y;
+    /// The overlay's size, to turn a pointer position back into fractions.
+    in property <length> stage-w;
+    in property <length> stage-h;
+    /// True for the rotation handle, which is round.
+    in property <bool> turn;
+    in property <MouseCursor> cursor;
+
+    callback pressed(x: float, y: float);
+    callback dragged(x: float, y: float, snap: bool);
+    callback released();
+
+    property <length> size: root.turn ? 12px : 9px;
+
+    x: root.at-x - self.width / 2;
+    y: root.at-y - self.height / 2;
+    width: root.size;
+    height: root.size;
+    border-radius: root.turn ? self.width / 2 : 1.5px;
+    background: touch.has-hover || touch.pressed ? Theme.accent-hover : Theme.accent;
+    // A dark ring, because the grip lands on footage that may be lime itself.
+    border-width: 1px;
+    border-color: Theme.stage;
+
+    touch := TouchArea {
+        // A hair wider than the drawn grip, so it is easier to find than it
+        // is to see.
+        x: -3px;
+        y: -3px;
+        width: parent.width + 6px;
+        height: parent.height + 6px;
+        mouse-cursor: root.cursor;
+
+        property <bool> live;
+        property <bool> snap;
+
+        // The pointer's position in the overlay: the grip's own place plus
+        // the offset within it. Absolute, not a delta from the press — the
+        // grip follows the echo as it is dragged, and a delta measured against
+        // a moving origin cancels itself out. Same reasoning as the lanes.
+        function px() -> float {
+            return (root.x + self.x + self.mouse-x) / root.stage-w;
+        }
+        function py() -> float {
+            return (root.y + self.y + self.mouse-y) / root.stage-h;
+        }
+
+        pointer-event(event) => {
+            self.snap = event.modifiers.shift;
+            if (event.kind == PointerEventKind.down
+                && event.button == PointerEventButton.left) {
+                self.live = true;
+                root.pressed(self.px(), self.py());
+            } else if (event.kind == PointerEventKind.up
+                || event.kind == PointerEventKind.cancel) {
+                if (self.live) {
+                    self.live = false;
+                    root.released();
+                }
+            }
+        }
+        moved => {
+            if (self.live) {
+                root.dragged(self.px(), self.py(), self.snap);
+            }
+        }
+    }
+}
+
+/// One selected picture: its outline, its grips and its readout.
+component StageItem inherits Rectangle {
+    in property <StageItemData> item;
+
+    callback grip-pressed(grip: int, x: float, y: float);
+    callback dragged(x: float, y: float, snap: bool);
+    callback released();
+
+    // Fractions to pixels, once.
+    property <length> cx: root.item.cx * root.width;
+    property <length> cy: root.item.cy * root.height;
+    property <length> bw: Math.max(2px, root.item.w * root.width);
+    property <length> bh: Math.max(2px, root.item.h * root.height);
+    property <angle> turn: root.item.rotation * 1deg;
+    property <float> c: Math.cos(root.turn);
+    property <float> s: Math.sin(root.turn);
+    /// How far the rotation handle stands off the top edge.
+    property <length> stem: 22px;
+    /// The half-height of the box's axis-aligned bounds: where a readout can
+    /// sit without the rotated box ever crossing it.
+    property <length> below: (root.bw * Math.abs(root.s) + root.bh * Math.abs(root.c)) / 2;
+
+    // A point in the box's own frame — `lx` across, `ly` down, both from the
+    // centre — turned clockwise and placed. The same forward map the GPU
+    // compositor applies to its quad, so a grip sits on the pixel the corner
+    // was drawn at.
+    pure function px(lx: length, ly: length) -> length {
+        return root.cx + lx * root.c - ly * root.s;
+    }
+    pure function py(lx: length, ly: length) -> length {
+        return root.cy + lx * root.s + ly * root.c;
+    }
+
+    background: transparent;
+
+    // The outline.
+    Rectangle {
+        x: root.cx - self.width / 2;
+        y: root.cy - self.height / 2;
+        width: root.bw;
+        height: root.bh;
+        transform-rotation: root.turn;
+        background: transparent;
+        border-width: 1.5px;
+        border-color: Theme.accent;
+    }
+
+    // The stem the rotation handle hangs off, from the top edge's midpoint.
+    Rectangle {
+        x: root.px(0px, -root.bh / 2 - root.stem / 2) - self.width / 2;
+        y: root.py(0px, -root.bh / 2 - root.stem / 2) - self.height / 2;
+        width: 1.5px;
+        height: root.stem;
+        transform-rotation: root.turn;
+        background: Theme.accent;
+    }
+
+    // The readout, clear of the box on whichever side is down.
+    Rectangle {
+        x: root.cx - self.width / 2;
+        y: root.cy + root.below + 8px;
+        width: readout.preferred-width + 12px;
+        height: 18px;
+        border-radius: Theme.r-sm;
+        background: Theme.accent;
+        readout := Text {
+            x: 6px;
+            width: parent.width - 12px;
+            height: parent.height;
+            text: "\{Math.round(root.item.scale * 100)}% · \{Math.round(root.item.rotation)}°";
+            color: Theme.on-accent;
+            font-family: Theme.font-technical;
+            font-size: Theme.fs-sm;
+            vertical-alignment: center;
+            horizontal-alignment: center;
+        }
+    }
+
+    // The corners, clockwise from top-left, as Rust numbers them.
+    Grip {
+        at-x: root.px(-root.bw / 2, -root.bh / 2);
+        at-y: root.py(-root.bw / 2, -root.bh / 2);
+        stage-w: root.width; stage-h: root.height;
+        cursor: MouseCursor.nwse-resize;
+        pressed(x, y) => { root.grip-pressed(0, x, y); }
+        dragged(x, y, snap) => { root.dragged(x, y, snap); }
+        released => { root.released(); }
+    }
+    Grip {
+        at-x: root.px(root.bw / 2, -root.bh / 2);
+        at-y: root.py(root.bw / 2, -root.bh / 2);
+        stage-w: root.width; stage-h: root.height;
+        cursor: MouseCursor.nesw-resize;
+        pressed(x, y) => { root.grip-pressed(1, x, y); }
+        dragged(x, y, snap) => { root.dragged(x, y, snap); }
+        released => { root.released(); }
+    }
+    Grip {
+        at-x: root.px(root.bw / 2, root.bh / 2);
+        at-y: root.py(root.bw / 2, root.bh / 2);
+        stage-w: root.width; stage-h: root.height;
+        cursor: MouseCursor.nwse-resize;
+        pressed(x, y) => { root.grip-pressed(2, x, y); }
+        dragged(x, y, snap) => { root.dragged(x, y, snap); }
+        released => { root.released(); }
+    }
+    Grip {
+        at-x: root.px(-root.bw / 2, root.bh / 2);
+        at-y: root.py(-root.bw / 2, root.bh / 2);
+        stage-w: root.width; stage-h: root.height;
+        cursor: MouseCursor.nesw-resize;
+        pressed(x, y) => { root.grip-pressed(3, x, y); }
+        dragged(x, y, snap) => { root.dragged(x, y, snap); }
+        released => { root.released(); }
+    }
+
+    // The edges' midpoints, top, right, bottom, left as Rust numbers them:
+    // a pull on one stretches that axis alone.
+    Grip {
+        at-x: root.px(0px, -root.bh / 2);
+        at-y: root.py(0px, -root.bh / 2);
+        stage-w: root.width; stage-h: root.height;
+        cursor: MouseCursor.ns-resize;
+        pressed(x, y) => { root.grip-pressed(5, x, y); }
+        dragged(x, y, snap) => { root.dragged(x, y, snap); }
+        released => { root.released(); }
+    }
+    Grip {
+        at-x: root.px(root.bw / 2, 0px);
+        at-y: root.py(root.bw / 2, 0px);
+        stage-w: root.width; stage-h: root.height;
+        cursor: MouseCursor.ew-resize;
+        pressed(x, y) => { root.grip-pressed(6, x, y); }
+        dragged(x, y, snap) => { root.dragged(x, y, snap); }
+        released => { root.released(); }
+    }
+    Grip {
+        at-x: root.px(0px, root.bh / 2);
+        at-y: root.py(0px, root.bh / 2);
+        stage-w: root.width; stage-h: root.height;
+        cursor: MouseCursor.ns-resize;
+        pressed(x, y) => { root.grip-pressed(7, x, y); }
+        dragged(x, y, snap) => { root.dragged(x, y, snap); }
+        released => { root.released(); }
+    }
+    Grip {
+        at-x: root.px(-root.bw / 2, 0px);
+        at-y: root.py(-root.bw / 2, 0px);
+        stage-w: root.width; stage-h: root.height;
+        cursor: MouseCursor.ew-resize;
+        pressed(x, y) => { root.grip-pressed(8, x, y); }
+        dragged(x, y, snap) => { root.dragged(x, y, snap); }
+        released => { root.released(); }
+    }
+
+    // The rotation handle, above the top edge.
+    Grip {
+        turn: true;
+        at-x: root.px(0px, -root.bh / 2 - root.stem);
+        at-y: root.py(0px, -root.bh / 2 - root.stem);
+        stage-w: root.width; stage-h: root.height;
+        cursor: MouseCursor.grab;
+        pressed(x, y) => { root.grip-pressed(4, x, y); }
+        dragged(x, y, snap) => { root.dragged(x, y, snap); }
+        released => { root.released(); }
+    }
+}
+
+/// One snap line, dashed by hand: Slint's Path strokes have no dash pattern,
+/// so the line is a run of short rectangles along the axis it marks. Thin and
+/// in the accent, the same as the box it is guiding.
+component Guide inherits Rectangle {
+    in property <StageGuideData> guide;
+
+    property <length> dash: 5px;
+    property <length> gap: 4px;
+    property <length> run: root.guide.vertical ? root.height : root.width;
+    property <int> count: Math.floor(root.run / (root.dash + root.gap)) + 1;
+
+    background: transparent;
+
+    for index in root.count: Rectangle {
+        x: root.guide.vertical ? root.guide.at * root.width - 0.5px
+            : index * (root.dash + root.gap);
+        y: root.guide.vertical ? index * (root.dash + root.gap)
+            : root.guide.at * root.height - 0.5px;
+        width: root.guide.vertical ? 1px : root.dash;
+        height: root.guide.vertical ? root.dash : 1px;
+        background: Theme.accent;
+    }
+}
+
+/// The layer over the stage: the floor that takes a press on a picture or on
+/// nothing, and one StageItem per selected picture above it.
+component StageOverlay inherits Rectangle {
+    in property <[StageItemData]> items;
+    in property <[StageGuideData]> guides;
+    /// The brush stroke in flight, and whether a press paints; see Editor.
+    in property <string> stroke-path;
+    in property <float> stroke-width;
+    in property <bool> stroke-erase;
+    in property <bool> painting;
+
+    callback pressed(x: float, y: float, additive: bool);
+    callback grip-pressed(id: string, grip: int, x: float, y: float);
+    callback dragged(x: float, y: float, snap: bool);
+    callback released();
+    /// A ctrl drag or a middle drag over the stage moves the view, not a
+    /// picture. The points are in the parent's frame - `x` plus `mouse-x` -
+    /// because this overlay is what the drag moves, and a delta measured
+    /// against a moving origin comes back as zero on every event after the
+    /// first.
+    callback pan-pressed(x: length, y: length);
+    callback pan-dragged(x: length, y: length);
+    callback pan-released();
+
+    background: transparent;
+
+    // The floor. Every press that no grip took lands here; Rust hit-tests
+    // it against the pictures, rotation and stacking included.
+    floor := TouchArea {
+        property <bool> live;
+        property <bool> panning;
+        property <bool> snap;
+        mouse-cursor: self.panning ? MouseCursor.grabbing
+            : root.painting ? MouseCursor.crosshair : MouseCursor.default;
+
+        pointer-event(event) => {
+            self.snap = event.modifiers.shift;
+            if (event.kind == PointerEventKind.down
+                && (event.button == PointerEventButton.middle
+                    || (event.button == PointerEventButton.left
+                        && event.modifiers.control))) {
+                self.panning = true;
+                root.pan-pressed(root.x + self.mouse-x, root.y + self.mouse-y);
+            } else if (event.kind == PointerEventKind.down
+                && event.button == PointerEventButton.left) {
+                self.live = true;
+                // Shift or cmd adds to the selection; ctrl is the view's.
+                root.pressed(self.mouse-x / root.width, self.mouse-y / root.height,
+                    event.modifiers.shift || event.modifiers.meta);
+            } else if (event.kind == PointerEventKind.up
+                || event.kind == PointerEventKind.cancel) {
+                if (self.live) {
+                    self.live = false;
+                    root.released();
+                }
+                if (self.panning) {
+                    self.panning = false;
+                    root.pan-released();
+                }
+            }
+        }
+        moved => {
+            if (self.live) {
+                root.dragged(self.mouse-x / root.width, self.mouse-y / root.height,
+                    self.snap);
+            }
+            if (self.panning) {
+                root.pan-dragged(root.x + self.mouse-x, root.y + self.mouse-y);
+            }
+        }
+    }
+
+    // The snap lines, under the boxes: a guide runs the whole frame and the
+    // grips have to stay on top of it.
+    for guide in root.guides: Guide {
+        x: 0;
+        y: 0;
+        width: root.width;
+        height: root.height;
+        guide: guide;
+    }
+
+    // The stroke being painted, over everything else: the line the pointer
+    // is drawing, translucent so the picture shows through it, in the
+    // accent for a brush and in red for a tool that takes away.
+    if root.stroke-path != "": Path {
+        x: 0;
+        y: 0;
+        width: root.width;
+        height: root.height;
+        viewbox-width: 1000;
+        viewbox-height: 1000;
+        commands: root.stroke-path;
+        stroke: root.stroke-erase ? #ff5a5a99 : Theme.accent.with-alpha(0.6);
+        stroke-width: Math.max(2px, root.stroke-width * root.width);
+        stroke-line-cap: round;
+    }
+
+    for entry in root.items: Rectangle {
+        x: 0;
+        y: 0;
+        width: root.width;
+        height: root.height;
+        if entry.selected: StageItem {
+            x: 0;
+            y: 0;
+            width: parent.width;
+            height: parent.height;
+            item: entry;
+            grip-pressed(grip, x, y) => { root.grip-pressed(entry.id, grip, x, y); }
+            dragged(x, y, snap) => { root.dragged(x, y, snap); }
+            released => { root.released(); }
+        }
+    }
+}
+
+export component PreviewPane inherits Rectangle {
+    // ── what the output is ───────────────────────────────────────────────
+    in property <int> output-width: 1920;
+    in property <int> output-height: 1080;
+    in property <float> frame-rate: 30;
+    in property <int> ratio-index;
+    in property <int> quality-index;
+
+    // ── where the playhead is ────────────────────────────────────────────
+    in property <float> playhead;
+    in property <float> duration;
+    /// The playhead may go past `duration`: the step and end buttons stay
+    /// live out there and the timecode field takes any frame.
+    in property <bool> playhead-free;
+    in property <bool> playing;
+    /// Whether anything is under the playhead, and what. "Nothing under the
+    /// playhead" is a real state a monitor has to render, not a placeholder
+    /// for one.
+    in property <bool> has-picture;
+    in property <string> clip-name;
+    /// The decoded frame. Drawn fitted to the stage when there is one.
+    in property <image> frame;
+    /// Every picture under the playhead, for the selection drawn over the
+    /// frame. See StageOverlay.
+    in property <[StageItemData]> stage-items;
+    /// The cutout brush's stroke in flight, and whether the stage paints.
+    in property <string> stroke-path;
+    in property <float> stroke-width;
+    in property <bool> stroke-erase;
+    in property <bool> painting;
+    /// The snap lines while one of them is being moved.
+    in property <[StageGuideData]> stage-guides;
+
+    callback play-toggled();
+    /// Absolute, in seconds.
+    callback seek(seconds: float);
+    /// Relative, in frames — one for an arrow, a second's worth for shift.
+    callback step(frames: float);
+    callback ratio-changed(index: int);
+    callback quality-changed(index: int);
+
+    // The stage's own gestures; see the Editor global for what each means.
+    callback stage-pressed(x: float, y: float, additive: bool);
+    callback stage-grip-pressed(id: string, grip: int, x: float, y: float);
+    callback stage-dragged(x: float, y: float, snap: bool);
+    callback stage-released();
+
+    /// The corner button: show something else in this pane's seat.
+    callback pane-picked(kind: PaneKind);
+    /// Which seat this pane is in. It travels no further than the corner
+    /// button, whose drag payload has to say where it is being taken from.
+    in property <int> pane-seat;
+    /// False when this is the last panel on screen. Travels the same way, and
+    /// only greys the one row that would close it.
+    in property <bool> pane-removable: true;
+    /// That row was used.
+    callback pane-removed();
+
+    property <[int]> ratios-w: [1920, 3840, 1080, 1080, 1440, 2560];
+    property <[int]> ratios-h: [1080, 2160, 1920, 1080, 1080, 1080];
+    property <[string]> ratio-names: ["16:9", "16:9 4K", "9:16", "1:1", "4:3", "21:9"];
+
+    property <float> aspect: root.output-height > 0
+        ? root.output-width / root.output-height : 16 / 9;
+    property <float> total-frames: Math.round(root.duration * root.frame-rate);
+    property <float> frames: Math.round(root.playhead * root.frame-rate);
+    property <bool> at-start: root.frames <= 0;
+    property <bool> at-end: !root.playhead-free && root.frames >= root.total-frames;
+
+    // The NumberField writes to its own `value`, and an assignment in Slint
+    // replaces whatever binding the parent declared — so this is seeded, not
+    // bound. Same shape as the inspector panels.
+    property <float> shown-frames;
+    function seed() { root.shown-frames = root.frames; }
+    init => { root.seed(); }
+    changed frames => { root.seed(); }
+
+    Pane {
+        PaneHeader {
+            title: I18n.t("Preview");
+
+            // The output, stated rather than implied. Tabular-ish and dim: it
+            // is a fact about the project, not a control.
+            VerticalLayout {
+                alignment: center;
+                Text {
+                    text: "\{root.output-width} × \{root.output-height} · \{Math.round(root.frame-rate)} fps";
+                    color: Theme.fg-dim;
+                    font-family: Theme.font-technical;
+                    font-size: Theme.fs;
+                    vertical-alignment: center;
+                }
+            }
+
+            VerticalLayout {
+                alignment: center;
+                PaneSwitcher {
+                    kind: PaneKind.preview;
+                    seat: root.pane-seat;
+                    removable: root.pane-removable;
+                    picked(kind) => { root.pane-picked(kind); }
+                    removed => { root.pane-removed(); }
+                }
+            }
+        }
+
+        // ── the viewport ─────────────────────────────────────────────────
+        viewport := Rectangle {
+            vertical-stretch: 1;
+            // Sunken, and darker than the header and transport either side of
+            // it. A monitor's ground should fall away from the chrome around
+            // it rather than sit level with it — the darker the surround, the
+            // less the picture has to fight to be the brightest thing in the
+            // pane.
+            background: Theme.well;
+            clip: true;
+
+            property <length> pad: 16px;
+            property <length> room-w: Math.max(1px, self.width - 2 * self.pad);
+            property <length> room-h: Math.max(1px, self.height - 2 * self.pad);
+
+            // ── the view ──
+            //
+            // Stage pixels per output pixel. Fitted, it is whatever the pane
+            // allows on the axis that runs out first, and it follows the
+            // pane; once a gesture has taken the view over, it is `zoom`
+            // and the pane's shape no longer touches it. The quality picker
+            // in the tray sets how much of the frame the engine composites,
+            // never how large it is drawn.
+            property <float> fit-scale: Math.min(
+                self.room-w / Math.max(1, root.output-width),
+                self.room-h / Math.max(1, root.output-height)) / 1px;
+            property <bool> fitted: true;
+            property <float> zoom: 1;
+            property <float> scale: self.fitted ? self.fit-scale : self.zoom;
+            /// A 4K frame under an inch, or eight device pixels to one of
+            /// the picture's: past either end there is nothing left to see.
+            property <float> min-zoom: 0.02;
+            property <float> max-zoom: 8;
+            property <length> stage-w: root.output-width * self.scale * 1px;
+            property <length> stage-h: root.output-height * self.scale * 1px;
+
+            // Where the stage's centre sits, from the viewport's. Held raw
+            // and clamped on read, so that however the pane is squeezed
+            // after the view was put somewhere, at least a corner's worth
+            // of stage stays in it to grab.
+            property <length> pan-x;
+            property <length> pan-y;
+            property <length> keep: 48px;
+            property <length> reach-x: Math.max(0px, (self.width + self.stage-w) / 2 - self.keep);
+            property <length> reach-y: Math.max(0px, (self.height + self.stage-h) / 2 - self.keep);
+            property <length> shown-x: Math.max(-self.reach-x, Math.min(self.reach-x, self.pan-x));
+            property <length> shown-y: Math.max(-self.reach-y, Math.min(self.reach-y, self.pan-y));
+
+            /// Scratch for `zoom-about`: Slint functions have no locals.
+            property <float> next;
+            /// The pan when a drag began, and where it began.
+            property <length> grab-x;
+            property <length> grab-y;
+            property <length> from-x;
+            property <length> from-y;
+
+            /// The view leaves fit mode the moment a gesture takes it, from
+            /// exactly where fit had it - nothing jumps.
+            function unfit() {
+                if (self.fitted) {
+                    self.zoom = self.fit-scale;
+                    self.pan-x = self.shown-x;
+                    self.pan-y = self.shown-y;
+                    self.fitted = false;
+                }
+            }
+            public function fit() {
+                self.fitted = true;
+                self.pan-x = 0;
+                self.pan-y = 0;
+            }
+            /// Scales the view by `factor`, keeping the output point under
+            /// the viewport point (`px`, `py`) where it is.
+            public function zoom-about(factor: float, px: length, py: length) {
+                self.unfit();
+                self.next = Math.max(self.min-zoom, Math.min(self.max-zoom, self.zoom * factor));
+                self.pan-x = px - self.width / 2
+                    - (px - self.width / 2 - self.shown-x) * (self.next / self.zoom);
+                self.pan-y = py - self.height / 2
+                    - (py - self.height / 2 - self.shown-y) * (self.next / self.zoom);
+                self.zoom = self.next;
+            }
+            /// To an exact scale, about the viewport's centre.
+            public function zoom-to(scale: float) {
+                self.zoom-about(scale / self.scale, self.width / 2, self.height / 2);
+            }
+            public function pan-by(dx: length, dy: length) {
+                self.unfit();
+                self.pan-x = self.shown-x + dx;
+                self.pan-y = self.shown-y + dy;
+            }
+            public function grab(x: length, y: length) {
+                self.unfit();
+                self.grab-x = self.shown-x;
+                self.grab-y = self.shown-y;
+                self.from-x = x;
+                self.from-y = y;
+            }
+            public function drag-to(x: length, y: length) {
+                self.pan-x = self.grab-x + (x - self.from-x);
+                self.pan-y = self.grab-y + (y - self.from-y);
+            }
+
+            // Ancestor of the stage and its overlay, so a wheel they do not
+            // handle reaches it, and a press on the well - the one place
+            // the overlay does not cover - is a drag of the view.
+            view := TouchArea {
+                property <bool> panning;
+                mouse-cursor: self.panning ? MouseCursor.grabbing : MouseCursor.default;
+
+                scroll-event(event) => {
+                    if (event.modifiers.control || event.modifiers.meta) {
+                        // The same gesture the lanes take, at the same
+                        // rate: proportional to the distance, clamped so
+                        // one enormous delta cannot jump octaves. Up is in.
+                        viewport.zoom-about(
+                            Math.max(0.5, Math.min(2.0, Math.pow(1.0025, event.delta-y / 1px))),
+                            self.mouse-x, self.mouse-y);
+                        return EventResult.accept;
+                    }
+                    // Both axes pan. A wheel with no horizontal axis of its
+                    // own pans sideways with shift, as it does everywhere.
+                    if (event.modifiers.shift && event.delta-x == 0px) {
+                        viewport.pan-by(event.delta-y, 0px);
+                    } else {
+                        viewport.pan-by(event.delta-x, event.delta-y);
+                    }
+                    return EventResult.accept;
+                }
+                pointer-event(event) => {
+                    if (event.kind == PointerEventKind.down
+                        && (event.button == PointerEventButton.left
+                            || event.button == PointerEventButton.middle)) {
+                        self.panning = true;
+                        viewport.grab(self.mouse-x, self.mouse-y);
+                    } else if (event.kind == PointerEventKind.up
+                        || event.kind == PointerEventKind.cancel) {
+                        self.panning = false;
+                    }
+                }
+                moved => {
+                    if (self.panning) {
+                        viewport.drag-to(self.mouse-x, self.mouse-y);
+                    }
+                }
+                double-clicked => { viewport.fit(); }
+
+            stage := Rectangle {
+                x: (parent.width - self.width) / 2 + viewport.shown-x;
+                y: (parent.height - self.height) / 2 + viewport.shown-y;
+                width: viewport.stage-w;
+                height: viewport.stage-h;
+                background: Theme.stage;
+                // A 1px ring lifts the stage off the well. Slint has no
+                // box-shadow, so the ring does the work alone — which is why
+                // it is `line-strong` and not the hairline every other edge
+                // uses.
+                border-width: 1px;
+                border-color: Theme.line-strong;
+                clip: true;
+
+                // Where a decoded frame will be drawn. Until then the stage
+                // reports what is actually under the playhead.
+                if !root.has-picture: VerticalLayout {
+                    alignment: center;
+                    spacing: 10px;
+
+                    HorizontalLayout {
+                        alignment: center;
+                        Icon {
+                            glyph: Glyph.film;
+                            size: 22px;
+                            tint: Theme.fg-dim;
+                        }
+                    }
+
+                    Text {
+                        text: I18n.t("Nothing under the playhead");
+                        color: Theme.fg-dim;
+                        font-size: Theme.fs;
+                        horizontal-alignment: center;
+                    }
+                }
+
+                // The engine's frame, when one has arrived. It is already
+                // the stage's shape, so `contain` only absorbs a rounding
+                // pixel either way.
+                if root.has-picture && root.frame.width > 0: Image {
+                    x: 0;
+                    y: 0;
+                    width: parent.width;
+                    height: parent.height;
+                    source: root.frame;
+                    image-fit: contain;
+                }
+            }
+
+            // The selection, over the stage and the same size as it. A
+            // sibling rather than a child because the stage clips, and a grip
+            // sits half outside the edge it belongs to.
+            StageOverlay {
+                x: stage.x;
+                y: stage.y;
+                width: stage.width;
+                height: stage.height;
+                items: root.stage-items;
+                guides: root.stage-guides;
+                stroke-path: root.stroke-path;
+                stroke-width: root.stroke-width;
+                stroke-erase: root.stroke-erase;
+                painting: root.painting;
+                pressed(x, y, additive) => { root.stage-pressed(x, y, additive); }
+                grip-pressed(id, grip, x, y) => { root.stage-grip-pressed(id, grip, x, y); }
+                dragged(x, y, snap) => { root.stage-dragged(x, y, snap); }
+                released => { root.stage-released(); }
+                pan-pressed(x, y) => { viewport.grab(x, y); }
+                pan-dragged(x, y) => { viewport.drag-to(x, y); }
+                pan-released => { }
+            }
+            }
+        }
+
+        // ── the transport ────────────────────────────────────────────────
+        Rectangle {
+            height: 46px;
+            background: Theme.panel;
+
+            Rectangle {
+                x: 0;
+                y: 0;
+                width: parent.width;
+                height: 1px;
+                background: Theme.line;
+            }
+
+            HorizontalLayout {
+                padding-left: 10px;
+                padding-right: 10px;
+                spacing: 12px;
+
+                // Leading: where the playhead is, and how far it has to go.
+                HorizontalLayout {
+                    horizontal-stretch: 1;
+                    spacing: 8px;
+                    alignment: start;
+
+                    VerticalLayout {
+                        alignment: center;
+                        NumberField {
+                            width: 116px;
+                            value <=> root.shown-frames;
+                            minimum: 0;
+                            maximum: root.playhead-free ? 1000000000 : root.total-frames;
+                            step: 1;
+                            // Scrubbing a timecode should walk frames at the
+                            // speed a hand expects, not fly a hundred at once.
+                            px-per-step: 3px;
+                            format(v) => {
+                                return Fmt.frames-timecode(v / root.frame-rate,
+                                    root.frame-rate);
+                            }
+                            parse(text) => {
+                                return Fmt.parse-frames(text, root.frame-rate);
+                            }
+                            changed(v) => { root.seek(v / root.frame-rate); }
+                        }
+                    }
+
+                    Text {
+                        text: "/ " + Fmt.frames-timecode(root.duration, root.frame-rate);
+                        color: Theme.fg-dim;
+                        font-family: Theme.font-technical;
+                        font-size: Theme.fs;
+                        vertical-alignment: center;
+                    }
+                }
+
+                // Centre: the transport itself.
+                HorizontalLayout {
+                    horizontal-stretch: 0;
+                    spacing: 2px;
+                    alignment: center;
+
+                    IconButton {
+                        glyph: Glyph.skip-back;
+                        label: I18n.t("Go to start");
+                        enabled: !root.at-start;
+                        clicked => { root.seek(0); }
+                    }
+                    IconButton {
+                        glyph: Glyph.step-back;
+                        label: I18n.t("Previous frame");
+                        enabled: !root.at-start;
+                        clicked => { root.step(-1); }
+                    }
+
+                    // The one control you reach for without looking, so it is
+                    // the one control that carries a colour.
+                    IconButton {
+                        glyph: root.playing ? Glyph.pause : Glyph.play;
+                        label: root.playing ? I18n.t("Pause") : I18n.t("Play");
+                        icon-size: 16px;
+                        accent: true;
+                        clicked => { root.play-toggled(); }
+                    }
+
+                    IconButton {
+                        glyph: Glyph.step-forward;
+                        label: I18n.t("Next frame");
+                        enabled: !root.at-end;
+                        clicked => { root.step(1); }
+                    }
+                    IconButton {
+                        glyph: Glyph.skip-forward;
+                        label: I18n.t("Go to end");
+                        enabled: !root.at-end;
+                        clicked => { root.seek(root.duration); }
+                    }
+                }
+
+                // Trailing: what the output is and how close we are looking.
+                HorizontalLayout {
+                    horizontal-stretch: 1;
+                    spacing: 6px;
+                    alignment: end;
+
+                    VerticalLayout {
+                        alignment: center;
+                        RatioPicker {
+                            widths: root.ratios-w;
+                            heights: root.ratios-h;
+                            names: root.ratio-names;
+                            current: root.ratio-index;
+                            changed(index) => { root.ratio-changed(index); }
+                        }
+                    }
+
+                    // What fraction of the frame the engine composites for the
+                    // monitor, and the reason a 4K timeline stays scrubbable
+                    // on a laptop.
+                    VerticalLayout {
+                        alignment: center;
+                        Select {
+                            snug: true;
+                            width: self.natural-width;
+                            current: root.quality-index;
+                            options: [I18n.t("Full"), I18n.t("Half"), I18n.t("Quarter")];
+                            details: ["1:1", "1:2", "1:4"];
+                            changed(index) => { root.quality-changed(index); }
+                        }
+                    }
+
+                    // The one control the view needs: the way back. The
+                    // zoom itself is the wheel's, and a readout of it was
+                    // width spent on a number nobody steers by.
+                    VerticalLayout {
+                        alignment: center;
+                        IconButton {
+                            glyph: Glyph.fit;
+                            label: I18n.t("Fit the frame to the pane");
+                            enabled: !viewport.fitted;
+                            clicked => { viewport.fit(); }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

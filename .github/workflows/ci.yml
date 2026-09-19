@@ -1,8 +1,7 @@
 name: CI
 
-# The engine's tests and lints on every push and pull request. A green run
-# on main is what nightly.yml waits for before it builds the app for every
-# platform; see that file and release.yml for the bundles.
+# The engine's tests and lints on every push and pull request. The bundles
+# are built by release.yml, on a tag; see that file.
 on:
   push:
     branches: [main]
@@ -19,6 +18,8 @@ jobs:
     runs-on: ubuntu-latest
     env:
       FFMPEG_LINUX: https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n8.1-latest-linux64-gpl-shared-8.1.tar.xz
+      # See build-app.yml: the version the ort crate is built against.
+      ORT_VERSION: 1.28.0
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -26,7 +27,7 @@ jobs:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: engine
+          workspaces: src
 
       # Slint's Skia renderer links fontconfig and freetype; cpal links
       # ALSA; bindgen needs libclang; whisper.cpp is built by cmake; the
@@ -47,27 +48,57 @@ jobs:
           mkdir -p ffmpeg-dev
           tar -xf ffmpeg.tar.xz -C ffmpeg-dev --strip-components=1
           echo "FFMPEG_DIR=$PWD/ffmpeg-dev" >> "$GITHUB_ENV"
-          echo "LD_LIBRARY_PATH=$PWD/ffmpeg-dev/lib" >> "$GITHUB_ENV"
+
+      # ONNX Runtime as a shared library, linked dynamically, for the reason
+      # build-app.yml gives: a static one beside sherpa-onnx's is the same
+      # protobuf twice, and the test binary does not link. The tests then
+      # find it through LD_LIBRARY_PATH, as they find FFmpeg.
+      - name: ONNX Runtime
+        run: |
+          set -euo pipefail
+          stem="onnxruntime-linux-x64-$ORT_VERSION"
+          curl -fsSL --retry 5 --retry-all-errors -o onnxruntime.tgz \
+            "https://github.com/microsoft/onnxruntime/releases/download/v$ORT_VERSION/$stem.tgz"
+          tar -xzf onnxruntime.tgz
+          ln -sf "libonnxruntime.so.$ORT_VERSION" "$stem/lib/libonnxruntime.so"
+          {
+            echo "ORT_LIB_LOCATION=$PWD/$stem/lib"
+            echo "ORT_PREFER_DYNAMIC_LINK=1"
+            echo "LD_LIBRARY_PATH=$PWD/ffmpeg-dev/lib:$PWD/$stem/lib"
+          } >> "$GITHUB_ENV"
 
       - run: cargo fmt --check
-        working-directory: engine
+        working-directory: src
       # Every string the interface shows is a key in a locale file; this
       # keeps en.json the inventory of them and every shipped language
       # keyed off it. See TRANSLATING.md.
       - run: python3 scripts/locales.py --check
+      # The models Concat downloads are mirrored onto a release of this
+      # repository; models/manifest.toml is what fills that mirror and the
+      # engine's tables are what a download is checked against. This keeps
+      # the two saying the same thing. See models/manifest.toml.
+      - run: python3 scripts/models.py --check
       # -D warnings covers rustc lints too (missing_docs among them), so a
       # public item without documentation fails here, not in review. Lints
       # before tests: they finish in a fraction of the time and catch the
       # most.
       - run: cargo clippy --workspace --all-targets -- -D warnings
-        working-directory: engine
-      - run: cargo test --workspace
-        working-directory: engine
+        working-directory: src
+      - run: cargo test --workspace -j 1
+        working-directory: src
+        env:
+          CARGO_PROFILE_DEV_DEBUG: "0"
+      # The gRPC transport is a feature nothing else in the workspace turns
+      # on, so it is linted and tested here on its own. See concat-server.
+      - run: cargo clippy -p concat-server -p concat-cli --features grpc --all-targets -- -D warnings
+        working-directory: src
+      - run: cargo test -p concat-server --features grpc
+        working-directory: src
 
   # The engine crates that carry no native library build for the web. This
   # job is what keeps that true: a std::thread or a blocking wait that
   # creeps into concat-core or concat-project fails here, not when someone
-  # next tries the target. See engine/README.md for the list.
+  # next tries the target. See src/README.md for the list.
   web:
     name: Engine on wasm32
     runs-on: ubuntu-latest
@@ -79,11 +110,11 @@ jobs:
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: engine
+          workspaces: src
           key: wasm32
       - run: >
           cargo clippy
           -p concat-core -p concat-project -p concat-effects -p concat-render -p concat-text
           --features concat-render/gpu --target wasm32-unknown-unknown
           -- -D warnings
-        working-directory: engine
+        working-directory: src

@@ -18,12 +18,13 @@ on Windows and in CI. FFmpeg source code: https://ffmpeg.org/download.html
 
 Transcription compiles whisper.cpp (https://github.com/ggml-org/whisper.cpp,
 MIT) and ggml into the app through the `whisper-rs` crate. Whisper models
-are downloaded on demand from https://huggingface.co/ggerganov/whisper.cpp
-(MIT) and never bundled.
+originate at https://huggingface.co/ggerganov/whisper.cpp (MIT); Concat
+mirrors them and downloads them on demand from that mirror, and never
+bundles them. See "The model mirror" below.
 
 ## Slint — used under GPL-3.0-only
 
-The `concat` crate (`engine/crates/concat`) builds against
+The `concat` crate (`src/crates/concat`) builds against
 [Slint](https://github.com/slint-ui/slint), which its authors offer under
 **any one** of three licences, at the user's choice: a Royalty-free licence, a
 paid commercial licence, or **GNU GPL-3.0-only**.
@@ -49,26 +50,26 @@ two licences and remove or replace Concat's AGPL-licensed code accordingly;
 the two cannot be mixed.
 
 Slint pulls in the renderer selected by the feature flags in
-`engine/crates/concat/Cargo.toml` — Skia by default, FemtoVG over wgpu under
+`src/crates/concat/Cargo.toml` — Skia by default, FemtoVG over wgpu under
 `--features wgpu` — along with winit and their transitive crates, which are
 predominantly MIT/Apache-2.0/BSD licensed. `cargo tree -p concat` gives the
 resolved set of any given build.
 
 ## Fonts
 
-The window embeds its fonts into the binary
-(`engine/crates/concat/build.rs`, `EmbedResourcesKind::EmbedFiles`), so a
-distributed binary carries them and their licences travel with it. Full texts
-are in `engine/crates/concat/ui/fonts/`.
+The window and the title painter embed the interface's font into the binary
+(`src/crates/concat/build.rs`, `EmbedResourcesKind::EmbedFiles`, and
+`include_bytes!` in `concat-text`), so a distributed binary carries it and its
+licence travels with it. The files and the full licence text are in
+`src/crates/concat-text/fonts/`.
 
-- **Inter** — SIL Open Font License 1.1. Copyright (c) 2016 The Inter Project
-  Authors, https://github.com/rsms/inter. See `ui/fonts/LICENSE.txt`.
-- **Synonym** — ITF Free Font License 2.0, Indian Type Foundry, distributed
-  via https://www.fontshare.com. See `ui/fonts/LICENSE-Synonym.txt`.
+- **Hanken Grotesk** — Copyright 2021 The Hanken Grotesk Project Authors
+  (https://github.com/marcologous/hanken-grotesk), SIL Open Font License
+  1.1. The Regular, Medium, SemiBold, Bold and Italic static instances are
+  embedded. See `fonts/LICENSE-HankenGrotesk.txt`.
 
-Neither licence permits selling the fonts on their own, and the OFL requires
-that Inter's copyright notice and licence travel with any redistribution. Both
-are satisfied by shipping the `fonts/` directory as it stands.
+The licence does not permit selling the font on its own; shipping the
+`fonts/` directory as it stands satisfies it.
 
 ## sherpa-onnx and Kokoro voices
 
@@ -83,19 +84,70 @@ and AGPL-3.0 expressly permits that combination, so the combined binary may be
 conveyed on those terms.
 
 Kokoro voice model bundles (Apache-2.0,
-https://huggingface.co/hexgrad/Kokoro-82M) are downloaded on demand from the
-sherpa-onnx releases - including espeak-ng's data files - and are never
-bundled with the app.
+https://huggingface.co/hexgrad/Kokoro-82M) originate in the sherpa-onnx
+releases - including espeak-ng's data files. Concat mirrors those bundles
+and downloads them on demand from that mirror, and never bundles them with
+the app. See "The model mirror" below.
 
-## The cutout model
+## ONNX Runtime
 
-Remove background's automatic and custom modes run Google's MediaPipe
-Selfie Segmentation model (Apache-2.0), in the ONNX conversion published by
-the ONNX Community (https://huggingface.co/onnx-community/mediapipe_selfie_segmentation,
-Apache-2.0). The model file is compiled into the `concat-vision` crate; see
-`engine/crates/concat-vision/models/NOTICE.md`. It is run by tract
-(https://github.com/sonos/tract, MIT OR Apache-2.0), in pure Rust, so no
-inference runtime is linked or shipped for it.
+The cutout models run on Microsoft's ONNX Runtime
+(https://github.com/microsoft/onnxruntime, MIT), through the `ort` crate
+(https://github.com/pykeio/ort, MIT or Apache-2.0). On macOS, Windows and
+the phones it is linked into the app from pyke's builds of it; the Linux
+bundles ship Microsoft's own shared build of the same version beside the
+binary, in `lib/`, and its licence is in the release it was taken from
+(https://github.com/microsoft/onnxruntime/releases).
+
+## The cutout models
+
+Remove background runs three models, none of which ship inside the app
+except the first:
+
+- Google's MediaPipe Selfie Segmentation (Apache-2.0), in the ONNX
+  conversion published by the ONNX Community
+  (https://huggingface.co/onnx-community/mediapipe_selfie_segmentation,
+  Apache-2.0), compiled into the `concat-vision` crate; see
+  `src/crates/concat-vision/models/NOTICE.md`. The answer when nothing
+  has been downloaded.
+- Robust Video Matting, the MobileNetV3 variant, by Peter Lin and others
+  (https://github.com/PeterL1n/RobustVideoMatting, GPL-3.0), from that
+  repository's releases, downloaded on first use. The person model.
+- IS-Net from "Highly Accurate Dichotomous Image Segmentation" by Qin and
+  others (https://github.com/xuebinqin/DIS, Apache-2.0), in the ONNX
+  export the rembg project publishes
+  (https://github.com/danielgatis/rembg, MIT), downloaded on first use.
+  The object model.
+- SlimSAM (https://github.com/czg1225/SlimSAM, Apache-2.0), in the ONNX
+  export published at https://huggingface.co/Xenova/slimsam-77-uniform
+  (Apache-2.0), downloaded on first use. The brushes' model.
+
+Downloaded models live in the app's data directory under `cutout-models`
+and are never bundled; the three that are downloaded come from Concat's own
+mirror of the sources named above, described below. They are all run by
+ONNX Runtime
+(https://github.com/microsoft/onnxruntime, MIT) through the `ort` crate
+(https://github.com/pykeio/ort, MIT OR Apache-2.0), with the platform's
+own accelerator behind it: CoreML on macOS and iOS, DirectML on Windows,
+NNAPI on Android. The runtime is linked statically from the builds pyke
+publishes for each target.
+
+## The model mirror
+
+Every model named above is mirrored onto a release of Concat's own
+repository, and the app fetches it from there; the upstream each was
+obtained from is the fallback and is named above in every case. The table of
+what is mirrored, and the digest each download is checked against, is
+`models/manifest.toml`; `.github/workflows/models.yml` is what fills the
+mirror.
+
+Mirroring is redistribution, and each model keeps the licence it arrived
+under - Apache-2.0 for the Kokoro bundles, SlimSAM and IS-Net, MIT for the
+whisper conversions, GPL-3.0 for Robust Video Matting. Those terms are met
+by the attributions above and by the licence files each mirrored archive
+carries; a mirrored file is a verbatim copy, never a modification. Nothing
+in the mirror is bundled with the app, and Concat claims no rights over any
+of it.
 
 ## Effect preview photograph
 
@@ -104,4 +156,4 @@ Vitaly Gariev on Unsplash (https://unsplash.com/@silverkblack), used
 under the Unsplash License. The source still lives at
 `assets/effect-preview-source.jpg`; the tiles are each effect's real FFmpeg
 chain (`concat-export`'s `chains.rs`) run over it, and are embedded from
-`engine/crates/concat/ui/assets/effect-previews/`.
+`src/crates/concat/ui/assets/effect-previews/`.
