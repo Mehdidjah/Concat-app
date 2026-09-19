@@ -28,6 +28,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src
+          cache-on-failure: true
 
       # Slint's Skia renderer links fontconfig and freetype; cpal links
       # ALSA; bindgen needs libclang; whisper.cpp is built by cmake; the
