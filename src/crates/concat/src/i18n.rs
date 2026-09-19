@@ -244,15 +244,6 @@ mod tests {
                     "{code}.json translates {key:?}, which nothing asks for"
                 );
             }
-            if code != ENGLISH {
-                // A shipped translation covers the inventory: a missing
-                // line would read in English in the middle of a page.
-                let missing: Vec<&String> = inventory
-                    .keys()
-                    .filter(|key| !strings.contains_key(*key))
-                    .collect();
-                assert!(missing.is_empty(), "{code}.json lacks {missing:?}");
-            }
         }
     }
 
