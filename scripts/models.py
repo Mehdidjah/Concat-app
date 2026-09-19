@@ -24,7 +24,7 @@ import urllib.request
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 MANIFEST = ROOT / "models" / "manifest.toml"
-CRATES = ROOT / "engine" / "crates"
+CRATES = ROOT / "src" / "crates"
 
 # The repository the mirror lives on, and the engine constant that must
 # agree with this file about which release holds it.
@@ -38,22 +38,38 @@ TABLES = {
     "whisper": CRATES / "concat-speech" / "src" / "transcribe.rs",
 }
 
-# The eight bundles a release publishes, as build-app.yml and mobile.yml
-# name them. Stem is formatted with the version.
+# The bundles a release publishes, as build-app.yml and mobile.yml name
+# them: platform, architecture, the kind of file, and its name with the
+# version to fill in. Installers and binaries, never an archive of a
+# folder - a person downloads the thing they run.
 BUNDLES = [
-    ("macos", "arm64", "Concat-{v}-macos-arm64.dmg"),
-    ("macos", "x86_64", "Concat-{v}-macos-x86_64.dmg"),
-    ("linux", "x86_64", "Concat-{v}-linux-x86_64.tar.gz"),
-    ("linux", "aarch64", "Concat-{v}-linux-aarch64.tar.gz"),
-    ("windows", "x86_64", "Concat-{v}-windows-x86_64.zip"),
-    ("windows", "aarch64", "Concat-{v}-windows-aarch64.zip"),
-    ("android", "arm64", "Concat-{v}-android-arm64.apk"),
-    ("ios", "arm64", "Concat-{v}-ios-arm64.ipa"),
+    ("macos", "arm64", "dmg", "Concat-{v}-macos-arm64.dmg"),
+    ("macos", "x86_64", "dmg", "Concat-{v}-macos-x86_64.dmg"),
+    ("linux", "x86_64", "deb", "Concat-{v}-linux-x86_64.deb"),
+    ("linux", "x86_64", "rpm", "Concat-{v}-linux-x86_64.rpm"),
+    ("linux", "x86_64", "appimage", "Concat-{v}-linux-x86_64.AppImage"),
+    ("linux", "aarch64", "deb", "Concat-{v}-linux-aarch64.deb"),
+    ("linux", "aarch64", "rpm", "Concat-{v}-linux-aarch64.rpm"),
+    ("linux", "aarch64", "appimage", "Concat-{v}-linux-aarch64.AppImage"),
+    ("windows", "x86_64", "setup", "Concat-{v}-windows-x86_64-setup.exe"),
+    ("windows", "x86_64", "msi", "Concat-{v}-windows-x86_64.msi"),
+    ("windows", "aarch64", "setup", "Concat-{v}-windows-aarch64-setup.exe"),
+    ("windows", "aarch64", "msi", "Concat-{v}-windows-aarch64.msi"),
+    ("android", "arm64", "apk", "Concat-{v}-android-arm64.apk"),
+    ("ios", "arm64", "ipa", "Concat-{v}-ios-arm64.ipa"),
 ]
 
 
 def table() -> dict:
     return tomllib.loads(MANIFEST.read_text(encoding="utf-8"))
+
+
+def hf_mirror(url: str) -> str | None:
+    """`url` through hf-mirror.com, for a Hugging Face URL; None otherwise."""
+    for host in ("https://huggingface.co/", "https://hf.co/"):
+        if url.startswith(host):
+            return "https://hf-mirror.com/" + url[len(host):]
+    return None
 
 
 def asset_url(release: str, file: str) -> str:
@@ -269,8 +285,10 @@ def release_manifest(version: str, tag: str, bundles: pathlib.Path | None) -> di
     data = table()
     release = data["release"]
 
+    # platform -> architecture -> kind -> the file, so a reader asks for
+    # the one it installs with: binaries.linux.x86_64.deb.
     binaries: dict[str, dict] = {}
-    for platform, arch, stem in BUNDLES:
+    for platform, arch, kind, stem in BUNDLES:
         file = stem.format(v=version)
         entry = {
             "file": file,
@@ -285,7 +303,7 @@ def release_manifest(version: str, tag: str, bundles: pathlib.Path | None) -> di
                 # A target that did not build is absent rather than a row
                 # promising a file that is not there.
                 continue
-        binaries.setdefault(platform, {})[arch] = entry
+        binaries.setdefault(platform, {}).setdefault(arch, {})[kind] = entry
 
     models = {}
     for model in data["model"]:
@@ -297,10 +315,23 @@ def release_manifest(version: str, tag: str, bundles: pathlib.Path | None) -> di
             "licence": model["licence"],
             "url": asset_url(release, model["file"]),
             "upstream": model["upstream"],
+            # Every place the file can be fetched from, best first: the
+            # app's own order, for anything that reads this instead of the
+            # app. hf-mirror.com carries whatever Hugging Face does.
+            "sources": [
+                url
+                for url in [
+                    asset_url(release, model["file"]),
+                    model["upstream"],
+                    hf_mirror(model["upstream"]),
+                ]
+                if url
+            ],
         }
 
     return {
-        "schema": 1,
+        # 2: a target holds one row per kind of file, not one file.
+        "schema": 2,
         "product": "Concat",
         "version": version,
         "tag": tag,

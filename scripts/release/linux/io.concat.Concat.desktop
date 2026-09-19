@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Concat
+Comment=Free, open-source desktop video editor
+Exec=concat
+Icon=io.concat.Concat
+Categories=AudioVideo;AudioVideoEditing;
+Terminal=false

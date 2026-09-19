@@ -1,0 +1,18 @@
+# This Vercel project deploys the app in website/. Keep unrelated workspace
+# projects and local build artifacts out of the upload.
+.codex/
+assets/
+desktop/
+dist/
+engine/
+script/
+scripts/
+test/
+
+# Website dependencies, caches, and generated output.
+website/node_modules/
+website/.next/
+website/.vercel/
+website/.vinext/
+website/.wrangler/
+website/dist/
