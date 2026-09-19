@@ -446,13 +446,18 @@ mod tests {
         // A full-scale spike is a column whose bar reaches the top.
         let fine = wave_path(&peaks, 0.0, 1.0, 1000, WAVE_BAR);
         assert_eq!(
-            fine.matches(" 0.0000 L").count(),
+            fine.split(" Z ")
+                .filter(|bar| bar.contains(" 0.0000 L"))
+                .count(),
             1,
             "one column carries the spike: {fine}"
         );
         let coarse = wave_path(&peaks, 0.0, 1.0, 10, WAVE_BAR);
         assert_eq!(
-            coarse.matches(" 0.0000 L").count(),
+            coarse
+                .split(" Z ")
+                .filter(|bar| bar.contains(" 0.0000 L"))
+                .count(),
             1,
             "the spike survives the fold, in one column"
         );
