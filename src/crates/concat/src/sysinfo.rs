@@ -74,7 +74,10 @@ pub fn system_facts() -> Vec<(String, String)> {
     vec![
         (
             t("Application"),
-            format!("Concat {}", env!("CARGO_PKG_VERSION")),
+            format!(
+                "Concat {}",
+                env!("CONCAT_RELEASE_VERSION").trim_start_matches('v')
+            ),
         ),
         (
             t("Build"),

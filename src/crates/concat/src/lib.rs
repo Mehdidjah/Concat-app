@@ -47,6 +47,7 @@ mod prefs;
 mod presets;
 mod studio;
 mod sysinfo;
+mod updates;
 
 use dock::{Dock, SEAT_MIN_GRAB, SEAT_MIN_H, SEAT_MIN_W};
 use host::{Host, Shell, on_ui};
@@ -1035,6 +1036,24 @@ pub fn run() -> Result<(), slint::PlatformError> {
     app.on_settings_page_changed(on_window!(|state, index: i32| {
         state.handle(Msg::Settings(SettingsMsg::PageChanged(index)));
     }));
+    app.on_updates_check(on_window!(|state| {
+        state.check_updates(true);
+    }));
+    app.on_updates_automatic_changed(on_window!(|state, on: bool| {
+        state.set_automatic_updates(on);
+    }));
+    app.on_updates_view(on_window!(|state| {
+        state.show_update();
+    }));
+    app.on_updates_dismiss(on_window!(|state| {
+        state.dismiss_update(false);
+    }));
+    app.on_updates_skip(on_window!(|state| {
+        state.dismiss_update(true);
+    }));
+    app.on_updates_download(on_window!(|state| {
+        state.open_update();
+    }));
     app.on_settings_show_log(on_window!(|state| {
         state.handle(Msg::Settings(SettingsMsg::ShowLog));
     }));
@@ -1368,6 +1387,19 @@ pub fn run() -> Result<(), slint::PlatformError> {
         shell.studio.borrow().publish(&app, &shell.models);
     }
 
+    // Starts only after the shell is installed. Neither networking nor a
+    // release dialog delays the first frame. Keep checking in long sessions.
+    let update_timer = slint::Timer::default();
+    update_timer.start(
+        slint::TimerMode::Repeated,
+        std::time::Duration::from_secs(60),
+        || {
+            on_ui(|studio, _, _| studio.check_updates(false));
+        },
+    );
+    slint::Timer::single_shot(std::time::Duration::from_secs(5), || {
+        on_ui(|studio, _, _| studio.check_updates(false));
+    });
     let result = app.run();
     log::info!("close: event loop exited (ok={})", result.is_ok());
     std::process::exit(0);

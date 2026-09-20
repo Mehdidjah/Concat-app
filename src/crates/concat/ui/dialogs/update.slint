@@ -1,0 +1,163 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-FileCopyrightText: 2026 Jareer and Concat contributors
+
+import { I18n } from "../i18n.slint";
+import { Theme } from "../theme/theme.slint";
+import { Glyph } from "../icons.slint";
+import { Button, CopyChip, Modal } from "../primitives/modal.slint";
+import { ThinScrollbar } from "../primitives/scrollbar.slint";
+
+export struct UpdateData {
+    open: bool,
+    checking: bool,
+    automatic: bool,
+    version: string,
+    current-version: string,
+    notes: string,
+    status: string,
+    source: string,
+    url: string,
+}
+
+// A release announcement, not an installer. Release notes remain plain text:
+// no HTML, embedded content, or executable links from a remote response.
+export component UpdateDialog inherits Modal {
+    in property <UpdateData> data;
+
+    callback skipped();
+    callback download();
+
+    open: root.data.open;
+    title: I18n.t("New version available");
+    glyph: Glyph.import;
+    surface-width: Math.min(560px, Math.max(0px, root.width - 24px));
+    surface-height: Math.min(500px, Math.max(0px, root.height - 24px));
+
+    VerticalLayout {
+        padding: 14px;
+        spacing: 10px;
+
+        // All descriptive text scrolls as one body. Only the three actions
+        // have a fixed height, so translated paragraphs cannot push them
+        // below the bottom of a short landscape phone window.
+        Rectangle {
+            vertical-stretch: 1;
+            min-height: 24px;
+            clip: true;
+
+            details := Flickable {
+                width: parent.width - 12px;
+                viewport-width: self.width;
+                viewport-height: Math.max(self.height, content.preferred-height);
+
+                content := VerticalLayout {
+                    width: details.width;
+                    height: self.preferred-height;
+                    spacing: 10px;
+
+                    Text {
+                        text: I18n.t1("Concat {0}", root.data.version);
+                        color: Theme.fg;
+                        font-size: Theme.fs-lg;
+                        font-weight: Theme.weight-title;
+                        wrap: word-wrap;
+                    }
+
+                    Text {
+                        text: I18n.t1("Installed version: {0}", root.data.current-version);
+                        color: Theme.fg-muted;
+                        font-size: Theme.fs;
+                        wrap: word-wrap;
+                    }
+
+                    Text {
+                        text: I18n.t("Save your work before updating. Download and install the update from the release page or your app store.");
+                        color: Theme.fg-muted;
+                        font-size: Theme.fs-sm;
+                        wrap: word-wrap;
+                    }
+
+                    // Browser handoff is not available in every mobile
+                    // installation. This address is the validated release URL.
+                    HorizontalLayout {
+                        spacing: 8px;
+
+                        Text {
+                            horizontal-stretch: 1;
+                            text: root.data.url;
+                            color: Theme.fg-muted;
+                            font-size: Theme.fs-sm;
+                            vertical-alignment: center;
+                            overflow: elide;
+                        }
+
+                        CopyChip { text: root.data.url; }
+                    }
+
+                    Rectangle { height: 1px; background: Theme.line; }
+
+                    Text {
+                        text: root.data.notes;
+                        color: Theme.fg;
+                        font-size: Theme.fs;
+                        wrap: word-wrap;
+                    }
+                }
+            }
+
+            ThinScrollbar {
+                x: parent.width - self.width - 1px;
+                viewport: details.height;
+                content: details.viewport-height;
+                offset: -details.viewport-y;
+                scrolled(to) => { details.viewport-y = -to; }
+            }
+        }
+
+        Button {
+            label: I18n.t("View release");
+            glyph: Glyph.export;
+            primary: true;
+            block: true;
+            large: true;
+            enabled: root.data.url != "";
+            clicked => { root.download(); }
+        }
+
+        if root.surface-width >= 440px: HorizontalLayout {
+            spacing: 8px;
+
+            Button {
+                label: I18n.t("Later");
+                block: true;
+                clicked => { root.closed(); }
+            }
+
+            Button {
+                label: I18n.t("Skip this version");
+                block: true;
+                ghost: true;
+                clicked => { root.skipped(); }
+            }
+        }
+
+        // Full-width secondary actions leave room for translated labels on
+        // a phone, where two side-by-side buttons would truncate them.
+        if root.surface-width < 440px: VerticalLayout {
+            spacing: 6px;
+
+            Button {
+                label: I18n.t("Later");
+                block: true;
+                clicked => { root.closed(); }
+            }
+
+            Button {
+                label: I18n.t("Skip this version");
+                block: true;
+                ghost: true;
+                clicked => { root.skipped(); }
+            }
+        }
+    }
+}

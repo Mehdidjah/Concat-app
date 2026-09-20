@@ -20,9 +20,10 @@ import { Theme } from "theme/theme.slint";
 import { Bezier, Curves, Fmt, Focus, Payload } from "util.slint";
 import { EffectData } from "demo/effects-panel.slint";
 import { MediaFilter, MediaItemData, MediaKind, TextPresetData } from "workspace/media-pane.slint";
-import { ContextMenu, MenuItemData, MenuRow } from "primitives/context-menu.slint";
+import { ContextMenu, MenuItemData, MenuRow, MenuState } from "primitives/context-menu.slint";
 import { ExportData, ExportDialog, ExportPhase } from "dialogs/export.slint";
 import { ModelData, SettingsData, SettingsDialog, SystemFactData } from "dialogs/settings.slint";
+import { UpdateData, UpdateDialog } from "dialogs/update.slint";
 import { ProjectDialog, ProjectSheetData } from "dialogs/project.slint";
 import { RelinkDialog, RelinkData, MissingMediaItem } from "dialogs/relink.slint";
 import { CaptionsDialog, CaptionsSheetData } from "dialogs/captions.slint";
@@ -55,7 +56,7 @@ export {
     SelectedClipData, StageGuideData, StageItemData, TextAlignment, TimelineTabData,
     TimelineTool, TrackData, TrackSize, MenuItemData, MenuRow, ExportData, ExportPhase, ModelData, SettingsData,
     RecentProjectData, StartData, SystemFactData, ToastData, ProjectSheetData,
-    CaptionsSheetData, SpeechSheetData,
+    CaptionsSheetData, SpeechSheetData, UpdateData,
 }
 
 export component App inherits Window {
@@ -99,7 +100,7 @@ export component App inherits Window {
         }
     }
     property <bool> sheet-open: root.export.open || root.settings.open
-        || root.project-sheet.open || root.captions.open || root.speech.open;
+        || root.project-sheet.open || root.captions.open || root.speech.open || root.updates.open;
     changed sheet-open => {
         if (!root.sheet-open) {
             keys.focus();
@@ -168,6 +169,16 @@ export component App inherits Window {
     // everything.
     in property <ExportData> export;
     in property <SettingsData> settings;
+    in property <UpdateData> updates;
+    property <bool> update-open: root.updates.open;
+    changed update-open => {
+        MenuState.blocked = root.update-open;
+        if (root.update-open) {
+            // An automatic notice may arrive while a title field has focus.
+            // Move that focus too, so typing cannot edit the project behind it.
+            keys.focus();
+        }
+    }
     in property <[ModelData]> transcribers;
     in property <[ModelData]> voices;
     in property <[string]> languages;
@@ -194,6 +205,12 @@ export component App inherits Window {
     callback export-again();
 
     callback settings-closed();
+    callback updates-check();
+    callback updates-automatic-changed(on: bool);
+    callback updates-view();
+    callback updates-dismiss();
+    callback updates-skip();
+    callback updates-download();
     callback settings-page-changed(index: int);
     callback settings-show-log();
     callback settings-language-changed(index: int);
@@ -311,17 +328,17 @@ export component App inherits Window {
             keys: @keys(Control + S);
             // Nothing on the launch screen has a project to act on, which is
             // why the strip up there is missing the menus this belongs to.
-            enabled: !root.on-start;
+            enabled: !root.on-start && !root.updates.open;
             activated => { root.app-menu-selected("save"); }
         }
         KeyBinding {
             keys: @keys(Control + Z);
-            enabled: !root.on-start;
+            enabled: !root.on-start && !root.updates.open;
             activated => { root.app-menu-selected("undo"); }
         }
         KeyBinding {
             keys: @keys(Control + Shift + Z);
-            enabled: !root.on-start;
+            enabled: !root.on-start && !root.updates.open;
             activated => { root.app-menu-selected("redo"); }
         }
 
@@ -332,6 +349,12 @@ export component App inherits Window {
         // its own letters and spaces before a key can walk up to this
         // scope, which is what keeps typing a title from cutting a clip.
         key-pressed(event) => {
+            if (root.updates.open) {
+                if (event.text == Key.Escape) {
+                    root.updates-dismiss();
+                }
+                return accept;
+            }
             if (root.on-start) {
                 return reject;
             }
@@ -499,6 +522,7 @@ export component App inherits Window {
         width: root.width;
         height: root.height;
         data: root.settings;
+        updates: root.updates;
         transcribers: root.transcribers;
         voices: root.voices;
         languages: root.languages;
@@ -508,6 +532,9 @@ export component App inherits Window {
         closed => { root.settings-closed(); }
         page-changed(index) => { root.settings-page-changed(index); }
         show-log => { root.settings-show-log(); }
+        check-updates => { root.updates-check(); }
+        automatic-updates-changed(on) => { root.updates-automatic-changed(on); }
+        view-update => { root.updates-view(); }
         language-changed(index) => { root.settings-language-changed(index); }
         theme-changed(dark) => { root.settings-theme-changed(dark); }
         playhead-stops-changed(on) => { root.settings-playhead-stops-changed(on); }
@@ -586,6 +613,18 @@ export component App inherits Window {
         pace-changed(index) => { root.speech-pace-changed(index); }
         begin => { root.speech-begin(); }
         cancel => { root.speech-cancel(); }
+    }
+
+    UpdateDialog {
+        x: root.safe-area-insets.left;
+        y: root.safe-area-insets.top;
+        width: root.width - root.safe-area-insets.left - root.safe-area-insets.right;
+        height: root.height - root.safe-area-insets.top - root.safe-area-insets.bottom;
+        data: root.updates;
+
+        closed => { root.updates-dismiss(); }
+        skipped => { root.updates-skip(); }
+        download => { root.updates-download(); }
     }
 
     // Over the workspace and both sheets, under the menus. A tooltip has to

@@ -12,6 +12,7 @@ import { SegmentedControl } from "../primitives/segmented-control.slint";
 import { Select } from "../primitives/select.slint";
 import { Switch } from "../inspector/controls.slint";
 import { PaneScroll } from "../workspace/pane.slint";
+import { UpdateData } from "update.slint";
 
 // Settings: a fixed-height sheet with a column of pages down the side. The
 // model rows keep two things apart — a downloaded model is a *choice* and so
@@ -372,6 +373,7 @@ component FactRow inherits HorizontalLayout {
 
 export component SettingsDialog inherits Modal {
     in property <SettingsData> data;
+    in property <UpdateData> updates;
     in property <[ModelData]> transcribers;
     in property <[ModelData]> voices;
     in property <[string]> languages;
@@ -385,6 +387,9 @@ export component SettingsDialog inherits Modal {
     callback page-changed(index: int);
     /// Opens the folder this run's log is being written into.
     callback show-log();
+    callback check-updates();
+    callback automatic-updates-changed(on: bool);
+    callback view-update();
     callback language-changed(index: int);
     /// The theme, chosen rather than flipped. A toggle in the strip could only
     /// say "the other one"; a page with two named options can say which one is
@@ -883,6 +888,66 @@ export component SettingsDialog inherits Modal {
                         color: Theme.fg-muted;
                         font-size: Theme.fs;
                         wrap: word-wrap;
+                    }
+                }
+
+                DialogSection {
+                    title: I18n.t("Updates");
+
+                    HorizontalLayout {
+                        spacing: 8px;
+
+                        Text {
+                            horizontal-stretch: 1;
+                            text: I18n.t("Check automatically");
+                            color: Theme.fg;
+                            font-size: Theme.fs;
+                            vertical-alignment: center;
+                            wrap: word-wrap;
+                        }
+
+                        VerticalLayout {
+                            alignment: center;
+                            Switch {
+                                checked: root.updates.automatic;
+                                toggled(on) => { root.automatic-updates-changed(on); }
+                            }
+                        }
+                    }
+
+                    Text {
+                        text: I18n.t("Checks public GitHub releases at most once a day. No project data is sent.");
+                        color: Theme.fg-muted;
+                        font-size: Theme.fs-sm;
+                        wrap: word-wrap;
+                    }
+
+                    Text {
+                        text: I18n.t1("Release source: {0}", root.updates.source);
+                        color: Theme.fg-muted;
+                        font-size: Theme.fs-sm;
+                        wrap: word-wrap;
+                    }
+
+                    Text {
+                        text: root.updates.status;
+                        color: Theme.fg;
+                        font-size: Theme.fs;
+                        wrap: word-wrap;
+                    }
+
+                    Button {
+                        label: root.updates.checking ? I18n.t("Checking…") : I18n.t("Check for updates");
+                        enabled: !root.updates.checking;
+                        block: true;
+                        clicked => { root.check-updates(); }
+                    }
+
+                    if root.updates.version != "": Button {
+                        label: I18n.t("View release");
+                        primary: true;
+                        block: true;
+                        clicked => { root.view-update(); }
                     }
                 }
 

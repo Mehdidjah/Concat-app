@@ -55,6 +55,29 @@ pub struct Preferences {
     /// The Concat API on a socket while the window is open.
     #[serde(default)]
     pub server: ServerPrefs,
+    /// Optional release checks; never includes project or account data.
+    pub updates: UpdatePrefs,
+}
+
+/// Release notification choices and the last attempted check, across launches.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct UpdatePrefs {
+    pub automatic: bool,
+    pub repository: String,
+    pub last_check: Option<u64>,
+    pub skipped_version: Option<String>,
+}
+
+impl Default for UpdatePrefs {
+    fn default() -> Self {
+        Self {
+            automatic: true,
+            repository: String::new(),
+            last_check: None,
+            skipped_version: None,
+        }
+    }
 }
 
 impl Preferences {

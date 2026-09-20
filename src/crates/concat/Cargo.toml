@@ -110,6 +110,8 @@ concat-vision.workspace = true
 # Remembered preferences, as a small JSON file in the config directory.
 serde = { version = "1", features = ["derive"] }
 serde_json.workspace = true
+# Opens release pages through the OS browser, including Android and iOS.
+webbrowser = { version = "1.2.4", features = ["hardened"] }
 # Text presets are TOML files, as the effect manifests are.
 toml = "1.1"
 

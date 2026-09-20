@@ -5,6 +5,19 @@
 //! the build for Settings > About.
 
 fn main() {
+    // Release workflows supply the actual tag (including prerelease suffix)
+    // and the repository that owns the downloads. Source builds use upstream.
+    for (key, fallback) in [
+        ("CONCAT_RELEASE_REPOSITORY", "jub0t/Concat"),
+        ("CONCAT_RELEASE_VERSION", env!("CARGO_PKG_VERSION")),
+    ] {
+        println!("cargo:rerun-if-env-changed={key}");
+        let value = std::env::var(key).ok().filter(|value| !value.is_empty());
+        println!(
+            "cargo:rustc-env={key}={}",
+            value.as_deref().unwrap_or(fallback)
+        );
+    }
     // Fonts and images are compiled into the binary rather than read off disk
     // at run time.
     //

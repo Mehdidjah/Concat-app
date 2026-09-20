@@ -55,6 +55,13 @@ export global MenuMetrics {
     out property <length> width: 220px;
 }
 
+// PopupWindow surfaces live above the normal modal layer. An asynchronous
+// update notice must close every context menu, including the timeline's,
+// instead of relying on a Rust menu index that can outlive an outside click.
+export global MenuState {
+    in-out property <bool> blocked;
+}
+
 export component ContextMenu inherits Rectangle {
     in property <[MenuItemData]> items;
     /// The summed height of `items` plus MenuMetrics.padding.
@@ -72,6 +79,13 @@ export component ContextMenu inherits Rectangle {
     in property <int> token;
     in property <length> request-x;
     in property <length> request-y;
+    property <bool> blocked: MenuState.blocked;
+
+    changed blocked => {
+        if (root.blocked) {
+            surface.close();
+        }
+    }
 
     changed token => {
         // Nothing to show is not a menu. Whoever bumps the token may find it
@@ -79,7 +93,7 @@ export component ContextMenu inherits Rectangle {
         // nothing to say — and an empty surface hanging under the pointer is
         // worse than none. It also lets a caller bump unconditionally, which
         // is what keeps the arming in lanes.slint honest.
-        if (root.token > 0 && root.items.length > 0) {
+        if (!root.blocked && root.token > 0 && root.items.length > 0) {
             // Flipped back over the pointer near an edge, so the menu is
             // always fully on screen and always touching the click.
             root.at-x = root.request-x + MenuMetrics.width > root.width
@@ -199,7 +213,7 @@ export component ContextMenu inherits Rectangle {
                         }
 
                         touch := TouchArea {
-                            enabled: item.enabled;
+                            enabled: item.enabled && !root.blocked;
                             mouse-cursor: pointer;
                             clicked => {
                                 // Report first, then close: the row's data is

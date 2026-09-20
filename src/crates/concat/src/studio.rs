@@ -561,6 +561,7 @@ pub struct Studio {
     // ── the sheets and menus ──
     pub export: crate::panes::export::ExportPane,
     pub settings: crate::panes::settings::SettingsPane,
+    pub updates: crate::updates::UpdateState,
     pub relink: crate::panes::relink::RelinkPane,
     pub open_menu: i32,
     pub menu_bar_token: i32,
@@ -1216,6 +1217,7 @@ impl Studio {
             monitor: crate::panes::monitor::MonitorPane::default(),
             export: Default::default(),
             settings: crate::panes::settings::SettingsPane::default(),
+            updates: Default::default(),
             relink: crate::panes::relink::RelinkPane::default(),
             open_menu: -1,
             menu_bar_token: 0,
@@ -5828,6 +5830,7 @@ impl Studio {
 
         app.set_export(self.export.data(self));
         app.set_settings(self.settings.data(self));
+        app.set_updates(self.update_data());
         sync(&models.transcribers, self.settings.transcriber_rows());
         sync(&models.voices, self.settings.voice_rows());
         app.set_relink(self.relink.data());

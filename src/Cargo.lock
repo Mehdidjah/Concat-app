@@ -1215,6 +1215,7 @@ dependencies = [
  "slint",
  "slint-build",
  "toml",
+ "webbrowser",
  "wgpu",
 ]
 
