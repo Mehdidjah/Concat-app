@@ -567,7 +567,7 @@ impl MaskShape {
             Self::Filmstrip => "Filmstrip",
             Self::Circle => "Circle",
             Self::Rectangle => "Rectangle",
-            Self::Star => "Stars",
+            Self::Star => "Star",
             Self::Heart => "Heart",
             Self::Text => "Text",
             Self::Brush => "Brush",
