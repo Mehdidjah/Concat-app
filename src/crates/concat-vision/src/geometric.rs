@@ -149,7 +149,7 @@ struct Evaluated<'a> {
     cos: f64,
     feather_pixels: f64,
     roundness: f64,
-    points: Vec<(f64, f64)>,
+    path: Option<IndexedPath>,
 }
 
 impl<'a> Evaluated<'a> {
@@ -178,11 +178,8 @@ impl<'a> Evaluated<'a> {
             feather_pixels: value(MaskProperty::Feather).clamp(0.0, 0.5)
                 * frame_width.min(frame_height),
             roundness: value(MaskProperty::Roundness).clamp(0.0, 1.0),
-            points: mask
-                .points
-                .iter()
-                .map(|[x, y]| (*x - 0.5, *y - 0.5))
-                .collect(),
+            path: matches!(mask.shape, MaskShape::Brush | MaskShape::Pen)
+                .then(|| IndexedPath::new(mask, width, height)),
         }
     }
 
@@ -228,7 +225,7 @@ impl<'a> Evaluated<'a> {
             }
             MaskShape::Text => self.text_coverage(x, y, self.text),
             MaskShape::Brush => self.brush_coverage(x, y),
-            MaskShape::Pen => self.polygon_coverage(x, y, &self.points),
+            MaskShape::Pen => self.polygon_coverage(x, y),
         };
         if self.source.inverted {
             coverage = 1.0 - coverage;
@@ -241,36 +238,35 @@ impl<'a> Evaluated<'a> {
         (0.5 - signed / (2.0 * softness)).clamp(0.0, 1.0)
     }
 
-    fn far_from_unit_box(&self, x: f64, y: f64, extra: f64) -> bool {
-        let margin = extra + self.feather_pixels.max(0.75) / self.min_dimension;
-        x.abs() > 0.5 + margin || y.abs() > 0.5 + margin
-    }
-
-    fn polygon_coverage(&self, x: f64, y: f64, points: &[(f64, f64)]) -> f64 {
-        if self.far_from_unit_box(x, y, 0.0) {
-            0.0
+    fn polygon_coverage(&self, x: f64, y: f64) -> f64 {
+        let Some(path) = &self.path else { return 0.0 };
+        let point = (x * self.width, y * self.height);
+        let distance = path
+            .distance_squared(point, self.feather_pixels.max(0.75), 0.0, &mut || {})
+            .sqrt();
+        self.alpha_from_distance(if path.contains(point) {
+            -distance
         } else {
-            self.alpha_from_distance(polygon_distance(x, y, points) * self.min_dimension)
-        }
+            distance
+        })
     }
 
     fn brush_coverage(&self, x: f64, y: f64) -> f64 {
-        let radius = self.source.brush_size.clamp(0.002, 1.0) * 0.5;
-        if self.far_from_unit_box(x, y, radius) {
-            return 0.0;
-        }
-        let mut distance_squared = f64::INFINITY;
-        for pair in self.points.windows(2) {
-            if pair[0].0 < -0.5 || pair[1].0 < -0.5 {
-                continue;
-            }
-            distance_squared =
-                distance_squared.min(segment_distance_squared((x, y), pair[0], pair[1]));
-        }
-        for (px, py) in self.points.iter().filter(|point| point.0 >= -0.5) {
-            distance_squared = distance_squared.min((x - px).powi(2) + (y - py).powi(2));
-        }
-        self.alpha_from_distance((distance_squared.sqrt() - radius) * self.min_dimension)
+        let Some(path) = &self.path else { return 0.0 };
+        // A diameter is a fraction of picture width, not a fraction of both
+        // axes independently: the latter makes a round dab elliptical on
+        // landscape/portrait footage. Distances and feathering are pixels.
+        let radius = self.source.brush_size.clamp(0.002, 1.0) * self.width * 0.5;
+        let softness = self.feather_pixels.max(0.75);
+        let distance = path
+            .distance_squared(
+                (x * self.width, y * self.height),
+                radius + softness,
+                (radius - softness).max(0.0),
+                &mut || {},
+            )
+            .sqrt();
+        self.alpha_from_distance(distance - radius)
     }
 
     fn text_coverage(&self, x: f64, y: f64, text: Option<&Mask>) -> f64 {
@@ -306,6 +302,199 @@ impl<'a> Evaluated<'a> {
             .map(|(dx, dy)| sample(x + dx, y + dy))
             .sum::<f64>()
             / offsets.len() as f64
+    }
+}
+
+type Point = (f64, f64);
+
+#[derive(Clone, Copy)]
+struct Segment {
+    a: Point,
+    b: Point,
+}
+
+#[derive(Clone, Copy)]
+struct Bounds {
+    min: Point,
+    max: Point,
+}
+
+impl Bounds {
+    fn of(segments: &[Segment]) -> Self {
+        let mut bounds = Self {
+            min: (f64::INFINITY, f64::INFINITY),
+            max: (f64::NEG_INFINITY, f64::NEG_INFINITY),
+        };
+        for segment in segments {
+            for (x, y) in [segment.a, segment.b] {
+                bounds.min.0 = bounds.min.0.min(x);
+                bounds.min.1 = bounds.min.1.min(y);
+                bounds.max.0 = bounds.max.0.max(x);
+                bounds.max.1 = bounds.max.1.max(y);
+            }
+        }
+        bounds
+    }
+
+    fn distance_squared(self, point: Point) -> f64 {
+        let dx = (self.min.0 - point.0).max(point.0 - self.max.0).max(0.0);
+        let dy = (self.min.1 - point.1).max(point.1 - self.max.1).max(0.0);
+        dx * dx + dy * dy
+    }
+}
+
+struct PathNode {
+    bounds: Bounds,
+    start: usize,
+    end: usize,
+    children: Option<(usize, usize)>,
+}
+
+/// Pixel-space segment BVH. Pointer paths can have thousands of vertices;
+/// testing every segment at every pixel made even a single freehand stroke
+/// stall preview/export. Build once per evaluation, prune entire branches
+/// outside the feather/stroke radius, and stop on fully opaque brush hits.
+/// Storage is linear in path size (unlike a grid that duplicates long edges).
+struct IndexedPath {
+    segments: Vec<Segment>,
+    nodes: Vec<PathNode>,
+}
+
+impl IndexedPath {
+    fn new(mask: &ClipMask, width: f64, height: f64) -> Self {
+        let mut segments = Vec::new();
+        for stroke in mask.points.split(|point| *point == [-1.0, -1.0]) {
+            let points: Vec<_> = stroke
+                .iter()
+                .filter(|point| point.iter().all(|value| value.is_finite()))
+                .map(|[x, y]| ((x - 0.5) * width, (y - 0.5) * height))
+                .collect();
+            if mask.shape == MaskShape::Pen {
+                if points.len() < 3 {
+                    continue;
+                }
+                segments.push(Segment {
+                    a: points[points.len() - 1],
+                    b: points[0],
+                });
+            } else if points.len() == 1 {
+                segments.push(Segment {
+                    a: points[0],
+                    b: points[0],
+                });
+            }
+            segments.extend(points.windows(2).map(|pair| Segment {
+                a: pair[0],
+                b: pair[1],
+            }));
+        }
+        let mut path = Self {
+            segments,
+            nodes: Vec::new(),
+        };
+        if !path.segments.is_empty() {
+            path.build(0, path.segments.len());
+        }
+        path
+    }
+
+    fn build(&mut self, start: usize, end: usize) -> usize {
+        let bounds = Bounds::of(&self.segments[start..end]);
+        let index = self.nodes.len();
+        self.nodes.push(PathNode {
+            bounds,
+            start,
+            end,
+            children: None,
+        });
+        if end - start > 8 {
+            let x_axis = bounds.max.0 - bounds.min.0 >= bounds.max.1 - bounds.min.1;
+            let middle = start + (end - start) / 2;
+            self.segments[start..end].select_nth_unstable_by(middle - start, |a, b| {
+                let centre = |segment: &Segment| {
+                    if x_axis {
+                        segment.a.0 + segment.b.0
+                    } else {
+                        segment.a.1 + segment.b.1
+                    }
+                };
+                centre(a).total_cmp(&centre(b))
+            });
+            let left = self.build(start, middle);
+            let right = self.build(middle, end);
+            self.nodes[index].children = Some((left, right));
+        }
+        index
+    }
+
+    fn distance_squared(
+        &self,
+        point: Point,
+        limit: f64,
+        opaque: f64,
+        visit: &mut impl FnMut(),
+    ) -> f64 {
+        let mut best = limit * limit;
+        if !self.nodes.is_empty() {
+            self.nearest(0, point, &mut best, opaque * opaque, visit);
+        }
+        best
+    }
+
+    fn nearest(
+        &self,
+        index: usize,
+        point: Point,
+        best: &mut f64,
+        opaque: f64,
+        visit: &mut impl FnMut(),
+    ) {
+        let node = &self.nodes[index];
+        if *best <= opaque || node.bounds.distance_squared(point) >= *best {
+            return;
+        }
+        if let Some((left, right)) = node.children {
+            let (near, far) = if self.nodes[left].bounds.distance_squared(point)
+                <= self.nodes[right].bounds.distance_squared(point)
+            {
+                (left, right)
+            } else {
+                (right, left)
+            };
+            self.nearest(near, point, best, opaque, visit);
+            self.nearest(far, point, best, opaque, visit);
+        } else {
+            for segment in &self.segments[node.start..node.end] {
+                visit();
+                *best = best.min(segment_distance_squared(point, segment.a, segment.b));
+                if *best <= opaque {
+                    break;
+                }
+            }
+        }
+    }
+
+    fn contains(&self, point: Point) -> bool {
+        !self.nodes.is_empty() && self.crossings(0, point, &mut || {})
+    }
+
+    fn crossings(&self, index: usize, (x, y): Point, visit: &mut impl FnMut()) -> bool {
+        let node = &self.nodes[index];
+        if y < node.bounds.min.1 || y >= node.bounds.max.1 || x >= node.bounds.max.0 {
+            return false;
+        }
+        if let Some((left, right)) = node.children {
+            self.crossings(left, (x, y), visit) ^ self.crossings(right, (x, y), visit)
+        } else {
+            let mut inside = false;
+            for &Segment { a, b } in &self.segments[node.start..node.end] {
+                visit();
+                if (a.1 > y) != (b.1 > y) && x < (b.0 - a.0) * (y - a.1) / (b.1 - a.1) + a.0 {
+                    inside = !inside;
+                }
+            }
+            inside
+        }
     }
 }
 
@@ -461,6 +650,156 @@ mod tests {
         for point in [(0.61, 0.0), (-0.61, 0.0), (0.0, 0.61), (0.0, -0.61)] {
             assert_eq!(feathered.text_coverage(point.0, point.1, Some(&text)), 0.0);
         }
+    }
+
+    #[test]
+    fn a_brush_dab_is_round_on_landscape_and_portrait_media() {
+        for (width, height) in [(160, 90), (90, 160)] {
+            let mut mask = ClipMask::new("brush".to_owned(), MaskShape::Brush);
+            mask.brush_size = 0.1;
+            mask.points = vec![[0.5, 0.5]];
+            let mut frame = Frame::black(width, height);
+            cut(&mut frame, &[mask], 0.0, &BTreeMap::new());
+            let horizontal = (0..width)
+                .filter(|&x| frame.pixel(x, height / 2).unwrap()[3] >= 128)
+                .count();
+            let vertical = (0..height)
+                .filter(|&y| frame.pixel(width / 2, y).unwrap()[3] >= 128)
+                .count();
+            assert_eq!(horizontal, vertical, "{width}×{height}");
+            assert!((horizontal as f64 - f64::from(width) * 0.1).abs() <= 1.0);
+        }
+    }
+
+    #[test]
+    fn separated_brush_strokes_do_not_join_across_the_break() {
+        let mut mask = ClipMask::new("brush".to_owned(), MaskShape::Brush);
+        mask.brush_size = 0.06;
+        mask.points = vec![[0.1, 0.5], [0.2, 0.5], [-1.0, -1.0], [0.8, 0.5], [0.9, 0.5]];
+        let mut frame = Frame::black(160, 90);
+        cut(&mut frame, &[mask], 0.0, &BTreeMap::new());
+        assert_eq!(frame.pixel(80, 45).unwrap()[3], 0);
+        assert_eq!(frame.pixel(24, 45).unwrap()[3], 255);
+        assert_eq!(frame.pixel(136, 45).unwrap()[3], 255);
+    }
+
+    #[test]
+    fn transformed_brush_follows_source_cursor_through_crop_and_flip() {
+        let mut mask = ClipMask::new("brush".to_owned(), MaskShape::Brush);
+        mask.width = 0.3;
+        mask.height = 0.4;
+        mask.position_y = -0.25;
+        mask.rotation = 37.0;
+        mask.brush_size = 0.2;
+        mask.set_key(
+            MaskProperty::PositionX,
+            0.0,
+            -0.5,
+            concat_project::model::KeyEase::LINEAR,
+        );
+        mask.set_key(
+            MaskProperty::PositionX,
+            1.0,
+            0.5,
+            concat_project::model::KeyEase::LINEAR,
+        );
+        let cursor = [0.75, 0.75];
+        let point = mask.point_from_source(cursor, 160.0 / 90.0, 0.75);
+        // A moved/shrunken mask must allow drawing beyond its unit square.
+        assert!(point.iter().any(|&value| !(0.0..=1.0).contains(&value)));
+        mask.points = vec![point];
+        let mapping = Mapping {
+            crop: [0.5, 0.0, 0.0, 0.0],
+            flip_h: true,
+            flip_v: true,
+        };
+        let mut frame = Frame::black(80, 90);
+        cut_mapped(&mut frame, &[mask], &mapping, 0.75, &BTreeMap::new());
+        assert_eq!(frame.pixel(40, 22).unwrap()[3], 255);
+        assert_eq!(frame.pixel(5, 80).unwrap()[3], 0);
+    }
+
+    #[test]
+    fn path_index_matches_brute_force_pixel_distances_and_polygon_parity() {
+        let mut mask = ClipMask::new("pen".to_owned(), MaskShape::Pen);
+        mask.points = heart_points()
+            .iter()
+            .map(|&(x, y)| [x + 0.5, y + 0.5])
+            .collect();
+        let path = IndexedPath::new(&mask, 160.0, 90.0);
+        let outline: Vec<_> = mask
+            .points
+            .iter()
+            .map(|[x, y]| ((x - 0.5) * 160.0, (y - 0.5) * 90.0))
+            .collect();
+        for y in -50..=50 {
+            for x in -80..=80 {
+                let (x, y) = (f64::from(x) + 0.13, f64::from(y) + 0.37);
+                let expected = polygon_distance(x, y, &outline);
+                let actual = path.distance_squared((x, y), 200.0, 0.0, &mut || {}).sqrt();
+                assert!((actual - expected.abs()).abs() < 1e-9);
+                assert_eq!(path.contains((x, y)), expected < 0.0);
+            }
+        }
+    }
+
+    #[test]
+    fn pen_feather_uses_pixel_distances_on_both_axes_and_inverts_cleanly() {
+        let mut mask = ClipMask::new("pen".to_owned(), MaskShape::Pen);
+        mask.points = vec![[0.25, 0.25], [0.75, 0.25], [0.75, 0.75], [0.25, 0.75]];
+        mask.feather = 0.1;
+        let evaluated = Evaluated::new(&mask, 0.0, 160.0, 90.0, None);
+        let left = evaluated.coverage(36.0, 45.0);
+        let top = evaluated.coverage(80.0, 18.5);
+        let expected = (0.5 - 4.0 / 18.0) as f32;
+        assert!((left - expected).abs() < 1e-6);
+        assert!((top - expected).abs() < 1e-6);
+        assert_eq!(evaluated.coverage(80.0, 45.0), 1.0);
+        assert_eq!(evaluated.coverage(0.0, 0.0), 0.0);
+        mask.inverted = true;
+        let inverted = Evaluated::new(&mask, 0.0, 160.0, 90.0, None);
+        assert!((inverted.coverage(36.0, 45.0) + left - 1.0).abs() < 1e-6);
+        assert_eq!(inverted.coverage(80.0, 45.0), 0.0);
+        assert_eq!(inverted.coverage(0.0, 0.0), 1.0);
+    }
+
+    #[test]
+    fn a_dense_path_queries_nearby_segments_instead_of_every_vertex() {
+        let mut mask = ClipMask::new("brush".to_owned(), MaskShape::Brush);
+        mask.points = (0..20_000)
+            .map(|index| [f64::from(index) / 19_999.0, 0.5])
+            .collect();
+        let path = IndexedPath::new(&mask, 1920.0, 1080.0);
+        let mut edge_tests = 0;
+        for x in -900..=900 {
+            let distance =
+                path.distance_squared((f64::from(x), 3.0), 10.0, 0.0, &mut || edge_tests += 1);
+            assert!((distance - 9.0).abs() < 1e-9);
+        }
+        assert!(edge_tests < 1801 * 32, "evaluated {edge_tests} edges");
+        // A pixel outside the stroke bounds should not visit even one edge.
+        path.distance_squared((0.0, 100.0), 10.0, 0.0, &mut || panic!("outside bounds"));
+    }
+
+    #[test]
+    fn a_dense_pen_path_prunes_edges_for_the_inside_test_too() {
+        let mut mask = ClipMask::new("pen".to_owned(), MaskShape::Pen);
+        mask.points = (0..20_000)
+            .map(|index| {
+                let angle = f64::from(index) / 20_000.0 * std::f64::consts::TAU;
+                [0.5 + 0.4 * angle.cos(), 0.5 + 0.4 * angle.sin()]
+            })
+            .collect();
+        let path = IndexedPath::new(&mask, 1000.0, 1000.0);
+        let mut edge_tests = 0;
+        for y in -45..=45 {
+            for x in -45..=45 {
+                let point = (f64::from(x) * 10.0 + 0.13, f64::from(y) * 10.0 + 0.37);
+                let inside = path.crossings(0, point, &mut || edge_tests += 1);
+                assert_eq!(inside, point.0.hypot(point.1) < 400.0);
+            }
+        }
+        assert!(edge_tests < 91 * 91 * 32, "evaluated {edge_tests} edges");
     }
 
     #[test]

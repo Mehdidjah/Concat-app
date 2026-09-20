@@ -327,7 +327,7 @@ pub enum Gesture {
         points: Vec<[f64; 2]>,
         screen: Vec<(f32, f32)>,
     },
-    /// A source-space Brush or Pen mask authored on the monitor.
+    /// A mask-local Brush or Pen path authored on the monitor.
     MaskPaint {
         clip: String,
         mask: String,
@@ -3745,11 +3745,16 @@ impl Studio {
     /// clears the selection, as an empty lane does.
     pub fn stage_pressed(&mut self, x: f32, y: f32, additive: bool) {
         if let Some((clip, mask)) = self.mask_paint_target() {
-            let point = self.stage_to_source(&clip, f64::from(x), f64::from(y));
+            let point = self.stage_to_mask(&clip, &mask, f64::from(x), f64::from(y));
+            let at = mask_key_time(&clip, self.playhead);
+            let size = mask.brush_size
+                * mask
+                    .value_at(model::MaskProperty::Width, at)
+                    .clamp(0.01, 4.0);
             self.gesture = Gesture::MaskPaint {
                 clip: clip.id,
                 mask: mask.id,
-                size: mask.brush_size,
+                size,
                 points: vec![point],
                 screen: vec![(x, y)],
             };
@@ -3918,16 +3923,28 @@ impl Studio {
             points,
             screen,
             ..
+        } = &mut gesture
+        {
+            if let Some(clip) = self.clip(clip).cloned() {
+                points.push(self.stage_to_source(&clip, f64::from(x), f64::from(y)));
+                screen.push((x, y));
+            }
+            self.gesture = gesture;
+            return;
         }
-        | Gesture::MaskPaint {
+        if let Gesture::MaskPaint {
             clip,
+            mask,
             points,
             screen,
             ..
         } = &mut gesture
         {
-            if let Some(clip) = self.clip(clip).cloned() {
-                points.push(self.stage_to_source(&clip, f64::from(x), f64::from(y)));
+            if let Some(clip) = self.clip(clip)
+                && let Some(mask) = clip.masks.iter().find(|held| held.id == *mask)
+                && screen.last() != Some(&(x, y))
+            {
+                points.push(self.stage_to_mask(clip, mask, f64::from(x), f64::from(y)));
                 screen.push((x, y));
             }
             self.gesture = gesture;
@@ -4871,6 +4888,21 @@ impl Studio {
         [f64::from(u), f64::from(v)]
     }
 
+    fn stage_to_mask(&self, clip: &Clip, mask: &model::ClipMask, x: f64, y: f64) -> [f64; 2] {
+        let source = self.stage_to_source(clip, x, y);
+        let (width, height) = self
+            .project()
+            .media_by_id(&clip.media_id)
+            .and_then(|media| Some((media.width?, media.height?)))
+            .filter(|(width, height)| *width > 0 && *height > 0)
+            .unwrap_or_else(|| self.output_size());
+        mask.point_from_source(
+            source,
+            f64::from(width.max(1)) / f64::from(height.max(1)),
+            mask_key_time(clip, self.playhead),
+        )
+    }
+
     /// The stroke in flight as the stage draws it: path commands over a
     /// 1000 × 1000 viewbox, the line's width as a fraction of the stage,
     /// and whether it is taking away. Empty between strokes.
@@ -4910,11 +4942,17 @@ impl Studio {
         for (x, y) in rest.iter().chain(rest.is_empty().then_some(first)) {
             path.push_str(&format!(" L {:.1} {:.1}", x * 1000.0, y * 1000.0));
         }
-        // The brush is `size` of the picture's width; on the stage that is
-        // `size` of the picture's footprint.
+        // The brush is `size` of the original picture's width. The footprint
+        // is already cropped, so recover the uncropped width first.
         let width = self
             .clip(clip)
-            .map(|clip| self.footprint(clip).w)
+            .map(|clip| {
+                let visible = clip
+                    .crop
+                    .map(|crop| (1.0 - crop.left - crop.right).max(0.1))
+                    .unwrap_or(1.0);
+                self.footprint(clip).w / visible
+            })
             .unwrap_or(1.0) as f32
             * *size as f32;
         (path, width, erase)

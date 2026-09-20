@@ -508,7 +508,9 @@ pub struct ClipMask {
     /// Words cut through a Text mask. Other shapes ignore this.
     #[serde(default = "default_mask_text")]
     pub text: String,
-    /// Brush path or Pen polygon in source-picture fractions.
+    /// Brush path or Pen polygon in mask-local fractions, before the mask's
+    /// position, size and rotation. Points may lie outside the unit square.
+    /// Exactly `[-1, -1]` separates independent brush strokes.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub points: Vec<[f64; 2]>,
     /// Brush diameter as a fraction of picture width.
@@ -784,6 +786,29 @@ impl ClipMask {
         concat_core::animate::Track::new(keys).value_at(at, rest)
     }
 
+    /// Undoes the evaluated mask transform for a source-picture point.
+    /// Rotation is measured in pixels, so the source aspect ratio matters.
+    pub fn point_from_source(&self, point: [f64; 2], aspect: f64, at: f64) -> [f64; 2] {
+        let aspect = finite_or(aspect, 1.0).max(1e-6);
+        let dx = (point[0] - 0.5 - self.value_at(MaskProperty::PositionX, at) * 0.5) * aspect;
+        let dy = point[1] - 0.5 - self.value_at(MaskProperty::PositionY, at) * 0.5;
+        let (sin, cos) = self
+            .value_at(MaskProperty::Rotation, at)
+            .to_radians()
+            .sin_cos();
+        let mut local = [
+            (dx * cos + dy * sin)
+                / (self.value_at(MaskProperty::Width, at).clamp(0.01, 4.0) * aspect)
+                + 0.5,
+            (-dx * sin + dy * cos) / self.value_at(MaskProperty::Height, at).clamp(0.01, 4.0) + 0.5,
+        ];
+        // A real point must not be mistaken for the legacy stroke separator.
+        if local == [-1.0, -1.0] {
+            local[0] += f64::EPSILON;
+        }
+        local
+    }
+
     /// Sets or replaces a key and keeps the storage order deterministic.
     pub fn set_key(&mut self, property: MaskProperty, at: f64, value: f64, ease: KeyEase) {
         if !at.is_finite() || !value.is_finite() {
@@ -837,13 +862,13 @@ impl ClipMask {
         self.points
             .retain(|point| point.iter().all(|value| value.is_finite()));
         for [x, y] in &mut self.points {
-            if *x < 0.0 && *y < 0.0 {
-                *x = -1.0;
-                *y = -1.0;
+            if [*x, *y] == [-1.0, -1.0] {
                 continue;
             }
-            *x = x.clamp(0.0, 1.0);
-            *y = y.clamp(0.0, 1.0);
+            // A translated or small mask can put an on-picture stroke well
+            // outside its unit square. Only bound pathological documents.
+            *x = x.clamp(-1e6, 1e6);
+            *y = y.clamp(-1e6, 1e6);
         }
         self.keys
             .retain(|key| key.at.is_finite() && key.value.is_finite());
@@ -864,6 +889,53 @@ mod mask_preset_tests {
     use super::*;
 
     #[test]
+    fn drawing_undoes_position_size_and_rotation_at_the_playhead() {
+        let mut mask = ClipMask::new("paint".to_owned(), MaskShape::Brush);
+        mask.set_key(MaskProperty::PositionX, 0.0, -0.4, KeyEase::LINEAR);
+        mask.set_key(MaskProperty::PositionX, 1.0, 0.4, KeyEase::LINEAR);
+        mask.position_y = -0.3;
+        mask.width = 0.4;
+        mask.height = 0.7;
+        for aspect in [16.0 / 9.0, 9.0 / 16.0, 1.0] {
+            for rotation in [0.0, 35.0, 90.0, -135.0] {
+                mask.rotation = rotation;
+                for local in [[0.2, 0.8], [-0.3, -0.2], [1.2, 0.5]] {
+                    let dx = (local[0] - 0.5) * mask.width * aspect;
+                    let dy = (local[1] - 0.5) * mask.height;
+                    let (sin, cos) = rotation.to_radians().sin_cos();
+                    let at = 0.75;
+                    let source = [
+                        0.5 + mask.value_at(MaskProperty::PositionX, at) * 0.5
+                            + (dx * cos - dy * sin) / aspect,
+                        0.5 + mask.position_y * 0.5 + dx * sin + dy * cos,
+                    ];
+                    let actual = mask.point_from_source(source, aspect, at);
+                    for axis in 0..2 {
+                        assert!(
+                            (actual[axis] - local[axis]).abs() < 1e-9,
+                            "{actual:?} != {local:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn tidying_preserves_outside_paths_and_only_exact_stroke_breaks() {
+        let mut mask = ClipMask::new("paint".to_owned(), MaskShape::Brush);
+        mask.points = vec![[-0.3, -0.2], [1.4, 1.7], [-1.0, -1.0]];
+        let points = mask.points.clone();
+        assert_eq!(mask.tidy().points, points);
+    }
+
+    #[test]
+    fn a_drawn_point_cannot_become_a_stroke_separator() {
+        let mask = ClipMask::new("paint".to_owned(), MaskShape::Brush);
+        assert_ne!(mask.point_from_source([-1.0, -1.0], 1.0, 0.0), [-1.0, -1.0]);
+    }
+
+    #[test]
     fn switching_shapes_restores_the_new_preset_without_moving_the_mask() {
         let mut mask = ClipMask::new("one".to_owned(), MaskShape::Brush);
         mask.position_x = 0.4;
@@ -880,6 +952,22 @@ mod mask_preset_tests {
         assert!(mask.points.is_empty());
         assert_eq!(mask.position_x, 0.4);
         assert_eq!(mask.feather, 0.03);
+    }
+
+    #[test]
+    fn drawing_uses_the_same_size_clamps_as_rendering_when_keys_overshoot() {
+        let mut mask = ClipMask::new("paint".to_owned(), MaskShape::Brush);
+        mask.set_key(MaskProperty::Width, 0.0, 0.5, KeyEase::LINEAR);
+        mask.set_key(
+            MaskProperty::Width,
+            1.0,
+            1.0,
+            KeyEase([0.3, -10.0, 0.7, -10.0]),
+        );
+        assert!(mask.value_at(MaskProperty::Width, 0.5) < 0.01);
+        let actual = mask.point_from_source([0.502, 0.7], 16.0 / 9.0, 0.5);
+        assert!((actual[0] - 0.7).abs() < 1e-9);
+        assert!((actual[1] - 0.7).abs() < 1e-9);
     }
 }
 
