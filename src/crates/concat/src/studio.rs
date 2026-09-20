@@ -769,6 +769,118 @@ fn mask_retime_curve(clip: &Clip) -> Option<concat_core::SpeedCurve> {
     })
 }
 
+/// Replace only the interval actually tracked, retaining authored motion on
+/// the other side of the playhead when tracking forward or backward.
+fn apply_mask_tracking(mask: &mut model::ClipMask, points: &[(f64, f64, f64)]) {
+    let Some(first) = points.first() else {
+        return;
+    };
+    let (start, end) = points.iter().fold((first.0, first.0), |(a, b), point| {
+        (a.min(point.0), b.max(point.0))
+    });
+    if end <= start {
+        return;
+    }
+    let original = mask.keys.clone();
+    mask.keys.retain(|key| {
+        !matches!(
+            key.property,
+            model::MaskProperty::PositionX | model::MaskProperty::PositionY
+        )
+    });
+    for property in [
+        model::MaskProperty::PositionX,
+        model::MaskProperty::PositionY,
+    ] {
+        let old: Vec<_> = original
+            .iter()
+            .filter(|key| key.property == property)
+            .copied()
+            .collect();
+        let mut before: Vec<_> = old.iter().filter(|key| key.at < start).copied().collect();
+        let mut ingress = old
+            .iter()
+            .find(|key| key.at == start)
+            .map_or(model::KeyEase::LINEAR, |key| key.ease);
+        if let Some(pair) = old
+            .windows(2)
+            .find(|pair| pair[0].at < start && start < pair[1].at)
+        {
+            mask_curve_piece(pair[0], pair[1], pair[0].at, start, 0, &mut before);
+            ingress = before
+                .pop()
+                .expect("the boundary curve has an endpoint")
+                .ease;
+        }
+        let mut after: Vec<_> = old.iter().filter(|key| key.at > end).copied().collect();
+        if let Some(pair) = old
+            .windows(2)
+            .find(|pair| pair[0].at < end && end < pair[1].at)
+        {
+            let mut tail = Vec::new();
+            mask_curve_piece(pair[0], pair[1], end, pair[1].at, 0, &mut tail);
+            // The first surviving key gets the remaining part of its easing,
+            // not the original whole curve squeezed into a shorter interval.
+            tail.extend(after.into_iter().skip(1));
+            after = tail;
+        }
+        mask.keys.extend(before);
+        mask.keys
+            .extend(points.iter().map(|&(at, x, y)| model::MaskKey {
+                property,
+                at,
+                value: if property == model::MaskProperty::PositionX {
+                    x
+                } else {
+                    y
+                },
+                ease: if at == start {
+                    ingress
+                } else {
+                    model::KeyEase::LINEAR
+                },
+            }));
+        mask.keys.extend(after);
+    }
+    // Tracking samples are not interactive key insertions: nearby authored
+    // keys outside the interval must survive even within KEY_EPSILON.
+    mask.keys.sort_by(|a, b| {
+        (a.property as u8)
+            .cmp(&(b.property as u8))
+            .then_with(|| a.at.total_cmp(&b.at))
+    });
+}
+
+/// Preserve an unedited part of one keyed segment. An overshooting curve can
+/// return to its starting value; split that loop before normalising its ease,
+/// since a single equal-valued key pair cannot describe the intervening motion.
+fn mask_curve_piece(
+    a: model::MaskKey,
+    b: model::MaskKey,
+    from: f64,
+    to: f64,
+    depth: u8,
+    out: &mut Vec<model::MaskKey>,
+) {
+    let curve: concat_core::animate::Ease = b.ease.into();
+    let lower = (from - a.at) / (b.at - a.at);
+    let upper = (to - a.at) / (b.at - a.at);
+    let ease = curve.subrange(lower, upper);
+    if ease.is_none() && a.value != b.value && depth < 8 {
+        let middle = (from + to) * 0.5;
+        mask_curve_piece(a, b, from, middle, depth + 1, out);
+        mask_curve_piece(a, b, middle, to, depth + 1, out);
+        return;
+    }
+    let ease = ease.unwrap_or(concat_core::animate::Ease::LINEAR);
+    out.push(model::MaskKey {
+        property: a.property,
+        at: to,
+        value: a.value + (b.value - a.value) * curve.apply(upper),
+        ease: model::KeyEase([ease.x1, ease.y1, ease.x2, ease.y2]),
+    });
+}
+
 fn align_of(align: TextAlign) -> TextAlignment {
     match align {
         TextAlign::Left => TextAlignment::Left,
@@ -4505,26 +4617,7 @@ impl Studio {
                         else {
                             return;
                         };
-                        mask.keys.retain(|key| {
-                            !matches!(
-                                key.property,
-                                model::MaskProperty::PositionX | model::MaskProperty::PositionY
-                            )
-                        });
-                        for (at, x, y) in points {
-                            mask.set_key(
-                                model::MaskProperty::PositionX,
-                                at,
-                                x,
-                                model::KeyEase::LINEAR,
-                            );
-                            mask.set_key(
-                                model::MaskProperty::PositionY,
-                                at,
-                                y,
-                                model::KeyEase::LINEAR,
-                            );
-                        }
+                        apply_mask_tracking(&mut mask, &points);
                         studio.apply(Command::UpdateClipMask { clip_id, mask });
                     }
                     Err(error) => studio.notify(&tf("Mask tracking: {0}", &[&error]), true),
@@ -5147,6 +5240,9 @@ impl Studio {
                     log::warn!("{error}");
                 }
                 self.pause();
+                self.mask_track_generation = self.mask_track_generation.wrapping_add(1);
+                self.mask_track_progress = None;
+                self.mask_drawing = false;
                 self.session = Some(session);
                 self.echo = None;
                 self.dirty = false;
@@ -5232,6 +5328,9 @@ impl Studio {
             }
         }
         self.autosave.stop();
+        self.mask_track_generation = self.mask_track_generation.wrapping_add(1);
+        self.mask_track_progress = None;
+        self.mask_drawing = false;
         self.session = None;
         self.echo = None;
         self.dirty = false;
@@ -7037,8 +7136,113 @@ impl Studio {
 #[cfg(test)]
 mod tests {
     use super::{Footprint, Studio};
+    use concat_project::model::{ClipMask, KeyEase, MaskProperty, MaskShape};
 
     const FRAME: (u32, u32) = (1920, 1080);
+
+    #[test]
+    fn tracking_keeps_keys_outside_the_tracked_interval_and_other_properties() {
+        for points in [
+            vec![(0.5, 0.1, 0.2), (1.0, 0.3, 0.4)],
+            vec![(0.0, 0.1, 0.2), (0.5, 0.3, 0.4)],
+        ] {
+            let mut mask = ClipMask::new("track".to_owned(), MaskShape::Circle);
+            for at in [0.0, 0.25, 0.75, 1.0] {
+                mask.set_key(MaskProperty::PositionX, at, -0.8, KeyEase::LINEAR);
+                mask.set_key(MaskProperty::PositionY, at, -0.6, KeyEase::LINEAR);
+                mask.set_key(MaskProperty::Rotation, at, 42.0, KeyEase::LINEAR);
+            }
+            super::apply_mask_tracking(&mut mask, &points);
+            let untouched = if points[0].0 == 0.5 { 0.25 } else { 0.75 };
+            assert_eq!(mask.value_at(MaskProperty::PositionX, untouched), -0.8);
+            assert_eq!(mask.value_at(MaskProperty::PositionY, untouched), -0.6);
+            assert_eq!(mask.keys_on(MaskProperty::Rotation).count(), 4);
+            for (at, x, y) in points {
+                assert!((mask.value_at(MaskProperty::PositionX, at) - x).abs() < 1e-9);
+                assert!((mask.value_at(MaskProperty::PositionY, at) - y).abs() < 1e-9);
+            }
+        }
+    }
+
+    #[test]
+    fn tracking_preserves_eased_motion_between_untracked_keys() {
+        for ease in [
+            KeyEase::IN_OUT,
+            KeyEase([1.0 / 3.0, -1.0 / 3.0, 2.0 / 3.0, 0.0]),
+        ] {
+            for boundary_key in [false, true] {
+                for forward in [false, true] {
+                    let mut mask = ClipMask::new("track".to_owned(), MaskShape::Circle);
+                    for property in [MaskProperty::PositionX, MaskProperty::PositionY] {
+                        mask.set_key(property, 0.0, 0.0, KeyEase::LINEAR);
+                        mask.set_key(property, 1.0, 1.0, ease);
+                        if boundary_key {
+                            mask.set_key(property, 0.5, 0.3, ease);
+                        }
+                    }
+                    let original = mask.clone();
+                    let at = 0.5;
+                    let value = original.value_at(MaskProperty::PositionX, at);
+                    let points = if forward {
+                        vec![(at, value, value), (1.0, 0.8, 0.7)]
+                    } else {
+                        vec![(0.0, 0.8, 0.7), (at, value, value)]
+                    };
+                    super::apply_mask_tracking(&mut mask, &points);
+                    for step in 0..=100 {
+                        let fraction = f64::from(step) / 200.0;
+                        let time = if forward { fraction } else { 0.5 + fraction };
+                        for property in [MaskProperty::PositionX, MaskProperty::PositionY] {
+                            let actual = mask.value_at(property, time);
+                            let expected = original.value_at(property, time);
+                            assert!(
+                                (actual - expected).abs() < 1e-5,
+                                "{ease:?}, boundary={boundary_key}, forward={forward}, time={time}: {actual} != {expected}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn tracking_does_not_merge_nearby_keys_outside_its_interval() {
+        let mut mask = ClipMask::new("track".to_owned(), MaskShape::Circle);
+        mask.set_key(MaskProperty::PositionX, 0.499, 0.3, KeyEase::LINEAR);
+        mask.set_key(MaskProperty::PositionX, 0.8, 0.8, KeyEase::IN_OUT);
+        let original = mask.clone();
+        let value = mask.value_at(MaskProperty::PositionX, 0.5);
+        super::apply_mask_tracking(&mut mask, &[(0.5, value, 0.0), (1.0, 0.6, 0.0)]);
+        assert!(
+            mask.keys_on(MaskProperty::PositionX)
+                .any(|key| key.at == 0.499)
+        );
+        assert!(
+            (mask.value_at(MaskProperty::PositionX, 0.4995)
+                - original.value_at(MaskProperty::PositionX, 0.4995))
+            .abs()
+                < 1e-5
+        );
+    }
+
+    #[test]
+    fn tracking_no_frames_preserves_existing_keys_and_unkeyed_values() {
+        for keyed in [false, true] {
+            let mut mask = ClipMask::new("track".to_owned(), MaskShape::Circle);
+            mask.position_x = 0.3;
+            if keyed {
+                mask.set_key(MaskProperty::PositionX, 0.0, 0.0, KeyEase::LINEAR);
+                mask.set_key(MaskProperty::PositionX, 1.0, 1.0, KeyEase::IN_OUT);
+            }
+            let original = mask.clone();
+            for at in [0.0, 0.5, 1.0] {
+                let x = mask.value_at(MaskProperty::PositionX, at);
+                super::apply_mask_tracking(&mut mask, &[(at, x, 0.0)]);
+                assert_eq!(mask, original);
+            }
+        }
+    }
 
     /// A quarter turn swaps the bounds' pixel extents, which in fractions
     /// of a 16:9 frame is not a swap of the numbers.
