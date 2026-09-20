@@ -4,7 +4,7 @@
     scripts/models.py --check                 # the table against the engine
     scripts/models.py mirror --out dir        # fill a mirror from upstream
     scripts/models.py release-manifest \\
-        --version 0.2.1 --tag v0.2.1 \\
+        --version 0.2.1 --tag v0.2.1 --repository jub0t/Concat \\
         --bundles dir --out manifest.json     # what a release describes
 
 Concat fetches its cutout networks, its Kokoro voice bank and its whisper
@@ -72,8 +72,39 @@ def hf_mirror(url: str) -> str | None:
     return None
 
 
-def asset_url(release: str, file: str) -> str:
-    return f"https://github.com/{REPO}/releases/download/{release}/{file}"
+def repository_name(value: str) -> str:
+    """A GitHub owner/repository pair, never a host, URL or relative path."""
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9_.-]+", value):
+        raise argparse.ArgumentTypeError("repository must be a GitHub owner/name pair")
+    if value.split("/", 1)[1] in (".", ".."):
+        raise argparse.ArgumentTypeError("repository must name a repository")
+    return value
+
+
+def asset_url(release: str, file: str, repository: str = REPO) -> str:
+    return f"https://github.com/{repository}/releases/download/{release}/{file}"
+
+
+def validate_release_tag(version: str, tag: str) -> None:
+    """Reject release tags the Rust SemVer updater cannot read or match."""
+    pattern = (
+        r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)"
+        r"(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?"
+        r"(?:\+([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?"
+    )
+    for value in (version, tag.removeprefix("v")):
+        match = re.fullmatch(pattern, value)
+        if match is None:
+            raise ValueError(f"{value!r} is not a semantic version")
+        # Rust's semver crate stores major/minor/patch as u64, even though
+        # the abstract specification does not bound their size.
+        if any(int(part) > 2**64 - 1 for part in match.group(1, 2, 3)):
+            raise ValueError(f"{value!r} exceeds the updater's version range")
+        for identifier in (match.group(4) or "").split("."):
+            if identifier.isdigit() and len(identifier) > 1 and identifier[0] == "0":
+                raise ValueError(f"{value!r} has a numeric prerelease identifier with a leading zero")
+    if tag != f"v{version}" and not tag.startswith(f"v{version}-"):
+        raise ValueError(f"tag {tag!r} does not match workspace version {version!r}")
 
 
 def engine_id(model: dict) -> str:
@@ -281,7 +312,13 @@ def mirror(out: pathlib.Path, only: list[str]) -> int:
 # ── release manifest ─────────────────────────────────────────────────────
 
 
-def release_manifest(version: str, tag: str, bundles: pathlib.Path | None) -> dict:
+def release_manifest(
+    version: str, tag: str, bundles: pathlib.Path | None, repository: str = REPO
+) -> dict:
+    # App releases belong to the repository that built them. Model weights
+    # remain on their configured upstream mirror even when the app is a fork.
+    validate_release_tag(version, tag)
+    repository = repository_name(repository)
     data = table()
     release = data["release"]
 
@@ -292,7 +329,7 @@ def release_manifest(version: str, tag: str, bundles: pathlib.Path | None) -> di
         file = stem.format(v=version)
         entry = {
             "file": file,
-            "url": asset_url(tag, file),
+            "url": asset_url(tag, file, repository),
         }
         if bundles is not None:
             path = bundles / file
@@ -335,6 +372,7 @@ def release_manifest(version: str, tag: str, bundles: pathlib.Path | None) -> di
         "product": "Concat",
         "version": version,
         "tag": tag,
+        "repository": repository,
         "models_release": release,
         "binaries": binaries,
         "models": models,
@@ -350,17 +388,32 @@ def main() -> int:
     fill.add_argument("--out", type=pathlib.Path, required=True)
     fill.add_argument("--only", action="append", default=[], help="a family or an id; repeatable")
 
+    validate = sub.add_parser("validate-release", help="check the release tag and workspace version")
+    validate.add_argument("--version", required=True)
+    validate.add_argument("--tag", required=True)
+
     emit = sub.add_parser("release-manifest", help="the manifest.json a release carries")
     emit.add_argument("--version", required=True)
     emit.add_argument("--tag", required=True)
+    emit.add_argument(
+        "--repository", type=repository_name, default=REPO,
+        help="GitHub owner/repository publishing the app (model mirror is unchanged)",
+    )
     emit.add_argument("--bundles", type=pathlib.Path)
     emit.add_argument("--out", type=pathlib.Path)
 
     args = parser.parse_args()
     if args.command == "mirror":
         return mirror(args.out, args.only)
+    if args.command in ("validate-release", "release-manifest"):
+        try:
+            validate_release_tag(args.version, args.tag)
+        except ValueError as error:
+            parser.error(str(error))
+    if args.command == "validate-release":
+        return 0
     if args.command == "release-manifest":
-        manifest = release_manifest(args.version, args.tag, args.bundles)
+        manifest = release_manifest(args.version, args.tag, args.bundles, args.repository)
         text = json.dumps(manifest, indent=2) + "\n"
         if args.out:
             args.out.write_text(text, encoding="utf-8")

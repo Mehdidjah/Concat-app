@@ -33,6 +33,17 @@ name: Build app
 # `fail-fast` is off for the same reason.
 on:
   workflow_call:
+    inputs:
+      ref:
+        description: Exact source commit to build; empty uses the calling ref
+        type: string
+        required: false
+        default: ""
+      release_tag:
+        description: Published release tag, including any prerelease suffix
+        type: string
+        required: false
+        default: ""
     secrets:
       APPLE_CERTIFICATE_P12:
         description: Base64 of a Developer ID Application .p12
@@ -52,6 +63,8 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  CONCAT_RELEASE_REPOSITORY: ${{ github.repository }}
+  CONCAT_RELEASE_VERSION: ${{ inputs.release_tag }}
   # BtbN's autobuilds: GPL (x264 in), shared, FFmpeg 8.1, one per arch.
   FFMPEG_RELEASE: https://github.com/BtbN/FFmpeg-Builds/releases/download/latest
   FFMPEG_VERSION: 8.1
@@ -139,6 +152,8 @@ jobs:
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref || github.sha }}
       - uses: dtolnay/rust-toolchain@stable
 
       - name: Read the version

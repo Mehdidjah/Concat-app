@@ -27,6 +27,17 @@ name: Build for phones
 # phone (AltStore, Sideloadly, Xcode's Devices window all do this).
 on:
   workflow_call:
+    inputs:
+      ref:
+        description: Exact source commit to build; empty uses the calling ref
+        type: string
+        required: false
+        default: ""
+      release_tag:
+        description: Published release tag; requires the persistent Android signing key
+        type: string
+        required: false
+        default: ""
     secrets:
       ANDROID_KEYSTORE:
         description: Base64 of the release keystore
@@ -40,11 +51,13 @@ on:
 # a group with a pull request's run. A tag's release is never cancelled;
 # everything else is superseded by the next push.
 concurrency:
-  group: mobile-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+  group: mobile-${{ github.workflow }}-${{ inputs.release_tag || github.ref }}
+  cancel-in-progress: ${{ inputs.release_tag == '' && !startsWith(github.ref, 'refs/tags/') }}
 
 env:
   CARGO_TERM_COLOR: always
+  CONCAT_RELEASE_REPOSITORY: ${{ github.repository }}
+  CONCAT_RELEASE_VERSION: ${{ inputs.release_tag }}
   # ggml compiles to the portable baseline for the architecture, NEON on
   # ARM, rather than to whatever the build machine has.
   GGML_NATIVE: "OFF"
@@ -56,6 +69,18 @@ jobs:
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+      - name: Validate release signing configuration
+        if: inputs.release_tag != ''
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+        run: |
+          if [ -z "$KEYSTORE_B64" ] || [ -z "$KEYSTORE_PASSWORD" ]; then
+            echo "Published Android updates require persistent ANDROID_KEYSTORE and ANDROID_KEYSTORE_PASSWORD secrets. See UPDATING.md." >&2
+            exit 1
+          fi
       - name: Read the version
         id: version
         run: |
@@ -107,7 +132,7 @@ jobs:
           key: aarch64-linux-android
 
       # A release APK has to be signed. With the repository's key it is
-      # signed with that, and installs over the store's build; without one
+      # signed with that, and can replace APKs signed by that same key; without one
       # it is signed with a key made for the run, which installs on a phone
       # as any sideloaded app does.
       - name: Signing key
@@ -171,6 +196,8 @@ jobs:
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref || github.sha }}
       - name: Read the version
         id: version
         run: |

@@ -3,15 +3,15 @@ name: Release
 # Pushing a tag that starts with v (v0.3.0, v0.3.0-alpha.1, ...) builds the
 # app for every platform and architecture, desktops and phones, and
 # publishes a GitHub release under that tag with one bundle per target and
-# a checksum file. A tag
-# containing a hyphen is a pre-release. The tag must be the workspace's
+# a checksum file. A tag with a SemVer prerelease suffix is a pre-release.
+# The tag must be the workspace's
 # version, alone or with a pre-release suffix: a release whose files say
 # one number and whose tag says another is a release nobody can reason
 # about.
 #
 # The bundles are self-contained: the macOS .dmg carries its FFmpeg dylibs
-# and is notarised when the signing secrets are set; the Linux tarball and
-# the Windows zip carry the FFmpeg runtime libraries beside the binary; the
+# and is notarised when the signing secrets are set; the Linux packages and
+# the Windows installers carry the FFmpeg runtime libraries beside the binary; the
 # Android .apk is signed with the repository's key, and the iOS .ipa is
 # signed by the tester on the way onto the phone.
 on:
@@ -24,7 +24,7 @@ on:
         required: true
 
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-${{ inputs.tag || github.ref_name }}
   cancel-in-progress: false
 
 jobs:
@@ -34,36 +34,68 @@ jobs:
     outputs:
       tag: ${{ steps.tag.outputs.tag }}
       version: ${{ steps.tag.outputs.version }}
+      sha: ${{ steps.tag.outputs.sha }}
+      prerelease: ${{ steps.tag.outputs.prerelease }}
     steps:
       - uses: actions/checkout@v7
         with:
           ref: ${{ inputs.tag || github.ref }}
+          fetch-depth: 0
       - id: tag
+        env:
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
         run: |
-          tag="${{ inputs.tag || github.ref_name }}"
+          set -euo pipefail
+          tag="$RELEASE_TAG"
           version=$(sed -n 's/^version = "\(.*\)"/\1/p' src/Cargo.toml | head -1)
           # The tag is the version, or the version with a pre-release
           # suffix: v0.2.1 and v0.2.1-alpha.22 both belong to 0.2.1.
-          case "$tag" in
-            "v$version" | "v$version-"*) ;;
-            *)
-              echo "tag $tag does not match src/Cargo.toml version $version" >&2
-              exit 1
-              ;;
-          esac
+          # Also validate SemVer itself (including numeric prerelease
+          # identifiers): the updater cannot offer an unparsable tag.
+          python3 scripts/models.py validate-release --version "$version" --tag "$tag"
+          # Resolve once: a manually dispatched release builds this tag's
+          # commit, never the branch the workflow was dispatched from.
+          sha=$(git rev-parse --verify "refs/tags/${tag}^{commit}")
+          test "$sha" = "$(git rev-parse HEAD)"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          # A hyphen in build metadata is not a prerelease suffix.
+          base=${tag%%+*}
+          if [[ "$base" == *-* ]]; then
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+          fi
           # The bundles are named for the version, not the tag: v0.2.1 and
           # v0.2.1-alpha.22 both produce Concat-0.2.1-* files.
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
+      # A throwaway key is fine for a PR's APK, but publishing one would
+      # leave every existing Android installation unable to upgrade.
+      - name: Require the Android release signing key
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+        run: |
+          if [ -z "$KEYSTORE_B64" ] || [ -z "$KEYSTORE_PASSWORD" ]; then
+            echo "Published Android updates require persistent ANDROID_KEYSTORE and ANDROID_KEYSTORE_PASSWORD secrets. See UPDATING.md." >&2
+            exit 1
+          fi
+
   build:
     needs: [check]
     uses: ./.github/workflows/build-app.yml
+    with:
+      ref: ${{ needs.check.outputs.sha }}
+      release_tag: ${{ needs.check.outputs.tag }}
     secrets: inherit
 
   phones:
     needs: [check]
     uses: ./.github/workflows/mobile.yml
+    with:
+      ref: ${{ needs.check.outputs.sha }}
+      release_tag: ${{ needs.check.outputs.tag }}
     secrets: inherit
 
   publish:
@@ -82,20 +114,34 @@ jobs:
       # history, and the manifest out of its model table.
       - uses: actions/checkout@v7
         with:
-          ref: ${{ needs.check.outputs.tag }}
+          ref: ${{ needs.check.outputs.sha }}
           fetch-depth: 0
           path: source
+
+      - name: Verify the release tag has not moved
+        working-directory: source
+        env:
+          RELEASE_TAG: ${{ needs.check.outputs.tag }}
+          RELEASE_SHA: ${{ needs.check.outputs.sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse --verify "refs/tags/${RELEASE_TAG}^{commit}")" = "$RELEASE_SHA"
 
       # One file that says where every other one is: a row per bundle with
       # its size and digest, and a row per model with the mirror it is
       # fetched from. An updater or a package script reads this instead of
       # guessing at asset names. See scripts/models.py.
       - name: Write the manifest
+        env:
+          RELEASE_REPOSITORY: ${{ github.repository }}
+          RELEASE_VERSION: ${{ needs.check.outputs.version }}
+          RELEASE_TAG: ${{ needs.check.outputs.tag }}
         run: |
           set -euo pipefail
           python3 source/scripts/models.py release-manifest \
-            --version "${{ needs.check.outputs.version }}" \
-            --tag "${{ needs.check.outputs.tag }}" \
+            --version "$RELEASE_VERSION" \
+            --tag "$RELEASE_TAG" \
+            --repository "$RELEASE_REPOSITORY" \
             --bundles bundles \
             --out bundles/manifest.json
           cat bundles/manifest.json
@@ -110,10 +156,12 @@ jobs:
       # The notes are the commits since the previous tag; see the script.
       - name: Write the notes
         id: notes
+        env:
+          RELEASE_TAG: ${{ needs.check.outputs.tag }}
         run: |
           set -euo pipefail
           cd source
-          tag="${{ needs.check.outputs.tag }}"
+          tag="$RELEASE_TAG"
           previous=$(git describe --tags --abbrev=0 --match 'v*' "$tag^" 2>/dev/null || git rev-list --max-parents=0 HEAD | tail -1)
           .github/release-notes.sh "$previous" "$tag" "Concat ${tag#v}" > "$RUNNER_TEMP/notes.md"
           cat "$RUNNER_TEMP/notes.md"
@@ -122,7 +170,7 @@ jobs:
         with:
           tag_name: ${{ needs.check.outputs.tag }}
           name: Concat ${{ needs.check.outputs.tag }}
-          prerelease: ${{ contains(needs.check.outputs.tag, '-') }}
+          prerelease: ${{ needs.check.outputs.prerelease == 'true' }}
           body_path: ${{ runner.temp }}/notes.md
           fail_on_unmatched_files: true
           files: bundles/*
