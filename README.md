@@ -49,7 +49,9 @@ It runs entirely on your machine, powered by a native Rust engine. Install it an
 
 Concat is currently in **Beta version (pre-release)**. **Download** the latest build from [Releases](https://github.com/jub0t/Concat/releases).
 
-**Reporting something:** every run writes a log, and Settings › About has the button that opens it along with the one that copies your system information. Attach both to an [issue](https://github.com/jub0t/Concat/issues) and the report arrives with everything it needs. The last ten runs are kept, so yesterday's is still there; nothing is ever sent anywhere on its own.
+**Reporting something:** every run writes a log, and Settings › About has the button that opens it along with the one that copies your system information. Attach both to an [issue](https://github.com/jub0t/Concat/issues) and the report arrives with everything it needs. The last ten runs are kept, so yesterday's is still there; logs, projects and media are never uploaded automatically.
+
+**Updates:** the app can check public GitHub release metadata and show a dialog when a newer release has an installer for your OS and architecture. Automatic checks are optional; Settings › About also offers a manual check. No installer runs silently. GitHub receives ordinary connection metadata, but no projects, media or usage telemetry. See [UPDATING.md](UPDATING.md) for installation steps, fork configuration, and the release/signing requirements for each platform.
 
 **Platform support:**
 
