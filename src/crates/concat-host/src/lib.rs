@@ -33,6 +33,7 @@ pub mod proxy;
 pub mod session;
 pub mod templates;
 pub mod titles;
+pub mod updates;
 
 pub use brush::{Brushes, RegionRequest};
 pub use cutout::{AnalyseRequest, Cutouts};

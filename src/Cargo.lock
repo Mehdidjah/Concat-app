@@ -1304,6 +1304,7 @@ dependencies = [
  "cpal",
  "log",
  "memmap2",
+ "semver",
  "serde",
  "serde_json",
  "sha2",
