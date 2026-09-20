@@ -967,7 +967,7 @@ impl GeometricMaskJob {
             {
                 let style = TitleStyle {
                     content: mask.text.clone(),
-                    font_family: "Inter".to_owned(),
+                    font_family: concat_text::BUNDLED_FAMILY.to_owned(),
                     font_size: 0.56,
                     font_weight: 700.0,
                     italic: false,
@@ -1870,6 +1870,41 @@ mod tests {
             source_start,
             ..ExportClip::blank(kind_of, start, duration, track)
         }
+    }
+
+    #[test]
+    fn text_mask_raster_uses_the_bundled_font() {
+        let mut masked = clip("video", 0, 0.0, 1.0, 0.0);
+        masked.masks_enabled = true;
+        let mut mask = ClipMask::new("text".to_owned(), MaskShape::Text);
+        mask.text = "Mask".to_owned();
+        masked.masks.push(mask);
+        let job = GeometricMaskJob::of(&masked).unwrap();
+        let actual = job.text_masks.get("text").expect("text mask rasterised");
+        assert!(!actual.is_blank());
+        let expected_style = TitleStyle {
+            content: "Mask".to_owned(),
+            font_family: concat_text::BUNDLED_FAMILY.to_owned(),
+            font_size: 0.56,
+            font_weight: 700.0,
+            italic: false,
+            color: "#ffffffff".to_owned(),
+            align: Align::Center,
+            stroke_width: 0.0,
+            stroke_color: "#00000000".to_owned(),
+            shadow: false,
+            background: String::new(),
+            line_height: 1.0,
+            tracking: 0.0,
+            max_width: 0.0,
+            max_height: 0.0,
+        };
+        let rendered = concat_text::render(&Fonts::new(), &expected_style, 512, 256).unwrap();
+        let expected = Mask::from_png_alpha(&rendered.png).unwrap();
+        assert_eq!(actual, &expected);
+        let output = job.cut(&Frame::black(512, 256), 0.0);
+        assert!(output.pixels().chunks_exact(4).any(|pixel| pixel[3] > 0));
+        assert_eq!(output.pixel(0, 0).unwrap()[3], 0);
     }
 
     #[test]

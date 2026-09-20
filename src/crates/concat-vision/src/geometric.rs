@@ -275,7 +275,16 @@ impl<'a> Evaluated<'a> {
 
     fn text_coverage(&self, x: f64, y: f64, text: Option<&Mask>) -> f64 {
         let Some(text) = text else { return 0.0 };
-        let sample = |x: f64, y: f64| text.sample((x + 0.5) as f32, (y + 0.5) as f32) as f64;
+        let sample = |x: f64, y: f64| {
+            // Segmentation masks clamp at their image edge, but glyphs have
+            // transparent space around their canvas. Apply this to every
+            // feather tap too, or edge-touching text smears beyond its bounds.
+            if !(-0.5..=0.5).contains(&x) || !(-0.5..=0.5).contains(&y) {
+                0.0
+            } else {
+                f64::from(text.sample((x + 0.5) as f32, (y + 0.5) as f32))
+            }
+        };
         if self.feather_pixels <= 0.75 {
             return sample(x, y);
         }
@@ -426,6 +435,33 @@ fn heart_points() -> &'static [(f64, f64)] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn text_edge_pixels_do_not_extend_beyond_the_canvas_or_feather_radius() {
+        let mut mask = ClipMask::new("text".to_owned(), MaskShape::Text);
+        mask.width = 1.0;
+        mask.height = 1.0;
+        // Edge-touching glyphs exercise all four sides without depending on
+        // a particular font's metrics or the platform's font installation.
+        let text = Mask::filled(4, 4, 255);
+        let evaluated = Evaluated::new(&mask, 0.0, 100.0, 100.0, Some(&text));
+        assert_eq!(evaluated.text_coverage(0.0, 0.0, Some(&text)), 1.0);
+        for point in [(0.51, 0.0), (-0.51, 0.0), (0.0, 0.51), (0.0, -0.51)] {
+            assert_eq!(evaluated.text_coverage(point.0, point.1, Some(&text)), 0.0);
+        }
+        mask.feather = 0.1;
+        let feathered = Evaluated::new(&mask, 0.0, 100.0, 100.0, Some(&text));
+        for point in [(0.55, 0.0), (-0.55, 0.0), (0.0, 0.55), (0.0, -0.55)] {
+            // Only the three taps pointing back into the canvas contribute.
+            assert!(
+                (feathered.text_coverage(point.0, point.1, Some(&text)) - 1.0 / 3.0).abs() < 1e-9
+            );
+        }
+        assert!((feathered.text_coverage(0.55, 0.55, Some(&text)) - 1.0 / 9.0).abs() < 1e-9);
+        for point in [(0.61, 0.0), (-0.61, 0.0), (0.0, 0.61), (0.0, -0.61)] {
+            assert_eq!(feathered.text_coverage(point.0, point.1, Some(&text)), 0.0);
+        }
+    }
 
     #[test]
     fn cached_outline_distances_track_the_analytic_shapes() {
